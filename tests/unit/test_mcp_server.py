@@ -1,5 +1,7 @@
 """Tests for MCP Server implementations."""
 
+from uuid import uuid4
+
 import pytest
 
 from mcp_servers.jobs.server import JobsMCPServer
@@ -101,13 +103,41 @@ async def test_save_favorite_job_tool():
         "save_favorite_job",
         job_id="job_123",
         notes="Interesting opportunity",
+        idempotency_key=str(uuid4()),
     )
 
     assert result["success"] is True
     assert "result" in result
+    assert result["replayed"] is False
     saved_job = result["result"]
     assert saved_job["job_id"] == "job_123"
     assert saved_job["notes"] == "Interesting opportunity"
+
+
+@pytest.mark.asyncio
+async def test_save_favorite_job_is_idempotent():
+    """save_favorite_job mutates, so a retry must not save twice."""
+    server = JobsMCPServer()
+    key = str(uuid4())
+
+    first = await server.execute("save_favorite_job", job_id="job_123", idempotency_key=key)
+    second = await server.execute("save_favorite_job", job_id="job_123", idempotency_key=key)
+
+    assert first["success"] is True
+    assert second["success"] is True
+    assert second["replayed"] is True
+    assert second["result"] == first["result"]
+
+
+@pytest.mark.asyncio
+async def test_save_favorite_job_requires_idempotency_key():
+    """The mutating tool refuses to run without an idempotency key."""
+    server = JobsMCPServer()
+
+    result = await server.execute("save_favorite_job", job_id="job_123")
+
+    assert result["success"] is False
+    assert "idempotency_key" in result["error"]
 
 
 def test_mcp_server_manager():

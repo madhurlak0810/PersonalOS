@@ -5,11 +5,15 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
+    CheckConstraint,
     Column,
     DateTime,
     Enum,
+    Index,
+    Integer,
     String,
     Text,
+    TypeDecorator,
     create_engine,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -22,12 +26,41 @@ class Base(DeclarativeBase):
     pass
 
 
+class GUID(TypeDecorator):
+    """Platform-independent UUID column.
+
+    Uses PostgreSQL's native UUID type where available and falls back to a
+    36-character string elsewhere, so the operation log can be exercised against
+    SQLite in tests without a Postgres instance.
+    """
+
+    impl = String(36)
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(PG_UUID(as_uuid=True))
+        return dialect.type_descriptor(String(36))
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == "postgresql":
+            return value if isinstance(value, UUID) else UUID(str(value))
+        return str(value)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        return value if isinstance(value, UUID) else UUID(str(value))
+
+
 class JobModel(Base):
     """ORM model for Job."""
 
     __tablename__ = "jobs"
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id = Column(GUID(), primary_key=True, default=uuid4)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     status = Column(Enum("pending", "running", "completed", "failed", "cancelled", name="job_status"))
@@ -71,10 +104,10 @@ class EventModel(Base):
 
     __tablename__ = "events"
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id = Column(GUID(), primary_key=True, default=uuid4)
     event_type = Column(String(50), nullable=False)
-    job_id = Column(PG_UUID(as_uuid=True), nullable=False)
-    agent_id = Column(PG_UUID(as_uuid=True), nullable=True)
+    job_id = Column(GUID(), nullable=False)
+    agent_id = Column(GUID(), nullable=True)
     data = Column(JSON, nullable=False, default={})
     timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -90,14 +123,62 @@ class EventModel(Base):
         }
 
 
+class OperationModel(Base):
+    """ORM model for the mutating-operation log.
+
+    One row per idempotency key. The unique constraint on `idempotency_key` is
+    the dedup primitive: concurrent retries race to insert, the loser reads the
+    winner's row instead of repeating the side effect.
+    """
+
+    __tablename__ = "operations"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    idempotency_key = Column(String(255), nullable=False, unique=True)
+    operation = Column(String(255), nullable=False)
+    request_fingerprint = Column(String(64), nullable=False)
+    status = Column(
+        Enum("in_progress", "completed", "failed", name="operation_status"),
+        nullable=False,
+        default="in_progress",
+    )
+    result = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    attempts = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("attempts >= 1", name="ck_operations_attempts_positive"),
+        Index("ix_operations_operation", "operation"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "idempotency_key": self.idempotency_key,
+            "operation": self.operation,
+            "request_fingerprint": self.request_fingerprint,
+            "status": self.status,
+            "result": self.result,
+            "error": self.error,
+            "attempts": self.attempts,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
 class AgentStateModel(Base):
     """ORM model for AgentState."""
 
     __tablename__ = "agent_states"
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    agent_id = Column(PG_UUID(as_uuid=True), nullable=False)
-    job_id = Column(PG_UUID(as_uuid=True), nullable=False)
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    agent_id = Column(GUID(), nullable=False)
+    job_id = Column(GUID(), nullable=False)
     current_step = Column(String(255), nullable=False)
     step_data = Column(JSON, nullable=False, default={})
     history = Column(JSON, nullable=False, default=[])
