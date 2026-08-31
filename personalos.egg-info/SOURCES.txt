@@ -1,0 +1,12 @@
+README.md
+pyproject.toml
+apps/__init__.py
+mcp_servers/__init__.py
+personalos/__init__.py
+personalos/cli.py
+personalos/config.py
+personalos.egg-info/PKG-INFO
+personalos.egg-info/SOURCES.txt
+personalos.egg-info/dependency_links.txt
+personalos.egg-info/requires.txt
+personalos.egg-info/top_level.txt

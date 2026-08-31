@@ -1,0 +1,107 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "personalos"
+version = "0.1.0"
+description = "PersonalOS: A local-first agentic assistant"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "PersonalOS Contributors"}
+]
+
+dependencies = [
+    # Core dependencies
+    "pydantic>=2.0,<3.0",
+    "pydantic-settings>=2.0,<3.0",
+    "python-dotenv>=1.0",
+    
+    # Async/concurrency
+    "asyncio-contextmanager>=1.0",
+    
+    # Database
+    "sqlalchemy>=2.0,<3.0",
+    "psycopg2-binary>=2.9",
+    "alembic>=1.12",
+    
+    # API/Web
+    "fastapi>=0.104",
+    "uvicorn>=0.24",
+    "httpx>=0.25",
+    
+    # Job processing
+    "celery>=5.3",
+    "redis>=5.0",
+    
+    # Graph/workflow
+    "langgraph>=0.0.1",
+    "langchain>=0.1",
+    
+    # Observability
+    "python-json-logger>=2.0",
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-jaeger>=1.20",
+    
+    # MCP
+    "mcp>=0.1",
+    
+    # Utilities
+    "python-dateutil>=2.8",
+    "pytz>=2023.3",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.1",
+    "black>=23.10",
+    "ruff>=0.1",
+    "mypy>=1.6",
+    "pre-commit>=3.5",
+]
+
+test = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.1",
+    "faker>=20.0",
+]
+
+[tool.setuptools]
+packages = ["personalos", "apps", "mcp_servers"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "C",      # flake8-comprehensions
+    "B",      # flake8-bugbear
+    "UP",     # pyupgrade
+]
+ignore = ["E501"]  # line too long (handled by black)
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+strict_optional = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+asyncio_mode = "auto"

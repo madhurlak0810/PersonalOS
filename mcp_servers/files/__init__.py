@@ -1,0 +1,1 @@
+"""Files MCP Server package."""
