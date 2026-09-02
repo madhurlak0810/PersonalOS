@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from personalos.mcp.base import MCPServer, ToolSchema
 from personalos.mcp.cache import get_cache
+from personalos.persistence.idempotency import InMemoryOperationStore, OperationStore
 
 logger = logging.getLogger(__name__)
 
@@ -12,9 +13,18 @@ logger = logging.getLogger(__name__)
 class JobsMCPServer(MCPServer):
     """MCP Server for job search operations."""
 
-    def __init__(self):
-        """Initialize Jobs MCP Server."""
-        super().__init__("jobs", "Job search and filtering capabilities")
+    def __init__(self, operation_store: Optional[OperationStore] = None):
+        """Initialize Jobs MCP Server.
+
+        Defaults to a process-local operation store so mutating tools are
+        deduplicated out of the box; pass a SqlOperationStore to make that
+        dedup durable across restarts and workers.
+        """
+        super().__init__(
+            "jobs",
+            "Job search and filtering capabilities",
+            operation_store=operation_store or InMemoryOperationStore(),
+        )
         self.cache = get_cache()
         self.initialize()
 
@@ -127,6 +137,7 @@ class JobsMCPServer(MCPServer):
                 },
             },
             required=["job_id"],
+            mutating=True,
         )
         self.register_tool(favorite_schema, self._save_favorite_job)
 
