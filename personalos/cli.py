@@ -1,6 +1,5 @@
 """CLI entry points for PersonalOS."""
 
-import asyncio
 import logging
 
 import click

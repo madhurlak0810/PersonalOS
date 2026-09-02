@@ -5,7 +5,6 @@ from uuid import uuid4
 import pytest
 
 from mcp_servers.jobs.server import JobsMCPServer
-from personalos.mcp.base import ToolSchema
 from personalos.mcp.manager import MCPServerManager
 
 

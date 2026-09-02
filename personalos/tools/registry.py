@@ -1,7 +1,7 @@
 """Tool registry for agent tools."""
 
 import logging
-from typing import Callable, Dict, Optional
+from collections.abc import Callable
 
 from personalos.domain.models import Tool
 
@@ -13,8 +13,8 @@ class ToolRegistry:
 
     def __init__(self):
         """Initialize tool registry."""
-        self._tools: Dict[str, Tool] = {}
-        self._handlers: Dict[str, Callable] = {}
+        self._tools: dict[str, Tool] = {}
+        self._handlers: dict[str, Callable] = {}
 
     def register(self, tool: Tool, handler: Callable):
         """Register a tool."""
@@ -22,11 +22,11 @@ class ToolRegistry:
         self._handlers[tool.name] = handler
         logger.info(f"Registered tool: {tool.name}")
 
-    def get_tool(self, name: str) -> Optional[Tool]:
+    def get_tool(self, name: str) -> Tool | None:
         """Get a tool by name."""
         return self._tools.get(name)
 
-    def get_handler(self, name: str) -> Optional[Callable]:
+    def get_handler(self, name: str) -> Callable | None:
         """Get a tool handler by name."""
         return self._handlers.get(name)
 

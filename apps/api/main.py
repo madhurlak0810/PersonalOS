@@ -6,8 +6,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from personalos.bootstrap import initialize_mcp_servers
 from personalos.config import settings
-from personalos.mcp.manager import initialize_mcp_servers
 from personalos.persistence import init_db
 
 logger = logging.getLogger(__name__)

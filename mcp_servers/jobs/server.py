@@ -1,7 +1,7 @@
 """Jobs MCP Server - Provides job search capabilities."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from personalos.mcp.base import MCPServer, ToolSchema
 from personalos.mcp.cache import get_cache
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class JobsMCPServer(MCPServer):
     """MCP Server for job search operations."""
 
-    def __init__(self, operation_store: Optional[OperationStore] = None):
+    def __init__(self, operation_store: OperationStore | None = None):
         """Initialize Jobs MCP Server.
 
         Defaults to a process-local operation store so mutating tools are
@@ -143,11 +143,11 @@ class JobsMCPServer(MCPServer):
 
     async def _search_jobs(
         self,
-        keywords: List[str],
-        locations: List[str],
-        job_type: Optional[str] = None,
+        keywords: list[str],
+        locations: list[str],
+        job_type: str | None = None,
         limit: int = 50,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Search for job listings."""
         logger.info(f"Searching jobs: keywords={keywords}, locations={locations}")
 
@@ -184,8 +184,8 @@ class JobsMCPServer(MCPServer):
         }
 
     async def _scrape_job_details(
-        self, job_id: str, job_url: Optional[str] = None
-    ) -> Dict[str, Any]:
+        self, job_id: str, job_url: str | None = None
+    ) -> dict[str, Any]:
         """Scrape detailed information from a job posting."""
         logger.info(f"Scraping job details: job_id={job_id}, url={job_url}")
 
@@ -202,19 +202,19 @@ class JobsMCPServer(MCPServer):
             "url": job_url or "https://example.com/jobs/job_123",
             "description": """
             We are looking for an experienced Python Developer to join our team.
-            
+
             Responsibilities:
             - Develop and maintain Python applications
             - Collaborate with team members
             - Write clean, maintainable code
             - Participate in code reviews
-            
+
             Requirements:
             - 5+ years of Python experience
             - Experience with FastAPI or Django
             - Strong SQL knowledge
             - Experience with Docker and Kubernetes
-            
+
             Nice to have:
             - Machine learning experience
             - GraphQL knowledge
@@ -240,12 +240,12 @@ class JobsMCPServer(MCPServer):
 
     async def _filter_jobs(
         self,
-        jobs: List[Dict[str, Any]],
-        salary_min: Optional[int] = None,
-        salary_max: Optional[int] = None,
-        experience_level: Optional[str] = None,
+        jobs: list[dict[str, Any]],
+        salary_min: int | None = None,
+        salary_max: int | None = None,
+        experience_level: str | None = None,
         remote_only: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Filter and rank job listings."""
         logger.info(f"Filtering {len(jobs)} jobs with criteria")
 
@@ -290,7 +290,7 @@ class JobsMCPServer(MCPServer):
             "jobs": filtered_ranked,
         }
 
-    async def _save_favorite_job(self, job_id: str, notes: Optional[str] = None) -> Dict[str, Any]:
+    async def _save_favorite_job(self, job_id: str, notes: str | None = None) -> dict[str, Any]:
         """Save a job to favorites."""
         logger.info(f"Saving job to favorites: job_id={job_id}")
 
@@ -304,7 +304,7 @@ class JobsMCPServer(MCPServer):
         }
 
 
-def _salary_in_range(salary_str: str, min_val: Optional[int], max_val: Optional[int]) -> bool:
+def _salary_in_range(salary_str: str, min_val: int | None, max_val: int | None) -> bool:
     """Check if salary string is within range (mock implementation)."""
     # In production, would parse salary properly
     # For now, simple heuristic
