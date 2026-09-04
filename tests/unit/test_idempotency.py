@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -546,7 +547,7 @@ async def test_read_only_tool_needs_no_key():
 
 def test_tool_call_request_rejects_blank_target():
     """ActionTarget requires non-blank server and tool names."""
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         ActionTarget(server="", tool="do_read")
 
 

@@ -3,7 +3,8 @@
 import inspect
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Type
+from collections.abc import Callable
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -44,10 +45,10 @@ class ToolSchema:
         self,
         name: str,
         description: str,
-        intent_type: Type[Intent],
-        parameters: Optional[Dict[str, Any]] = None,
-        required: List[str] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
+        intent_type: type[Intent],
+        parameters: dict[str, Any] | None = None,
+        required: list[str] = None,
+        response_schema: dict[str, Any] | None = None,
     ):
         self.name = name
         self.description = description
@@ -98,7 +99,7 @@ class MCPServer(ABC):
         self,
         name: str,
         description: str,
-        operation_store: Optional[OperationStore] = None,
+        operation_store: OperationStore | None = None,
     ):
         """Initialize MCP server.
 
@@ -109,8 +110,8 @@ class MCPServer(ABC):
         """
         self.name = name
         self.description = description
-        self._tools: Dict[str, ToolSchema] = {}
-        self._handlers: Dict[str, Callable] = {}
+        self._tools: dict[str, ToolSchema] = {}
+        self._handlers: dict[str, Callable] = {}
         self.operation_store = operation_store
         self._guard = IdempotencyGuard(operation_store) if operation_store else None
 
@@ -125,11 +126,11 @@ class MCPServer(ABC):
         self._handlers[schema.name] = handler
         logger.info(f"Registered tool '{schema.name}' on {self.name}")
 
-    def get_tools(self) -> List[Tool]:
+    def get_tools(self) -> list[Tool]:
         """Get all available tools."""
         return [tool.to_domain_tool(self.name) for tool in self._tools.values()]
 
-    def get_tool_schema(self, tool_name: str) -> Optional[ToolSchema]:
+    def get_tool_schema(self, tool_name: str) -> ToolSchema | None:
         """Get tool schema by name."""
         return self._tools.get(tool_name)
 
