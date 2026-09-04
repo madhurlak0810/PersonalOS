@@ -3,7 +3,12 @@
 import logging
 from typing import Dict, List, Optional
 
-from personalos.domain.models import Tool
+from personalos.domain.models import (
+    Tool,
+    ToolCallErrorCode,
+    ToolCallRequest,
+    ToolCallResult,
+)
 from personalos.mcp.base import MCPServer
 
 logger = logging.getLogger(__name__)
@@ -32,13 +37,17 @@ class MCPServerManager:
             tools.extend(server.get_tools())
         return tools
 
-    async def execute_tool(self, tool_name: str, server_name: str, **kwargs) -> dict:
-        """Execute a tool from a specific server."""
-        server = self.get_server(server_name)
+    async def execute_tool(self, request: ToolCallRequest) -> ToolCallResult:
+        """Execute a tool call against its target server."""
+        server = self.get_server(request.target.server)
         if not server:
-            return {"success": False, "error": f"Server '{server_name}' not found"}
+            return ToolCallResult.failed(
+                request.target,
+                ToolCallErrorCode.SERVER_NOT_FOUND,
+                f"Server '{request.target.server}' not found",
+            )
 
-        return await server.execute(tool_name, **kwargs)
+        return await server.execute(request)
 
     def list_servers(self) -> List[str]:
         """List all registered server names."""

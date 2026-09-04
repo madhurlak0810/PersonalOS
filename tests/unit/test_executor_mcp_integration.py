@@ -3,7 +3,7 @@
 import pytest
 from uuid import uuid4
 
-from personalos.domain.models import Job, JobStatus
+from personalos.domain.models import ActionTarget, Job, JobStatus, ToolCallRequest
 from personalos.executor import JobSearchExecutor
 from personalos.mcp.manager import MCPServerManager, get_mcp_manager
 from personalos.persistence.repositories import JobRepository
@@ -108,14 +108,14 @@ async def test_executor_mcp_search_step():
 
     # Test search tool directly
     search_result = await manager.execute_tool(
-        "search_jobs",
-        "jobs",
-        keywords=["Python"],
-        locations=["Remote"],
+        ToolCallRequest(
+            target=ActionTarget(server="jobs", tool="search_jobs"),
+            params={"keywords": ["Python"], "locations": ["Remote"]},
+        )
     )
 
-    assert search_result["success"] is True
-    assert search_result["result"]["total"] > 0
+    assert search_result.ok is True
+    assert search_result.result["total"] > 0
 
 
 @pytest.mark.asyncio
@@ -130,23 +130,22 @@ async def test_executor_mcp_filter_step():
 
     # Get some jobs first
     search_result = await manager.execute_tool(
-        "search_jobs",
-        "jobs",
-        keywords=["Python"],
-        locations=["Remote"],
+        ToolCallRequest(
+            target=ActionTarget(server="jobs", tool="search_jobs"),
+            params={"keywords": ["Python"], "locations": ["Remote"]},
+        )
     )
 
-    jobs = search_result["result"]["jobs"]
+    jobs = search_result.result["jobs"]
 
     # Filter them
     filter_result = await manager.execute_tool(
-        "filter_jobs",
-        "jobs",
-        jobs=jobs,
-        salary_min=100000,
-        salary_max=150000,
+        ToolCallRequest(
+            target=ActionTarget(server="jobs", tool="filter_jobs"),
+            params={"jobs": jobs, "salary_min": 100000, "salary_max": 150000},
+        )
     )
 
-    assert filter_result["success"] is True
-    filtered_jobs = filter_result["result"]["jobs"]
+    assert filter_result.ok is True
+    filtered_jobs = filter_result.result["jobs"]
     assert len(filtered_jobs) > 0

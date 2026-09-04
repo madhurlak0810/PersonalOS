@@ -4,7 +4,15 @@ import logging
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from personalos.domain.models import AgentState, Event, EventType, Job, JobStatus
+from personalos.domain.models import (
+    ActionTarget,
+    AgentState,
+    Event,
+    EventType,
+    Job,
+    JobStatus,
+    ToolCallRequest,
+)
 from personalos.mcp.manager import get_mcp_manager
 from personalos.persistence.repositories import JobRepository
 
@@ -44,18 +52,21 @@ class JobSearchExecutor:
             # Step 2: Search job listings using Jobs MCP Server
             logger.info("Step 2: Searching job listings via MCP...")
             search_result = await self.mcp_manager.execute_tool(
-                "search_jobs",
-                "jobs",
-                keywords=job.keywords,
-                locations=job.locations,
-                job_type=job.job_type,
-                limit=100,
+                ToolCallRequest(
+                    target=ActionTarget(server="jobs", tool="search_jobs"),
+                    params={
+                        "keywords": job.keywords,
+                        "locations": job.locations,
+                        "job_type": job.job_type,
+                        "limit": 100,
+                    },
+                )
             )
 
-            if not search_result.get("success"):
-                raise Exception(f"Search failed: {search_result.get('error')}")
+            if not search_result.ok:
+                raise Exception(f"Search failed: {search_result.error.message}")
 
-            search_results = search_result.get("result", {}).get("jobs", [])
+            search_results = (search_result.result or {}).get("jobs", [])
             state.history.append({"step": "search", "results_count": len(search_results)})
             state.current_step = "search"
             state.step_data = {"results_count": len(search_results)}
@@ -65,14 +76,17 @@ class JobSearchExecutor:
             detailed_results = []
             for search_job in search_results[:20]:  # Limit to top 20 to avoid rate limits
                 scrape_result = await self.mcp_manager.execute_tool(
-                    "scrape_job_details",
-                    "jobs",
-                    job_id=search_job.get("id", ""),
-                    job_url=search_job.get("url"),
+                    ToolCallRequest(
+                        target=ActionTarget(server="jobs", tool="scrape_job_details"),
+                        params={
+                            "job_id": search_job.get("id", ""),
+                            "job_url": search_job.get("url"),
+                        },
+                    )
                 )
 
-                if scrape_result.get("success"):
-                    detailed_results.append(scrape_result.get("result", {}))
+                if scrape_result.ok:
+                    detailed_results.append(scrape_result.result or {})
                 else:
                     # Fall back to search result if scraping fails
                     detailed_results.append(search_job)
@@ -83,19 +97,22 @@ class JobSearchExecutor:
             # Step 4: Filter and rank results
             logger.info("Step 4: Filtering and ranking results...")
             filter_result = await self.mcp_manager.execute_tool(
-                "filter_jobs",
-                "jobs",
-                jobs=detailed_results,
-                salary_min=job.salary_min,
-                salary_max=job.salary_max,
-                experience_level=None,
-                remote_only=False,
+                ToolCallRequest(
+                    target=ActionTarget(server="jobs", tool="filter_jobs"),
+                    params={
+                        "jobs": detailed_results,
+                        "salary_min": job.salary_min,
+                        "salary_max": job.salary_max,
+                        "experience_level": None,
+                        "remote_only": False,
+                    },
+                )
             )
 
-            if not filter_result.get("success"):
-                raise Exception(f"Filter failed: {filter_result.get('error')}")
+            if not filter_result.ok:
+                raise Exception(f"Filter failed: {filter_result.error.message}")
 
-            filtered_results = filter_result.get("result", {}).get("jobs", [])
+            filtered_results = (filter_result.result or {}).get("jobs", [])
             state.history.append({"step": "filter", "filtered_count": len(filtered_results)})
             state.current_step = "filter"
             state.step_data = {"filtered_count": len(filtered_results)}
