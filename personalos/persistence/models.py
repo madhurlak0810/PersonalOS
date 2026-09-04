@@ -14,10 +14,9 @@ from sqlalchemy import (
     String,
     Text,
     TypeDecorator,
-    create_engine,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import DeclarativeBase, Session
+from sqlalchemy.orm import DeclarativeBase
 
 
 class Base(DeclarativeBase):

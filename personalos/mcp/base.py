@@ -3,7 +3,7 @@
 import inspect
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from personalos.domain.models import (
     IDEMPOTENCY_KEY_MAX_LENGTH,
@@ -29,9 +29,9 @@ class ToolSchema:
         self,
         name: str,
         description: str,
-        parameters: Dict[str, Any],
-        required: List[str] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
+        parameters: dict[str, Any],
+        required: list[str] = None,
+        response_schema: dict[str, Any] | None = None,
         mutating: bool = False,
     ):
         self.name = name
@@ -80,7 +80,7 @@ class MCPServer(ABC):
         self,
         name: str,
         description: str,
-        operation_store: Optional[OperationStore] = None,
+        operation_store: OperationStore | None = None,
     ):
         """Initialize MCP server.
 
@@ -91,8 +91,8 @@ class MCPServer(ABC):
         """
         self.name = name
         self.description = description
-        self._tools: Dict[str, ToolSchema] = {}
-        self._handlers: Dict[str, callable] = {}
+        self._tools: dict[str, ToolSchema] = {}
+        self._handlers: dict[str, callable] = {}
         self.operation_store = operation_store
         self._guard = IdempotencyGuard(operation_store) if operation_store else None
 
@@ -107,15 +107,15 @@ class MCPServer(ABC):
         self._handlers[schema.name] = handler
         logger.info(f"Registered tool '{schema.name}' on {self.name}")
 
-    def get_tools(self) -> List[Tool]:
+    def get_tools(self) -> list[Tool]:
         """Get all available tools."""
         return [tool.to_domain_tool(self.name) for tool in self._tools.values()]
 
-    def get_tool_schema(self, tool_name: str) -> Optional[ToolSchema]:
+    def get_tool_schema(self, tool_name: str) -> ToolSchema | None:
         """Get tool schema by name."""
         return self._tools.get(tool_name)
 
-    async def execute(self, tool_name: str, **kwargs) -> Dict[str, Any]:
+    async def execute(self, tool_name: str, **kwargs) -> dict[str, Any]:
         """Execute a tool."""
         if tool_name not in self._handlers:
             return {"success": False, "error": f"Tool '{tool_name}' not found"}
@@ -153,8 +153,8 @@ class MCPServer(ABC):
         tool_name: str,
         schema: ToolSchema,
         handler: callable,
-        kwargs: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
         """Execute a mutating tool behind the idempotency guard."""
         if self._guard is None:
             return {

@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator
@@ -58,27 +58,27 @@ class Job(BaseModel):
 
     id: UUID = Field(default_factory=uuid4)
     title: str
-    description: Optional[str] = None
+    description: str | None = None
     status: JobStatus = JobStatus.PENDING
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
     # Job search specific
     keywords: list[str] = Field(default_factory=list)
     locations: list[str] = Field(default_factory=list)
-    salary_min: Optional[int] = None
-    salary_max: Optional[int] = None
-    job_type: Optional[str] = None  # full-time, part-time, contract, etc.
-    
+    salary_min: int | None = None
+    salary_max: int | None = None
+    job_type: str | None = None  # full-time, part-time, contract, etc.
+
     # Results
     results_count: int = 0
-    results: Dict[str, Any] = Field(default_factory=dict)
-    
+    results: dict[str, Any] = Field(default_factory=dict)
+
     # Metadata
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
     class Config:
         use_enum_values = True
 
@@ -89,11 +89,11 @@ class AgentState(BaseModel):
     agent_id: UUID
     job_id: UUID
     current_step: str
-    step_data: Dict[str, Any] = Field(default_factory=dict)
-    history: list[Dict[str, Any]] = Field(default_factory=list)
+    step_data: dict[str, Any] = Field(default_factory=dict)
+    history: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    
+
     class Config:
         use_enum_values = True
 
@@ -116,10 +116,10 @@ class Event(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     event_type: EventType
     job_id: UUID
-    agent_id: Optional[UUID] = None
+    agent_id: UUID | None = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
-    data: Dict[str, Any] = Field(default_factory=dict)
-    
+    data: dict[str, Any] = Field(default_factory=dict)
+
     class Config:
         use_enum_values = True
 
@@ -130,9 +130,9 @@ class Tool(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     name: str
     description: str
-    parameters: Dict[str, Any] = Field(default_factory=dict)
-    mcp_server: Optional[str] = None  # Which MCP server provides this tool
-    
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    mcp_server: str | None = None  # Which MCP server provides this tool
+
     class Config:
         use_enum_values = True
 
@@ -163,7 +163,7 @@ class MutatingIntent(BaseModel):
     def _check_idempotency_key(cls, value: str) -> str:
         return validate_idempotency_key(value)
 
-    def side_effect_params(self) -> Dict[str, Any]:
+    def side_effect_params(self) -> dict[str, Any]:
         """Parameters that define the side effect, excluding the idempotency key.
 
         Used to fingerprint the request so a key replayed with different
@@ -180,12 +180,12 @@ class OperationRecord(BaseModel):
     operation: str
     request_fingerprint: str
     status: OperationStatus = OperationStatus.IN_PROGRESS
-    result: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
     attempts: int = 1
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    completed_at: Optional[datetime] = None
+    completed_at: datetime | None = None
 
     @property
     def is_replayable(self) -> bool:
@@ -201,12 +201,12 @@ class AgentConfig(BaseModel):
 
     id: UUID = Field(default_factory=uuid4)
     name: str
-    description: Optional[str] = None
+    description: str | None = None
     available_tools: list[str] = Field(default_factory=list)  # Tool names
     model: str = "gpt-4"
     temperature: float = 0.7
     max_iterations: int = 10
     timeout_seconds: int = 300
-    
+
     class Config:
         use_enum_values = True

@@ -11,9 +11,10 @@ import inspect
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from datetime import datetime
 from threading import RLock
-from typing import Any, Callable, Dict, Optional
+from typing import Any
 from uuid import uuid4
 
 from personalos.domain.models import (
@@ -38,7 +39,7 @@ class OperationInProgress(IdempotencyError):
     """A concurrent attempt already owns this key and has not finished."""
 
 
-def fingerprint_request(operation: str, params: Dict[str, Any]) -> str:
+def fingerprint_request(operation: str, params: dict[str, Any]) -> str:
     """Fingerprint an operation and its parameters.
 
     Canonical JSON keeps the hash stable across key ordering. Values that JSON
@@ -57,7 +58,7 @@ class OperationStore(ABC):
     """Storage for operation records, keyed by idempotency key."""
 
     @abstractmethod
-    def get(self, idempotency_key: str) -> Optional[OperationRecord]:
+    def get(self, idempotency_key: str) -> OperationRecord | None:
         """Get the record for a key, or None."""
 
     @abstractmethod
@@ -86,7 +87,7 @@ class SqlOperationStore(OperationStore):
         """Initialize with a callable returning a SQLAlchemy Session."""
         self.session_factory = session_factory
 
-    def get(self, idempotency_key: str) -> Optional[OperationRecord]:
+    def get(self, idempotency_key: str) -> OperationRecord | None:
         """Get the record for a key, or None."""
         with self._repository() as repo:
             return repo.get_by_key(idempotency_key)
@@ -137,10 +138,10 @@ class InMemoryOperationStore(OperationStore):
 
     def __init__(self):
         """Initialize an empty store."""
-        self._records: Dict[str, OperationRecord] = {}
+        self._records: dict[str, OperationRecord] = {}
         self._lock = RLock()
 
-    def get(self, idempotency_key: str) -> Optional[OperationRecord]:
+    def get(self, idempotency_key: str) -> OperationRecord | None:
         """Get the record for a key, or None."""
         with self._lock:
             record = self._records.get(idempotency_key)
@@ -218,7 +219,7 @@ class IdempotencyGuard:
         self,
         operation: str,
         idempotency_key: str,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         handler: Callable[..., Any],
     ) -> tuple[Any, bool]:
         """Execute `handler(**params)` at most once for `idempotency_key`.

@@ -1,11 +1,8 @@
 """Test job search functionality."""
 
 import pytest
-from datetime import datetime
-from uuid import uuid4
 
 from personalos.domain.models import Job, JobStatus
-from personalos.persistence.repositories import JobRepository
 
 
 @pytest.fixture
