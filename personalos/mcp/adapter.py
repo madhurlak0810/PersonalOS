@@ -9,6 +9,7 @@ that has not been through policy.
 import logging
 from typing import Any
 
+from personalos.domain.models import ActionTarget, ToolCallRequest
 from personalos.mcp.manager import MCPServerManager
 from personalos.policy import ApprovedIntent, PolicyViolation
 
@@ -28,6 +29,11 @@ class MCPToolInvoker:
         The type check is deliberate belt-and-braces: the gateway already
         rejects unapproved input, but this adapter is reachable from wiring
         code, and an un-vetted call here would defeat the whole boundary.
+
+        The manager speaks a typed `ToolCallRequest`/`ToolCallResult` contract,
+        not loose kwargs; this method is the translation point between that
+        and the `{success, result, error, replayed}` payload shape the gateway
+        expects back.
         """
         if not isinstance(approved, ApprovedIntent):
             raise PolicyViolation(
@@ -35,11 +41,18 @@ class MCPToolInvoker:
                 f"{type(approved).__name__}"
             )
 
-        return await self.manager.execute_tool(
-            approved.tool,
-            approved.server,
-            **approved.arguments,
+        request = ToolCallRequest(
+            target=ActionTarget(server=approved.server, tool=approved.tool),
+            params=approved.arguments,
         )
+        result = await self.manager.execute_tool(request)
+
+        return {
+            "success": result.ok,
+            "result": result.result,
+            "error": result.error.message if result.error else None,
+            "replayed": bool(result.replayed),
+        }
 
 
 __all__ = ["MCPToolInvoker"]

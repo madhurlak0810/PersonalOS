@@ -3,11 +3,45 @@
 import logging
 from typing import Any
 
+from personalos.domain.models import Intent, MutatingIntent
 from personalos.mcp.base import MCPServer, ToolSchema
 from personalos.mcp.cache import get_cache
 from personalos.persistence.idempotency import InMemoryOperationStore, OperationStore
 
 logger = logging.getLogger(__name__)
+
+
+class SearchJobsIntent(Intent):
+    """Typed parameters for `search_jobs`."""
+
+    keywords: list[str]
+    locations: list[str]
+    job_type: str | None = None
+    limit: int = 50
+
+
+class ScrapeJobDetailsIntent(Intent):
+    """Typed parameters for `scrape_job_details`."""
+
+    job_id: str
+    job_url: str | None = None
+
+
+class FilterJobsIntent(Intent):
+    """Typed parameters for `filter_jobs`."""
+
+    jobs: list[dict[str, Any]]
+    salary_min: int | None = None
+    salary_max: int | None = None
+    experience_level: str | None = None
+    remote_only: bool = False
+
+
+class SaveFavoriteJobIntent(MutatingIntent):
+    """Typed parameters for the mutating `save_favorite_job`."""
+
+    job_id: str
+    notes: str | None = None
 
 
 class JobsMCPServer(MCPServer):
@@ -34,6 +68,7 @@ class JobsMCPServer(MCPServer):
         search_schema = ToolSchema(
             name="search_jobs",
             description="Search for job listings across multiple job boards",
+            intent_type=SearchJobsIntent,
             parameters={
                 "type": "object",
                 "properties": {
@@ -67,6 +102,7 @@ class JobsMCPServer(MCPServer):
         scrape_schema = ToolSchema(
             name="scrape_job_details",
             description="Scrape detailed information from a job posting",
+            intent_type=ScrapeJobDetailsIntent,
             parameters={
                 "type": "object",
                 "properties": {
@@ -88,6 +124,7 @@ class JobsMCPServer(MCPServer):
         filter_schema = ToolSchema(
             name="filter_jobs",
             description="Filter and rank job listings based on criteria",
+            intent_type=FilterJobsIntent,
             parameters={
                 "type": "object",
                 "properties": {
@@ -123,6 +160,7 @@ class JobsMCPServer(MCPServer):
         favorite_schema = ToolSchema(
             name="save_favorite_job",
             description="Save a job to favorites for later review",
+            intent_type=SaveFavoriteJobIntent,
             parameters={
                 "type": "object",
                 "properties": {
@@ -137,7 +175,6 @@ class JobsMCPServer(MCPServer):
                 },
             },
             required=["job_id"],
-            mutating=True,
         )
         self.register_tool(favorite_schema, self._save_favorite_job)
 

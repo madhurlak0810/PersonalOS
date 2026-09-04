@@ -5,7 +5,17 @@ from uuid import uuid4
 import pytest
 
 from mcp_servers.jobs.server import JobsMCPServer
+from personalos.domain.models import (
+    ActionTarget,
+    ToolCallErrorCode,
+    ToolCallRequest,
+)
 from personalos.mcp.manager import MCPServerManager
+
+
+def request(tool: str, server: str = "jobs", **params) -> ToolCallRequest:
+    """Build a ToolCallRequest against the jobs server."""
+    return ToolCallRequest(target=ActionTarget(server=server, tool=tool), params=params)
 
 
 def test_jobs_mcp_server_initialization():
@@ -35,15 +45,13 @@ async def test_search_jobs_tool():
     server = JobsMCPServer()
 
     result = await server.execute(
-        "search_jobs",
-        keywords=["Python", "Developer"],
-        locations=["Remote", "NYC"],
+        request("search_jobs", keywords=["Python", "Developer"], locations=["Remote", "NYC"])
     )
 
-    assert result["success"] is True
-    assert "result" in result
-    assert "jobs" in result["result"]
-    assert result["result"]["total"] > 0
+    assert result.ok is True
+    assert result.error is None
+    assert "jobs" in result.result
+    assert result.result["total"] > 0
 
 
 @pytest.mark.asyncio
@@ -52,14 +60,15 @@ async def test_scrape_job_details_tool():
     server = JobsMCPServer()
 
     result = await server.execute(
-        "scrape_job_details",
-        job_id="job_123",
-        job_url="https://example.com/jobs/job_123",
+        request(
+            "scrape_job_details",
+            job_id="job_123",
+            job_url="https://example.com/jobs/job_123",
+        )
     )
 
-    assert result["success"] is True
-    assert "result" in result
-    job_details = result["result"]
+    assert result.ok is True
+    job_details = result.result
     assert "description" in job_details
     assert "requirements" in job_details
     assert "benefits" in job_details
@@ -72,25 +81,24 @@ async def test_filter_jobs_tool():
 
     # First search for jobs
     search_result = await server.execute(
-        "search_jobs",
-        keywords=["Python"],
-        locations=["Remote"],
+        request("search_jobs", keywords=["Python"], locations=["Remote"])
     )
 
-    jobs = search_result["result"]["jobs"]
+    jobs = search_result.result["jobs"]
 
     # Then filter them
     filter_result = await server.execute(
-        "filter_jobs",
-        jobs=jobs,
-        salary_min=100000,
-        salary_max=150000,
-        remote_only=True,
+        request(
+            "filter_jobs",
+            jobs=jobs,
+            salary_min=100000,
+            salary_max=150000,
+            remote_only=True,
+        )
     )
 
-    assert filter_result["success"] is True
-    assert "result" in filter_result
-    assert "jobs" in filter_result["result"]
+    assert filter_result.ok is True
+    assert "jobs" in filter_result.result
 
 
 @pytest.mark.asyncio
@@ -99,16 +107,17 @@ async def test_save_favorite_job_tool():
     server = JobsMCPServer()
 
     result = await server.execute(
-        "save_favorite_job",
-        job_id="job_123",
-        notes="Interesting opportunity",
-        idempotency_key=str(uuid4()),
+        request(
+            "save_favorite_job",
+            job_id="job_123",
+            notes="Interesting opportunity",
+            idempotency_key=str(uuid4()),
+        )
     )
 
-    assert result["success"] is True
-    assert "result" in result
-    assert result["replayed"] is False
-    saved_job = result["result"]
+    assert result.ok is True
+    assert result.replayed is False
+    saved_job = result.result
     assert saved_job["job_id"] == "job_123"
     assert saved_job["notes"] == "Interesting opportunity"
 
@@ -119,13 +128,13 @@ async def test_save_favorite_job_is_idempotent():
     server = JobsMCPServer()
     key = str(uuid4())
 
-    first = await server.execute("save_favorite_job", job_id="job_123", idempotency_key=key)
-    second = await server.execute("save_favorite_job", job_id="job_123", idempotency_key=key)
+    first = await server.execute(request("save_favorite_job", job_id="job_123", idempotency_key=key))
+    second = await server.execute(request("save_favorite_job", job_id="job_123", idempotency_key=key))
 
-    assert first["success"] is True
-    assert second["success"] is True
-    assert second["replayed"] is True
-    assert second["result"] == first["result"]
+    assert first.ok is True
+    assert second.ok is True
+    assert second.replayed is True
+    assert second.result == first.result
 
 
 @pytest.mark.asyncio
@@ -133,10 +142,47 @@ async def test_save_favorite_job_requires_idempotency_key():
     """The mutating tool refuses to run without an idempotency key."""
     server = JobsMCPServer()
 
-    result = await server.execute("save_favorite_job", job_id="job_123")
+    result = await server.execute(request("save_favorite_job", job_id="job_123"))
 
-    assert result["success"] is False
-    assert "idempotency_key" in result["error"]
+    assert result.ok is False
+    assert result.error.code == ToolCallErrorCode.VALIDATION_ERROR
+    assert "idempotency_key" in result.error.message
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_is_typed_not_found():
+    """Calling a tool the server doesn't have returns a typed not-found failure."""
+    server = JobsMCPServer()
+
+    result = await server.execute(request("does_not_exist"))
+
+    assert result.ok is False
+    assert result.error.code == ToolCallErrorCode.TOOL_NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_invalid_params_are_typed_validation_failure():
+    """Missing required fields fail as a typed validation error, not an exception."""
+    server = JobsMCPServer()
+
+    result = await server.execute(request("search_jobs", keywords=["Python"]))
+
+    assert result.ok is False
+    assert result.error.code == ToolCallErrorCode.VALIDATION_ERROR
+    assert result.error.details["errors"]
+
+
+@pytest.mark.asyncio
+async def test_unexpected_extra_field_is_rejected():
+    """Intents forbid unknown fields, so typos surface as a validation failure."""
+    server = JobsMCPServer()
+
+    result = await server.execute(
+        request("search_jobs", keywords=["Python"], locations=["Remote"], not_a_field=True)
+    )
+
+    assert result.ok is False
+    assert result.error.code == ToolCallErrorCode.VALIDATION_ERROR
 
 
 def test_mcp_server_manager():
@@ -159,13 +205,21 @@ async def test_mcp_server_manager_execute_tool():
     manager.register_server(server)
 
     result = await manager.execute_tool(
-        "search_jobs",
-        "jobs",
-        keywords=["Python"],
-        locations=["Remote"],
+        request("search_jobs", keywords=["Python"], locations=["Remote"])
     )
 
-    assert result["success"] is True
+    assert result.ok is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_server_manager_execute_tool_unknown_server():
+    """An unknown server target is a typed failure, not a raised exception."""
+    manager = MCPServerManager()
+
+    result = await manager.execute_tool(request("search_jobs", server="ghost"))
+
+    assert result.ok is False
+    assert result.error.code == ToolCallErrorCode.SERVER_NOT_FOUND
 
 
 def test_mcp_server_manager_get_server_info():

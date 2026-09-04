@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # Minimum length for an idempotency key. Keys are supplied by callers and must
 # carry enough entropy that two unrelated operations cannot collide by accident;
@@ -145,7 +145,34 @@ class OperationStatus(str, Enum):
     FAILED = "failed"
 
 
-class MutatingIntent(BaseModel):
+class Intent(BaseModel):
+    """Base contract for a tool's typed parameters.
+
+    Every tool registers the Intent subclass describing the parameters it
+    accepts. A caller's raw params are validated into that subclass before
+    the handler ever runs, so a malformed call fails as a typed validation
+    error instead of reaching tool code. `extra="forbid"` rejects unknown
+    fields rather than silently ignoring them.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ActionTarget(BaseModel):
+    """Identifies which server and tool a call is directed at."""
+
+    server: str
+    tool: str
+
+    @field_validator("server", "tool")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+
+class MutatingIntent(Intent):
     """Base contract for any intent that produces a side effect.
 
     Every mutating intent must carry an idempotency key so the operation can be
@@ -194,6 +221,86 @@ class OperationRecord(BaseModel):
 
     class Config:
         use_enum_values = False
+
+
+class ToolCallRequest(BaseModel):
+    """Typed envelope for invoking a tool.
+
+    `params` are raw, caller-supplied values for the target tool's fields;
+    the server validates them into that tool's registered Intent subclass
+    before execution, so this is the one place a dict is still allowed to
+    cross the boundary — everything past it is typed.
+    """
+
+    target: ActionTarget
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolCallErrorCode(str, Enum):
+    """Typed failure categories for a tool call."""
+
+    SERVER_NOT_FOUND = "server_not_found"
+    TOOL_NOT_FOUND = "tool_not_found"
+    VALIDATION_ERROR = "validation_error"
+    MISSING_OPERATION_STORE = "missing_operation_store"
+    IDEMPOTENCY_CONFLICT = "idempotency_conflict"
+    EXECUTION_ERROR = "execution_error"
+
+
+class ToolCallError(BaseModel):
+    """Typed failure detail for a tool call that did not succeed."""
+
+    code: ToolCallErrorCode
+    message: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolCallResult(BaseModel):
+    """Typed outcome of a tool call.
+
+    Exactly one of `result` / `error` is populated, selected by `ok`. Mutating
+    calls additionally carry the idempotency key and whether the result was
+    replayed from a prior attempt rather than freshly executed.
+    """
+
+    target: ActionTarget
+    ok: bool
+    result: dict[str, Any] | None = None
+    error: ToolCallError | None = None
+    idempotency_key: str | None = None
+    replayed: bool | None = None
+
+    @classmethod
+    def succeeded(
+        cls,
+        target: ActionTarget,
+        result: dict[str, Any],
+        idempotency_key: str | None = None,
+        replayed: bool | None = None,
+    ) -> "ToolCallResult":
+        """Build a successful result."""
+        return cls(
+            target=target,
+            ok=True,
+            result=result,
+            idempotency_key=idempotency_key,
+            replayed=replayed,
+        )
+
+    @classmethod
+    def failed(
+        cls,
+        target: ActionTarget,
+        code: ToolCallErrorCode,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> "ToolCallResult":
+        """Build a failed result with a typed error."""
+        return cls(
+            target=target,
+            ok=False,
+            error=ToolCallError(code=code, message=message, details=details or {}),
+        )
 
 
 class AgentConfig(BaseModel):

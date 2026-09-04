@@ -3,13 +3,22 @@
 import inspect
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any
+
+from pydantic import ValidationError
 
 from personalos.domain.models import (
     IDEMPOTENCY_KEY_MAX_LENGTH,
     IDEMPOTENCY_KEY_MIN_LENGTH,
+    ActionTarget,
+    Intent,
     InvalidIdempotencyKey,
+    MutatingIntent,
     Tool,
+    ToolCallErrorCode,
+    ToolCallRequest,
+    ToolCallResult,
 )
 from personalos.persistence.idempotency import (
     IdempotencyError,
@@ -23,32 +32,42 @@ IDEMPOTENCY_KEY_PARAM = "idempotency_key"
 
 
 class ToolSchema:
-    """Schema for MCP tool parameters and response."""
+    """Schema for an MCP tool: its description, typed contract, and JSON schema.
+
+    `intent_type` is the single source of truth for what a call to this tool
+    must look like — `params` on a `ToolCallRequest` are validated into it
+    before the handler runs. Whether the tool is mutating is derived from
+    that type (a `MutatingIntent` subclass) rather than tracked separately,
+    so the two can't drift apart.
+    """
 
     def __init__(
         self,
         name: str,
         description: str,
-        parameters: dict[str, Any],
+        intent_type: type[Intent],
+        parameters: dict[str, Any] | None = None,
         required: list[str] = None,
         response_schema: dict[str, Any] | None = None,
-        mutating: bool = False,
     ):
         self.name = name
         self.description = description
-        self.parameters = parameters
+        self.intent_type = intent_type
+        self.mutating = issubclass(intent_type, MutatingIntent)
+        self.parameters = parameters or {}
         self.required = required or []
         self.response_schema = response_schema or {}
-        self.mutating = mutating
 
-        if mutating:
+        if self.mutating:
             self._require_idempotency_key()
 
     def _require_idempotency_key(self):
-        """Add the idempotency key to the tool's contract.
+        """Advertise the idempotency key in the tool's descriptive JSON schema.
 
         A mutating tool cannot be called without one, so the key is part of the
         advertised schema rather than something callers have to know about.
+        The actual enforcement happens via `intent_type` (a `MutatingIntent`),
+        this only keeps the advertised schema honest.
         """
         properties = self.parameters.setdefault("properties", {})
         properties[IDEMPOTENCY_KEY_PARAM] = {
@@ -92,7 +111,7 @@ class MCPServer(ABC):
         self.name = name
         self.description = description
         self._tools: dict[str, ToolSchema] = {}
-        self._handlers: dict[str, callable] = {}
+        self._handlers: dict[str, Callable] = {}
         self.operation_store = operation_store
         self._guard = IdempotencyGuard(operation_store) if operation_store else None
 
@@ -101,7 +120,7 @@ class MCPServer(ABC):
         self.operation_store = store
         self._guard = IdempotencyGuard(store)
 
-    def register_tool(self, schema: ToolSchema, handler: callable):
+    def register_tool(self, schema: ToolSchema, handler: Callable):
         """Register a tool with its handler."""
         self._tools[schema.name] = schema
         self._handlers[schema.name] = handler
@@ -115,81 +134,94 @@ class MCPServer(ABC):
         """Get tool schema by name."""
         return self._tools.get(tool_name)
 
-    async def execute(self, tool_name: str, **kwargs) -> dict[str, Any]:
-        """Execute a tool."""
+    async def execute(self, request: ToolCallRequest) -> ToolCallResult:
+        """Execute a tool call against its typed contract."""
+        tool_name = request.target.tool
+
         if tool_name not in self._handlers:
-            return {"success": False, "error": f"Tool '{tool_name}' not found"}
+            return ToolCallResult.failed(
+                request.target,
+                ToolCallErrorCode.TOOL_NOT_FOUND,
+                f"Tool '{tool_name}' not found on server '{self.name}'",
+            )
 
-        handler = self._handlers[tool_name]
         schema = self._tools[tool_name]
+        handler = self._handlers[tool_name]
 
-        # Validate required parameters
-        missing_params = [p for p in schema.required if p not in kwargs]
-        if missing_params:
-            return {
-                "success": False,
-                "error": f"Missing required parameters: {missing_params}",
-            }
+        try:
+            intent = schema.intent_type.model_validate(request.params)
+        except ValidationError as e:
+            return ToolCallResult.failed(
+                request.target,
+                ToolCallErrorCode.VALIDATION_ERROR,
+                f"Invalid parameters for '{tool_name}': {e}",
+                details={"errors": e.errors()},
+            )
 
         if schema.mutating:
-            return await self._execute_mutating(tool_name, schema, handler, kwargs)
+            return await self._execute_mutating(request.target, schema, handler, intent)
 
         logger.info(f"Executing tool '{tool_name}' on {self.name}")
         try:
-            result = handler(**kwargs)
+            result = handler(**intent.model_dump())
             # Awaits any awaitable rather than testing the handler itself, so
             # callables whose __call__ is async are handled too - returning an
             # un-awaited coroutine as a "result" would hand callers an
             # unusable object instead of the tool's output.
             if inspect.isawaitable(result):
                 result = await result
-            return {"success": True, "result": result}
+            return ToolCallResult.succeeded(request.target, result)
         except Exception as e:
             logger.error(f"Error executing '{tool_name}': {str(e)}", exc_info=True)
-            return {"success": False, "error": str(e)}
+            return ToolCallResult.failed(
+                request.target, ToolCallErrorCode.EXECUTION_ERROR, str(e)
+            )
 
     async def _execute_mutating(
         self,
-        tool_name: str,
+        target: ActionTarget,
         schema: ToolSchema,
-        handler: callable,
-        kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
+        handler: Callable,
+        intent: MutatingIntent,
+    ) -> ToolCallResult:
         """Execute a mutating tool behind the idempotency guard."""
         if self._guard is None:
-            return {
-                "success": False,
-                "error": (
-                    f"Tool '{tool_name}' is mutating but no operation store is "
-                    f"configured on server '{self.name}'; refusing to execute an "
-                    f"un-deduplicated side effect"
-                ),
-            }
+            return ToolCallResult.failed(
+                target,
+                ToolCallErrorCode.MISSING_OPERATION_STORE,
+                f"Tool '{target.tool}' is mutating but no operation store is "
+                f"configured on server '{self.name}'; refusing to execute an "
+                f"un-deduplicated side effect",
+            )
 
-        params = {k: v for k, v in kwargs.items() if k != IDEMPOTENCY_KEY_PARAM}
-        idempotency_key = kwargs.get(IDEMPOTENCY_KEY_PARAM)
+        params = intent.side_effect_params()
+        idempotency_key = intent.idempotency_key
 
-        logger.info(f"Executing mutating tool '{tool_name}' on {self.name}")
+        logger.info(f"Executing mutating tool '{target.tool}' on {self.name}")
         try:
             result, replayed = await self._guard.run(
-                operation=f"{self.name}.{tool_name}",
+                operation=f"{self.name}.{target.tool}",
                 idempotency_key=idempotency_key,
                 params=params,
                 handler=handler,
             )
-        except (InvalidIdempotencyKey, IdempotencyError) as e:
-            logger.warning(f"Idempotency check rejected '{tool_name}': {str(e)}")
-            return {"success": False, "error": str(e)}
+        except InvalidIdempotencyKey as e:
+            logger.warning(f"Idempotency check rejected '{target.tool}': {str(e)}")
+            return ToolCallResult.failed(target, ToolCallErrorCode.VALIDATION_ERROR, str(e))
+        except IdempotencyError as e:
+            logger.warning(f"Idempotency check rejected '{target.tool}': {str(e)}")
+            return ToolCallResult.failed(target, ToolCallErrorCode.IDEMPOTENCY_CONFLICT, str(e))
         except Exception as e:
-            logger.error(f"Error executing '{tool_name}': {str(e)}", exc_info=True)
-            return {"success": False, "error": str(e)}
+            logger.error(f"Error executing '{target.tool}': {str(e)}", exc_info=True)
+            return ToolCallResult.failed(target, ToolCallErrorCode.EXECUTION_ERROR, str(e))
 
-        return {
-            "success": True,
-            "result": result,
-            "idempotency_key": idempotency_key,
-            "replayed": replayed,
-        }
+        try:
+            return ToolCallResult.succeeded(
+                target, result, idempotency_key=idempotency_key, replayed=replayed
+            )
+        except Exception as e:
+            logger.error(f"Malformed result from '{target.tool}': {str(e)}", exc_info=True)
+            return ToolCallResult.failed(target, ToolCallErrorCode.EXECUTION_ERROR, str(e))
 
     @abstractmethod
     def initialize(self):

@@ -4,13 +4,18 @@ from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from personalos.domain.models import (
+    ActionTarget,
+    Intent,
     InvalidIdempotencyKey,
     MutatingIntent,
     OperationStatus,
+    ToolCallErrorCode,
+    ToolCallRequest,
 )
 from personalos.mcp.base import MCPServer, ToolSchema
 from personalos.persistence.idempotency import (
@@ -376,6 +381,14 @@ async def test_guard_supports_sync_handlers(store):
 # --- MCP integration -------------------------------------------------------
 
 
+class _DoMutateIntent(MutatingIntent):
+    job_id: str
+
+
+class _DoReadIntent(Intent):
+    job_id: str
+
+
 class _TestServer(MCPServer):
     """Minimal server exposing one mutating and one read-only tool."""
 
@@ -390,9 +403,9 @@ class _TestServer(MCPServer):
             ToolSchema(
                 name="do_mutate",
                 description="mutating tool",
+                intent_type=_DoMutateIntent,
                 parameters={"type": "object", "properties": {"job_id": {"type": "string"}}},
                 required=["job_id"],
-                mutating=True,
             ),
             self.mutating_handler.run,
         )
@@ -400,11 +413,17 @@ class _TestServer(MCPServer):
             ToolSchema(
                 name="do_read",
                 description="read-only tool",
+                intent_type=_DoReadIntent,
                 parameters={"type": "object", "properties": {"job_id": {"type": "string"}}},
                 required=["job_id"],
             ),
             self.read_handler.run,
         )
+
+
+def _request(tool_name: str, **params) -> ToolCallRequest:
+    """Build a ToolCallRequest against the `_TestServer`'s "test" server."""
+    return ToolCallRequest(target=ActionTarget(server="test", tool=tool_name), params=params)
 
 
 def test_mutating_tool_advertises_idempotency_key():
@@ -414,6 +433,8 @@ def test_mutating_tool_advertises_idempotency_key():
     mutating = server.get_tool_schema("do_mutate")
     read_only = server.get_tool_schema("do_read")
 
+    assert mutating.mutating is True
+    assert read_only.mutating is False
     assert "idempotency_key" in mutating.parameters["properties"]
     assert "idempotency_key" in mutating.required
     assert "idempotency_key" not in read_only.parameters["properties"]
@@ -425,10 +446,11 @@ async def test_mutating_tool_rejects_missing_key():
     """Calling a mutating tool without a key fails without side effects."""
     server = _TestServer(InMemoryOperationStore())
 
-    result = await server.execute("do_mutate", job_id="job_1")
+    result = await server.execute(_request("do_mutate", job_id="job_1"))
 
-    assert result["success"] is False
-    assert "idempotency_key" in result["error"]
+    assert result.ok is False
+    assert result.error.code == ToolCallErrorCode.VALIDATION_ERROR
+    assert "idempotency_key" in result.error.message
     assert server.mutating_handler.calls == 0
 
 
@@ -437,10 +459,13 @@ async def test_mutating_tool_requires_operation_store():
     """Without a store there is no dedup, so the call is refused."""
     server = _TestServer(operation_store=None)
 
-    result = await server.execute("do_mutate", job_id="job_1", idempotency_key=new_key())
+    result = await server.execute(
+        _request("do_mutate", job_id="job_1", idempotency_key=new_key())
+    )
 
-    assert result["success"] is False
-    assert "operation store" in result["error"]
+    assert result.ok is False
+    assert result.error.code == ToolCallErrorCode.MISSING_OPERATION_STORE
+    assert "operation store" in result.error.message
     assert server.mutating_handler.calls == 0
 
 
@@ -450,29 +475,30 @@ async def test_mutating_tool_dedupes_retry(sqlite_session_factory):
     server = _TestServer(SqlOperationStore(sqlite_session_factory))
     key = new_key()
 
-    first = await server.execute("do_mutate", job_id="job_1", idempotency_key=key)
-    second = await server.execute("do_mutate", job_id="job_1", idempotency_key=key)
+    first = await server.execute(_request("do_mutate", job_id="job_1", idempotency_key=key))
+    second = await server.execute(_request("do_mutate", job_id="job_1", idempotency_key=key))
 
-    assert first["success"] is True
-    assert first["replayed"] is False
-    assert second["success"] is True
-    assert second["replayed"] is True
-    assert second["result"] == first["result"]
-    assert second["idempotency_key"] == key
+    assert first.ok is True
+    assert first.replayed is False
+    assert second.ok is True
+    assert second.replayed is True
+    assert second.result == first.result
+    assert second.idempotency_key == key
     assert server.mutating_handler.calls == 1
 
 
 @pytest.mark.asyncio
 async def test_mutating_tool_surfaces_key_reuse_as_error():
-    """Key reuse with different params surfaces as a failed tool result."""
+    """Key reuse with different params surfaces as a typed failed tool result."""
     server = _TestServer(InMemoryOperationStore())
     key = new_key()
 
-    await server.execute("do_mutate", job_id="job_1", idempotency_key=key)
-    result = await server.execute("do_mutate", job_id="job_2", idempotency_key=key)
+    await server.execute(_request("do_mutate", job_id="job_1", idempotency_key=key))
+    result = await server.execute(_request("do_mutate", job_id="job_2", idempotency_key=key))
 
-    assert result["success"] is False
-    assert "already used for a different request" in result["error"]
+    assert result.ok is False
+    assert result.error.code == ToolCallErrorCode.IDEMPOTENCY_CONFLICT
+    assert "already used for a different request" in result.error.message
     assert server.mutating_handler.calls == 1
 
 
@@ -493,13 +519,13 @@ async def test_execute_awaits_async_callable_objects(tool_name):
     server = _TestServer(InMemoryOperationStore())
     server.register_tool(server.get_tool_schema(tool_name), AsyncCallable())
 
-    kwargs = {"job_id": "job_1"}
+    params = {"job_id": "job_1"}
     if tool_name == "do_mutate":
-        kwargs["idempotency_key"] = new_key()
-    result = await server.execute(tool_name, **kwargs)
+        params["idempotency_key"] = new_key()
+    result = await server.execute(_request(tool_name, **params))
 
-    assert result["success"] is True
-    assert result["result"] == {"awaited": True, "job_id": "job_1"}
+    assert result.ok is True
+    assert result.result == {"awaited": True, "job_id": "job_1"}
 
 
 @pytest.mark.asyncio
@@ -507,11 +533,67 @@ async def test_read_only_tool_needs_no_key():
     """Read-only tools are unaffected by the guardrail."""
     server = _TestServer(InMemoryOperationStore())
 
-    first = await server.execute("do_read", job_id="job_1")
-    second = await server.execute("do_read", job_id="job_1")
+    first = await server.execute(_request("do_read", job_id="job_1"))
+    second = await server.execute(_request("do_read", job_id="job_1"))
 
-    assert first["success"] is True
-    assert second["success"] is True
-    assert "replayed" not in first
+    assert first.ok is True
+    assert second.ok is True
+    assert first.replayed is None
     assert server.read_handler.calls == 2
+
+
+# --- Typed contract validation ----------------------------------------------
+
+
+def test_tool_call_request_rejects_blank_target():
+    """ActionTarget requires non-blank server and tool names."""
+    with pytest.raises(ValidationError):
+        ActionTarget(server="", tool="do_read")
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_returns_typed_not_found():
+    """A request for a tool the server doesn't have fails with a typed code."""
+    server = _TestServer(InMemoryOperationStore())
+
+    result = await server.execute(_request("does_not_exist"))
+
+    assert result.ok is False
+    assert result.error.code == ToolCallErrorCode.TOOL_NOT_FOUND
+    assert result.result is None
+
+
+@pytest.mark.asyncio
+async def test_missing_required_field_is_typed_validation_error():
+    """A read-only tool called without its required field fails typed, not by exception."""
+    server = _TestServer(InMemoryOperationStore())
+
+    result = await server.execute(ToolCallRequest(target=ActionTarget(server="test", tool="do_read"), params={}))
+
+    assert result.ok is False
+    assert result.error.code == ToolCallErrorCode.VALIDATION_ERROR
+    assert result.error.details["errors"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_field_is_typed_validation_error():
+    """Extra, unrecognized params are rejected rather than silently dropped."""
+    server = _TestServer(InMemoryOperationStore())
+
+    result = await server.execute(_request("do_read", job_id="job_1", extra_field="nope"))
+
+    assert result.ok is False
+    assert result.error.code == ToolCallErrorCode.VALIDATION_ERROR
+
+
+@pytest.mark.asyncio
+async def test_wrong_field_type_is_typed_validation_error():
+    """A field of the wrong type fails typed validation before the handler runs."""
+    server = _TestServer(InMemoryOperationStore())
+
+    result = await server.execute(_request("do_read", job_id={"not": "a string"}))
+
+    assert result.ok is False
+    assert result.error.code == ToolCallErrorCode.VALIDATION_ERROR
+    assert server.read_handler.calls == 0
 
