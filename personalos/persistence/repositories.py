@@ -1,7 +1,7 @@
 """Repository pattern for data access."""
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
@@ -43,7 +43,7 @@ class JobRepository:
         self.session.commit()
         return self._to_domain(db_job)
 
-    def get_by_id(self, job_id: UUID) -> Optional[Job]:
+    def get_by_id(self, job_id: UUID) -> Job | None:
         """Get job by ID."""
         db_job = self.session.query(JobModel).filter(JobModel.id == job_id).first()
         return self._to_domain(db_job) if db_job else None
@@ -120,7 +120,7 @@ class OperationRepository:
         """Initialize with database session."""
         self.session = session
 
-    def get_by_key(self, idempotency_key: str) -> Optional[OperationRecord]:
+    def get_by_key(self, idempotency_key: str) -> OperationRecord | None:
         """Get the operation recorded under an idempotency key, if any."""
         db_op = self._row_for_key(idempotency_key)
         return self._to_domain(db_op) if db_op else None
@@ -215,7 +215,7 @@ class OperationRepository:
         self.session.commit()
         return self._to_domain(db_op)
 
-    def _row_for_key(self, idempotency_key: str) -> Optional[OperationModel]:
+    def _row_for_key(self, idempotency_key: str) -> OperationModel | None:
         return (
             self.session.query(OperationModel)
             .filter(OperationModel.idempotency_key == idempotency_key)

@@ -1,7 +1,7 @@
 """Event bus for publishing and subscribing to domain events."""
 
 import logging
-from typing import Callable, Dict, List
+from collections.abc import Callable
 
 from personalos.domain.models import Event, EventType
 
@@ -13,7 +13,7 @@ class EventBus:
 
     def __init__(self):
         """Initialize event bus."""
-        self._subscribers: Dict[EventType, List[Callable]] = {}
+        self._subscribers: dict[EventType, list[Callable]] = {}
 
     def subscribe(self, event_type: EventType, handler: Callable):
         """Subscribe to an event type."""

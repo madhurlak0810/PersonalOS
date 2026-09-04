@@ -1,13 +1,18 @@
-"""Integration tests for Job Search Executor with MCP."""
+"""Integration tests for Job Search Executor with MCP.
+
+The executor is wired the way the composition root wires it: through a
+policy-enforcing gateway. There is no way to hand it a bare server manager, so
+these tests exercise the same path production does.
+"""
 
 import pytest
-from uuid import uuid4
 
+from mcp_servers.jobs.server import JobsMCPServer
+from personalos.bootstrap import build_tool_gateway
 from personalos.domain.models import ActionTarget, Job, JobStatus, ToolCallRequest
 from personalos.executor import JobSearchExecutor
-from personalos.mcp.manager import MCPServerManager, get_mcp_manager
+from personalos.mcp.manager import MCPServerManager
 from personalos.persistence.repositories import JobRepository
-from mcp_servers.jobs.server import JobsMCPServer
 
 
 class MockSession:
@@ -72,9 +77,8 @@ async def test_job_search_executor_with_mcp():
     jobs_server = JobsMCPServer()
     manager.register_server(jobs_server)
 
-    # Create executor
-    executor = JobSearchExecutor(repo)
-    executor.mcp_manager = manager
+    # Create executor over a policy-enforcing gateway
+    executor = JobSearchExecutor(repo, build_tool_gateway(manager))
 
     # Create job search request
     job = Job(
@@ -103,8 +107,8 @@ async def test_executor_mcp_search_step():
     manager = MCPServerManager()
     manager.register_server(JobsMCPServer())
 
-    executor = JobSearchExecutor(repo)
-    executor.mcp_manager = manager
+    executor = JobSearchExecutor(repo, build_tool_gateway(manager))
+    assert executor.gateway is not None
 
     # Test search tool directly
     search_result = await manager.execute_tool(
@@ -125,8 +129,8 @@ async def test_executor_mcp_filter_step():
     manager = MCPServerManager()
     manager.register_server(JobsMCPServer())
 
-    executor = JobSearchExecutor(repo)
-    executor.mcp_manager = manager
+    executor = JobSearchExecutor(repo, build_tool_gateway(manager))
+    assert executor.gateway is not None
 
     # Get some jobs first
     search_result = await manager.execute_tool(

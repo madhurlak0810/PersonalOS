@@ -3,8 +3,9 @@
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import Any, Callable, Optional
+from typing import Any
 
 from personalos.config import settings
 
@@ -33,7 +34,7 @@ class CacheKey:
 class Cache:
     """Cache interface for MCP results."""
 
-    async def get(self, key: str) -> Optional[Any]:
+    async def get(self, key: str) -> Any | None:
         """Get value from cache."""
         raise NotImplementedError
 
@@ -55,7 +56,7 @@ class RedisCache(Cache):
         self.redis_client = redis.from_url(url)
         logger.info(f"Initialized Redis cache: {url}")
 
-    async def get(self, key: str) -> Optional[Any]:
+    async def get(self, key: str) -> Any | None:
         """Get value from cache."""
         try:
             value = self.redis_client.get(key)
@@ -87,7 +88,7 @@ class InMemoryCache(Cache):
         """Initialize in-memory cache."""
         self._cache: dict[str, tuple[Any, datetime]] = {}
 
-    async def get(self, key: str) -> Optional[Any]:
+    async def get(self, key: str) -> Any | None:
         """Get value from cache."""
         if key in self._cache:
             value, expiry = self._cache[key]
@@ -118,7 +119,7 @@ def get_cache() -> Cache:
     return InMemoryCache()
 
 
-async def cached(cache: Optional[Cache] = None, ttl: int = 3600) -> Callable:
+async def cached(cache: Cache | None = None, ttl: int = 3600) -> Callable:
     """Decorator for caching tool results."""
 
     def decorator(func: Callable) -> Callable:

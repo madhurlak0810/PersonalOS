@@ -1,7 +1,6 @@
 """MCP Server orchestration and management."""
 
 import logging
-from typing import Dict, List, Optional
 
 from personalos.domain.models import (
     Tool,
@@ -19,18 +18,18 @@ class MCPServerManager:
 
     def __init__(self):
         """Initialize MCP server manager."""
-        self._servers: Dict[str, MCPServer] = {}
+        self._servers: dict[str, MCPServer] = {}
 
     def register_server(self, server: MCPServer):
         """Register an MCP server."""
         self._servers[server.name] = server
         logger.info(f"Registered MCP server: {server.name}")
 
-    def get_server(self, name: str) -> Optional[MCPServer]:
+    def get_server(self, name: str) -> MCPServer | None:
         """Get MCP server by name."""
         return self._servers.get(name)
 
-    def get_all_tools(self) -> List[Tool]:
+    def get_all_tools(self) -> list[Tool]:
         """Get all available tools from all servers."""
         tools = []
         for server in self._servers.values():
@@ -49,11 +48,11 @@ class MCPServerManager:
 
         return await server.execute(request)
 
-    def list_servers(self) -> List[str]:
+    def list_servers(self) -> list[str]:
         """List all registered server names."""
         return list(self._servers.keys())
 
-    def get_server_info(self, server_name: str) -> Optional[dict]:
+    def get_server_info(self, server_name: str) -> dict | None:
         """Get information about a server."""
         server = self.get_server(server_name)
         if not server:
@@ -73,21 +72,3 @@ _mcp_manager = MCPServerManager()
 def get_mcp_manager() -> MCPServerManager:
     """Get the global MCP server manager."""
     return _mcp_manager
-
-
-def initialize_mcp_servers():
-    """Initialize all MCP servers."""
-    logger.info("Initializing MCP servers...")
-
-    # Import and register Jobs MCP Server
-    from mcp_servers.jobs.server import JobsMCPServer
-
-    jobs_server = JobsMCPServer()
-    _mcp_manager.register_server(jobs_server)
-
-    # Placeholder for other servers
-    # from mcp_servers.files.server import FilesMCPServer
-    # files_server = FilesMCPServer()
-    # _mcp_manager.register_server(files_server)
-
-    logger.info(f"Initialized {len(_mcp_manager.list_servers())} MCP servers")

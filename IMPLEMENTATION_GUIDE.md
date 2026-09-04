@@ -127,15 +127,24 @@ PersonalOS-agent/
 │   │   ├── base.py            # MCPServer base class
 │   │   ├── cache.py           # Caching (Redis/in-memory)
 │   │   ├── manager.py         # MCP orchestrator
+│   │   ├── adapter.py         # MCPToolInvoker (ToolInvoker port)
 │   │   └── __init__.py
 │   │
-│   ├── tools/                 # Agent tools
-│   │   ├── registry.py        # Tool registry
+│   ├── tools/                 # Tool boundary
+│   │   ├── gateway.py         # ToolGateway / ToolInvoker ports
+│   │   ├── registry.py        # Tool registry (adapter)
 │   │   └── __init__.py
+│   │
+│   ├── policy/                # Policy enforcement
+│   │   ├── intents.py         # ToolIntent / ApprovedIntent
+│   │   ├── rules.py           # Allowlists, mutating + origin rules
+│   │   ├── engine.py          # PolicyEngine (default deny)
+│   │   └── errors.py          # PolicyDenied / ApprovalRequired
+│   │
+│   ├── bootstrap.py           # Composition root (wires the layers)
 │   │
 │   ├── graphs/                # Workflow graphs (TODO)
 │   ├── models/                # AI models (TODO)
-│   ├── policy/                # Policy enforcement (TODO)
 │   ├── state/                 # State management (TODO)
 │   ├── retrieval/             # RAG/search (TODO)
 │   └── observability/         # Logging/tracing (TODO)
@@ -147,7 +156,8 @@ PersonalOS-agent/
 │   │       ├── jobs.py        # Job search endpoints
 │   │       └── __init__.py
 │   │
-│   └── worker/                # Background job processor (TODO)
+│   └── worker/                # Background job processor
+│       └── job_runner.py      # Runs one job search in its own session
 │
 ├── mcp_servers/               # MCP server implementations
 │   ├── jobs/                  # Job search MCP server
@@ -156,7 +166,14 @@ PersonalOS-agent/
 │   ├── files/                 # File access server (TODO)
 │   └── google/                # Google API integration (TODO)
 │
+├── docs/                      # Design documentation
+│   └── ARCHITECTURE_BOUNDARIES.md  # Layer ownership + enforced import rules
+│
+├── scripts/
+│   └── check_boundaries.py    # Standalone boundary check (runs in CI)
+│
 ├── tests/                     # Test suite
+│   ├── architecture/          # Layer boundary enforcement
 │   ├── unit/                  # Unit tests
 │   │   ├── test_job_search.py
 │   │   ├── test_mcp_server.py
@@ -178,6 +195,11 @@ PersonalOS-agent/
 ---
 
 ## Architecture
+
+Layer ownership and the enforced import rules live in
+[docs/ARCHITECTURE_BOUNDARIES.md](docs/ARCHITECTURE_BOUNDARIES.md). The short
+version: orchestration proposes intents, policy decides, executors run only
+approved intents, adapters do the I/O.
 
 ### Data Flow
 
@@ -222,9 +244,17 @@ PersonalOS-agent/
 ┌────────────────────────┐
 │  Executor              │
 │  - Job Search Engine   │
-│  - MCP Integration     │
+│  - Emits ToolIntents   │
 └────────┬───────────────┘
          │
+         ▼
+┌────────────────────────────────┐
+│  Tool Gateway + Policy Engine  │
+│  - Default deny allowlist      │
+│  - Approval gate on mutations  │
+│  - Mints ApprovedIntent        │
+└────────┬───────────────────────┘
+         │  (approved intents only)
          ▼
 ┌────────────────────────────────┐
 │  MCP Server Manager            │
@@ -260,6 +290,9 @@ PersonalOS-agent/
 | **Event-Driven** | `personalos/events/bus.py` | Async event processing |
 | **Pub/Sub** | `personalos/events/bus.py` | Decoupled communication |
 | **MCP Servers** | `personalos/mcp/` | Modular tool capabilities |
+| **Policy Gate** | `personalos/policy/engine.py` | Default-deny authorization of tool intents |
+| **Ports & Adapters** | `personalos/tools/gateway.py` | Executors depend on ports, not adapters |
+| **Composition Root** | `personalos/bootstrap.py` | Single place that wires the layers |
 | **Dependency Injection** | `apps/api/main.py` | FastAPI Depends() |
 | **Caching** | `personalos/mcp/cache.py` | Performance optimization |
 
