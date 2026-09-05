@@ -69,6 +69,8 @@ class JobRepository:
         db_job.job_type = job.job_type
         db_job.results_count = job.results_count
         db_job.results = job.results
+        db_job.error_code = job.error_code
+        db_job.error_message = job.error_message
         db_job.job_metadata = job.metadata
         db_job.started_at = job.started_at
         db_job.completed_at = job.completed_at
@@ -101,6 +103,8 @@ class JobRepository:
             job_type=db_job.job_type,
             results_count=int(db_job.results_count) if db_job.results_count else 0,
             results=db_job.results or {},
+            error_code=db_job.error_code,
+            error_message=db_job.error_message,
             metadata=db_job.job_metadata or {},
             created_at=db_job.created_at,
             updated_at=db_job.updated_at,

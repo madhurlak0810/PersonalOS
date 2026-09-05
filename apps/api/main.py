@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from apps.api.errors import register_error_handlers
 from personalos.bootstrap import initialize_mcp_servers
 from personalos.config import settings
 from personalos.persistence import init_db
@@ -49,6 +50,8 @@ def create_app() -> FastAPI:
     from apps.api.routes import jobs
 
     app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"])
+
+    register_error_handlers(app)
 
     return app
 

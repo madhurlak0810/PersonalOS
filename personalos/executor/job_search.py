@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from personalos.domain.errors import InternalError, PersonalOSError
 from personalos.domain.models import AgentState, Job, JobStatus
 from personalos.persistence.repositories import JobRepository
 from personalos.policy import IntentOrigin, ToolIntent
@@ -113,8 +114,22 @@ class JobSearchExecutor:
             return job
 
         except Exception as e:
-            logger.error(f"Job search failed: {str(e)}", exc_info=True)
+            # A `PersonalOSError` already carries a stable code and a message
+            # that is safe to persist and later surface over the API. Anything
+            # else is wrapped as a generic, sanitized `InternalError` for that
+            # purpose -- the original exception's message may contain details
+            # (a DB error, a raw adapter string) that should stay in the log
+            # line below, not in a field the API can return to a caller.
+            error = e if isinstance(e, PersonalOSError) else InternalError()
+            logger.exception(
+                "Job search failed (job_id=%s, error_code=%s, context_id=%s)",
+                job.id,
+                error.code.value,
+                error.context_id,
+            )
             job.status = JobStatus.FAILED
+            job.error_code = error.code.value
+            job.error_message = error.message
             job.updated_at = datetime.utcnow()
             job = self.repo.update(job)
             raise

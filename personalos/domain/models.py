@@ -7,6 +7,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from personalos.domain.errors import ValidationFailed
+
 # Minimum length for an idempotency key. Keys are supplied by callers and must
 # carry enough entropy that two unrelated operations cannot collide by accident;
 # a UUID4 string is the expected shape.
@@ -14,8 +16,13 @@ IDEMPOTENCY_KEY_MIN_LENGTH = 8
 IDEMPOTENCY_KEY_MAX_LENGTH = 255
 
 
-class InvalidIdempotencyKey(ValueError):
-    """Raised when an idempotency key is missing or malformed."""
+class InvalidIdempotencyKey(ValidationFailed, ValueError):
+    """Raised when an idempotency key is missing or malformed.
+
+    Subclasses both `ValidationFailed` (so it reports through the shared
+    taxonomy like every other error) and `ValueError` (its original base,
+    kept for any caller still catching that broader type).
+    """
 
 
 def validate_idempotency_key(key: Any) -> str:
@@ -75,6 +82,12 @@ class Job(BaseModel):
     # Results
     results_count: int = 0
     results: dict[str, Any] = Field(default_factory=dict)
+
+    # Set when status is FAILED. `error_code` is one of the stable
+    # `personalos.domain.errors.ErrorCode` values; `error_message` is the
+    # already-sanitized message from the error that failed the job.
+    error_code: str | None = None
+    error_message: str | None = None
 
     # Metadata
     metadata: dict[str, Any] = Field(default_factory=dict)
