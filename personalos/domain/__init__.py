@@ -1,5 +1,15 @@
 """Domain package."""
 
+from .errors import (
+    ErrorCode,
+    IdempotencyConflict,
+    InternalError,
+    NotFound,
+    PersonalOSError,
+    RetryableFailure,
+    ToolFailure,
+    ValidationFailed,
+)
 from .models import (
     AgentConfig,
     AgentState,
@@ -18,4 +28,12 @@ __all__ = [
     "EventType",
     "Tool",
     "AgentConfig",
+    "ErrorCode",
+    "PersonalOSError",
+    "ValidationFailed",
+    "NotFound",
+    "IdempotencyConflict",
+    "ToolFailure",
+    "RetryableFailure",
+    "InternalError",
 ]

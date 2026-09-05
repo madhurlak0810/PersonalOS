@@ -70,6 +70,8 @@ class JobModel(Base):
     job_type = Column(String(50), nullable=True)
     results_count = Column(String, nullable=False, default="0")
     results = Column(JSON, nullable=False, default={})
+    error_code = Column(String(64), nullable=True)
+    error_message = Column(Text, nullable=True)
     job_metadata = Column(JSON, nullable=False, default={})
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -90,6 +92,8 @@ class JobModel(Base):
             "job_type": self.job_type,
             "results_count": self.results_count,
             "results": self.results,
+            "error_code": self.error_code,
+            "error_message": self.error_message,
             "job_metadata": self.job_metadata,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),

@@ -24,6 +24,15 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from personalos.domain.errors import (
+    ErrorCode,
+    IdempotencyConflict,
+    InternalError,
+    NotFound,
+    PersonalOSError,
+    ToolFailure,
+    ValidationFailed,
+)
 from personalos.policy import (
     ApprovalGrant,
     ApprovedIntent,
@@ -36,6 +45,18 @@ from personalos.tools.registry import ToolRegistry
 logger = logging.getLogger(__name__)
 
 
+#: Maps the generic `ErrorCode` an adapter attached to a failed payload onto
+#: the specific exception `unwrap()` raises for it. An adapter that cannot (or
+#: does not) classify its failure this precisely -- or reports `TOOL_FAILURE`
+#: itself -- falls back to :class:`ToolExecutionError` below.
+_ERROR_CODE_TO_EXCEPTION: dict[str, type[PersonalOSError]] = {
+    ErrorCode.VALIDATION.value: ValidationFailed,
+    ErrorCode.NOT_FOUND.value: NotFound,
+    ErrorCode.IDEMPOTENCY_CONFLICT.value: IdempotencyConflict,
+    ErrorCode.INTERNAL.value: InternalError,
+}
+
+
 class ToolResult(BaseModel):
     """Outcome of one approved tool call, tied back to its intent."""
 
@@ -44,6 +65,10 @@ class ToolResult(BaseModel):
     success: bool
     result: Any | None = None
     error: str | None = None
+    #: A `personalos.domain.errors.ErrorCode` value, when the adapter could
+    #: classify the failure that precisely. `None` for a success, and for a
+    #: failure the adapter reported only as an opaque string.
+    error_code: str | None = None
     replayed: bool = False
     rule: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -52,31 +77,47 @@ class ToolResult(BaseModel):
     def from_adapter_payload(
         cls, approved: ApprovedIntent, payload: dict[str, Any]
     ) -> "ToolResult":
-        """Normalize the ``{success, result, error}`` dict adapters return."""
+        """Normalize the ``{success, result, error, error_code}`` dict adapters return."""
         return cls(
             intent_id=approved.intent.intent_id,
             tool_ref=approved.intent.tool_ref,
             success=bool(payload.get("success")),
             result=payload.get("result"),
             error=payload.get("error"),
+            error_code=payload.get("error_code"),
             replayed=bool(payload.get("replayed", False)),
             rule=approved.decision.rule,
         )
 
     def unwrap(self) -> Any:
-        """Return the result, raising :class:`ToolExecutionError` on failure."""
+        """Return the result, raising a mapped :class:`PersonalOSError` on failure.
+
+        The exception class reflects `error_code` when the adapter set one to
+        something more specific than a plain tool failure (an MCP failure
+        carries its `ToolCallErrorCode`, translated by the adapter into this
+        shared taxonomy); otherwise falls back to :class:`ToolExecutionError`.
+        """
         if not self.success:
+            exc_cls = _ERROR_CODE_TO_EXCEPTION.get(self.error_code)
+            if exc_cls is not None:
+                raise exc_cls(
+                    f"tool '{self.tool_ref}' failed: {self.error or 'unknown error'}",
+                    details={"tool_ref": self.tool_ref},
+                )
             raise ToolExecutionError(self.tool_ref, self.error or "unknown error")
         return self.result
 
 
-class ToolExecutionError(RuntimeError):
-    """An approved tool call failed inside the adapter."""
+class ToolExecutionError(ToolFailure):
+    """An approved tool call failed inside the adapter with no finer classification."""
 
     def __init__(self, tool_ref: str, error: str):
         self.tool_ref = tool_ref
         self.error = error
-        super().__init__(f"tool '{tool_ref}' failed: {error}")
+        super().__init__(
+            f"tool '{tool_ref}' failed: {error}",
+            details={"tool_ref": tool_ref, "error": error},
+        )
 
 
 @runtime_checkable

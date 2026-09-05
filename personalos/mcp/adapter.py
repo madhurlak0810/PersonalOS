@@ -9,11 +9,24 @@ that has not been through policy.
 import logging
 from typing import Any
 
-from personalos.domain.models import ActionTarget, ToolCallRequest
+from personalos.domain.errors import ErrorCode
+from personalos.domain.models import ActionTarget, ToolCallErrorCode, ToolCallRequest
 from personalos.mcp.manager import MCPServerManager
 from personalos.policy import ApprovedIntent, PolicyViolation
 
 logger = logging.getLogger(__name__)
+
+#: Translates the MCP-specific `ToolCallErrorCode` into the shared
+#: `ErrorCode` taxonomy, so a failure reads the same whether it reached the
+#: gateway via this adapter or via any other `ToolInvoker`.
+_ERROR_CODE_MAP: dict[ToolCallErrorCode, ErrorCode] = {
+    ToolCallErrorCode.SERVER_NOT_FOUND: ErrorCode.NOT_FOUND,
+    ToolCallErrorCode.TOOL_NOT_FOUND: ErrorCode.NOT_FOUND,
+    ToolCallErrorCode.VALIDATION_ERROR: ErrorCode.VALIDATION,
+    ToolCallErrorCode.MISSING_OPERATION_STORE: ErrorCode.INTERNAL,
+    ToolCallErrorCode.IDEMPOTENCY_CONFLICT: ErrorCode.IDEMPOTENCY_CONFLICT,
+    ToolCallErrorCode.EXECUTION_ERROR: ErrorCode.TOOL_FAILURE,
+}
 
 
 class MCPToolInvoker:
@@ -47,10 +60,16 @@ class MCPToolInvoker:
         )
         result = await self.manager.execute_tool(request)
 
+        error_code = (
+            _ERROR_CODE_MAP.get(result.error.code, ErrorCode.INTERNAL).value
+            if result.error
+            else None
+        )
         return {
             "success": result.ok,
             "result": result.result,
             "error": result.error.message if result.error else None,
+            "error_code": error_code,
             "replayed": bool(result.replayed),
         }
 

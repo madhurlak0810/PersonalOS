@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from apps.api.errors import register_error_handlers
 from apps.api.main import create_app
 from apps.api.routes import jobs as jobs_routes
 from personalos.persistence import get_session
@@ -32,9 +33,15 @@ def session_factory(tmp_path):
 
 @pytest.fixture
 def client(session_factory):
-    """Client over a router-only app, so no lifespan or real database is used."""
+    """Client over a router-only app, so no lifespan or real database is used.
+
+    Registers the same error handlers `create_app()` wires on, so a route
+    raising a domain error is turned into the sanitized envelope here too,
+    rather than propagating as a raw exception through the test client.
+    """
     app = FastAPI()
     app.include_router(jobs_routes.router, prefix="/api/v1/jobs")
+    register_error_handlers(app)
 
     def override_session():
         db = session_factory()
@@ -89,6 +96,11 @@ def test_create_rejects_a_request_missing_its_title(client):
     response = client.post("/api/v1/jobs/", json={"keywords": ["python"]})
     assert response.status_code == 422
 
+    body = response.json()
+    assert body["error_code"] == "validation"
+    assert body["context_id"]
+    assert "message" in body
+
 
 def test_get_job_search_returns_the_full_view(client):
     """A created job can be read back with its full field set."""
@@ -108,9 +120,47 @@ def test_get_job_search_returns_the_full_view(client):
 
 
 def test_get_unknown_job_is_a_404(client):
-    """A missing job is not reported as a server error."""
+    """A missing job is not reported as a server error, and carries the stable envelope."""
     response = client.get("/api/v1/jobs/6f1e7b3a-0000-4000-8000-000000000000")
     assert response.status_code == 404
+
+    body = response.json()
+    assert body["error_code"] == "not_found"
+    assert body["context_id"]
+    assert set(body) == {"error_code", "message", "context_id"}
+
+
+def test_unexpected_failure_is_sanitized_before_it_reaches_the_client(client, monkeypatch):
+    """An unclassified exception becomes a generic envelope, not a leaked string.
+
+    The internal detail (here, a made-up DB failure message) must never reach
+    the response body; only the stack trace, logged internally, should carry it.
+
+    Starlette's `ServerErrorMiddleware` re-raises an exception caught by a bare
+    `Exception` handler after sending its response, so that a real ASGI server
+    still logs it -- `TestClient` mirrors that by re-raising too unless told
+    not to. Production callers only ever see the sanitized response sent
+    before that re-raise; this test asserts on that response.
+    """
+    from fastapi.testclient import TestClient
+
+    from personalos.persistence.repositories import JobRepository
+
+    def boom(self):
+        raise RuntimeError("connection to db-primary-7 refused: password auth failed")
+
+    monkeypatch.setattr(JobRepository, "get_all", boom)
+
+    non_raising_client = TestClient(client.app, raise_server_exceptions=False)
+    response = non_raising_client.get("/api/v1/jobs/")
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["error_code"] == "internal"
+    assert "db-primary-7" not in body["message"]
+    assert "password" not in body["message"]
+    assert body["context_id"]
+    assert set(body) == {"error_code", "message", "context_id"}
 
 
 def test_list_job_searches(client):

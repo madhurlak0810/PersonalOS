@@ -17,6 +17,7 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+from personalos.domain.errors import ErrorCode, PersonalOSError
 from personalos.domain.models import (
     OperationRecord,
     OperationStatus,
@@ -27,8 +28,11 @@ from personalos.persistence.repositories import OperationRepository
 logger = logging.getLogger(__name__)
 
 
-class IdempotencyError(Exception):
+class IdempotencyError(PersonalOSError):
     """Base class for idempotency guardrail violations."""
+
+    code = ErrorCode.IDEMPOTENCY_CONFLICT
+    http_status = 409
 
 
 class IdempotencyKeyReused(IdempotencyError):
@@ -36,7 +40,14 @@ class IdempotencyKeyReused(IdempotencyError):
 
 
 class OperationInProgress(IdempotencyError):
-    """A concurrent attempt already owns this key and has not finished."""
+    """A concurrent attempt already owns this key and has not finished.
+
+    Marked retryable: the caller did nothing wrong, the operation just has not
+    settled yet.
+    """
+
+    code = ErrorCode.RETRYABLE
+    retryable = True
 
 
 def fingerprint_request(operation: str, params: dict[str, Any]) -> str:
