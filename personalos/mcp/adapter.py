@@ -57,6 +57,7 @@ class MCPToolInvoker:
         request = ToolCallRequest(
             target=ActionTarget(server=approved.server, tool=approved.tool),
             params=approved.arguments,
+            context=approved.context,
         )
         result = await self.manager.execute_tool(request)
 

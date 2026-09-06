@@ -6,6 +6,8 @@ classes. These tests cover that directly -- building the app is the assertion
 -- as well as the round trip through the endpoints.
 """
 
+from uuid import UUID
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -161,6 +163,63 @@ def test_unexpected_failure_is_sanitized_before_it_reaches_the_client(client, mo
     assert "password" not in body["message"]
     assert body["context_id"]
     assert set(body) == {"error_code", "message", "context_id"}
+
+
+def test_create_job_search_returns_a_correlation_id(client):
+    """A response is stamped with a correlation id even without middleware.
+
+    The router-only `client` fixture has no `CorrelationIdMiddleware`, so the
+    job's context falls back to a freshly minted correlation id rather than
+    one seeded from a request header.
+    """
+    response = client.post(
+        "/api/v1/jobs/",
+        json={"title": "Python roles", "keywords": ["python"]},
+    )
+    created = response.json()
+
+    full = client.get(f"/api/v1/jobs/{created['id']}").json()
+    assert UUID(full["workflow_id"])
+    assert UUID(full["run_id"])
+    assert UUID(full["correlation_id"])
+    assert full["actor_id"] == "api"
+
+
+def test_create_job_search_honors_a_custom_actor_header(client):
+    """A caller-declared actor id ends up on the job's context."""
+    response = client.post(
+        "/api/v1/jobs/",
+        json={"title": "Python roles", "keywords": ["python"]},
+        headers={"X-Actor-Id": "user:alice"},
+    )
+    created = response.json()
+
+    full = client.get(f"/api/v1/jobs/{created['id']}").json()
+    assert full["actor_id"] == "user:alice"
+
+
+def test_correlation_id_flows_from_the_request_into_the_job(client):
+    """With the real middleware attached, the request's correlation id is the job's.
+
+    Builds the full `create_app()` app (which does register
+    `CorrelationIdMiddleware`) with the same in-memory session override the
+    `client` fixture uses, so this stays independent of every other test.
+    """
+    app = create_app()
+    app.dependency_overrides[get_session] = client.app.dependency_overrides[get_session]
+    full_client = TestClient(app)
+
+    correlation_id = "6f1e7b3a-0000-4000-8000-000000000001"
+    response = full_client.post(
+        "/api/v1/jobs/",
+        json={"title": "Python roles", "keywords": ["python"]},
+        headers={"X-Correlation-Id": correlation_id},
+    )
+    assert response.headers["X-Correlation-Id"] == correlation_id
+
+    created = response.json()
+    full = full_client.get(f"/api/v1/jobs/{created['id']}").json()
+    assert full["correlation_id"] == correlation_id
 
 
 def test_list_job_searches(client):

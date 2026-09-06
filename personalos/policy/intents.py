@@ -20,6 +20,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
+from personalos.domain.context import ExecutionContext
 from personalos.policy.errors import InvalidApproval, PolicyViolation
 
 
@@ -70,6 +71,11 @@ class ToolIntent(BaseModel):
     job_id: UUID | None = None
     agent_id: UUID | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # Correlation identity of the workflow run this intent belongs to. Carried
+    # unchanged from the request that started the run through to whatever tool
+    # adapter ultimately executes it.
+    context: ExecutionContext = Field(default_factory=ExecutionContext.new)
 
     @property
     def tool_ref(self) -> str:
@@ -193,6 +199,11 @@ class ApprovedIntent:
     def arguments(self) -> dict[str, Any]:
         """Arguments as cleared by policy."""
         return dict(self._intent.arguments)
+
+    @property
+    def context(self) -> ExecutionContext:
+        """Correlation identity of the workflow run this intent belongs to."""
+        return self._intent.context
 
     def __setattr__(self, name: str, value: Any):
         raise PolicyViolation("ApprovedIntent is immutable once minted")

@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from personalos.domain.context import ExecutionContext
 from personalos.domain.models import (
     IDEMPOTENCY_KEY_MAX_LENGTH,
     IDEMPOTENCY_KEY_MIN_LENGTH,
@@ -159,9 +160,13 @@ class MCPServer(ABC):
             )
 
         if schema.mutating:
-            return await self._execute_mutating(request.target, schema, handler, intent)
+            return await self._execute_mutating(
+                request.target, schema, handler, intent, request.context
+            )
 
-        logger.info(f"Executing tool '{tool_name}' on {self.name}")
+        logger.info(
+            f"Executing tool '{tool_name}' on {self.name} ({request.context.as_log_str()})"
+        )
         try:
             result = handler(**intent.model_dump())
             # Awaits any awaitable rather than testing the handler itself, so
@@ -183,6 +188,7 @@ class MCPServer(ABC):
         schema: ToolSchema,
         handler: Callable,
         intent: MutatingIntent,
+        context: ExecutionContext,
     ) -> ToolCallResult:
         """Execute a mutating tool behind the idempotency guard."""
         if self._guard is None:
@@ -197,7 +203,10 @@ class MCPServer(ABC):
         params = intent.side_effect_params()
         idempotency_key = intent.idempotency_key
 
-        logger.info(f"Executing mutating tool '{target.tool}' on {self.name}")
+        logger.info(
+            f"Executing mutating tool '{target.tool}' on {self.name} "
+            f"({context.as_log_str()})"
+        )
         try:
             result, replayed = await self._guard.run(
                 operation=f"{self.name}.{target.tool}",
