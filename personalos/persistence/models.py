@@ -78,6 +78,16 @@ class JobModel(Base):
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
 
+    # Correlation identity (see `personalos.domain.context.ExecutionContext`),
+    # persisted so a worker loading this job in a separate process from the one
+    # that created it still runs with the same workflow/correlation identity.
+    workflow_id = Column(GUID(), nullable=False, default=uuid4)
+    run_id = Column(GUID(), nullable=False, default=uuid4)
+    correlation_id = Column(GUID(), nullable=False, default=uuid4)
+    actor_id = Column(String(255), nullable=False, default="system")
+
+    __table_args__ = (Index("ix_jobs_correlation_id", "correlation_id"),)
+
     def to_dict(self) -> dict:
         """Convert to dictionary."""
         return {
@@ -99,6 +109,10 @@ class JobModel(Base):
             "updated_at": self.updated_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "workflow_id": str(self.workflow_id),
+            "run_id": str(self.run_id),
+            "correlation_id": str(self.correlation_id),
+            "actor_id": self.actor_id,
         }
 
 

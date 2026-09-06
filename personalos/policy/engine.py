@@ -110,12 +110,13 @@ class PolicyEngine:
     def _record(self, intent: ToolIntent, decision: PolicyDecision) -> PolicyDecision:
         """Log the decision and hand it to the audit sink."""
         logger.info(
-            "policy %s %s (rule=%s, origin=%s, requested_by=%s): %s",
+            "policy %s %s (rule=%s, origin=%s, requested_by=%s, %s): %s",
             decision.decision.value,
             decision.tool_ref,
             decision.rule,
             intent.origin.value,
             intent.requested_by,
+            intent.context.as_log_str(),
             decision.reason,
         )
         if self.decision_sink is not None:

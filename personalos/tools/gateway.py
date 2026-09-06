@@ -187,10 +187,11 @@ class PolicyEnforcingToolGateway(ToolGateway):
             )
 
         logger.info(
-            "executing %s (intent=%s, rule=%s)",
+            "executing %s (intent=%s, rule=%s, %s)",
             approved.intent.tool_ref,
             approved.intent.intent_id,
             approved.decision.rule,
+            approved.context.as_log_str(),
         )
         payload = await self.invoker.invoke(approved)
         return ToolResult.from_adapter_payload(approved, payload)

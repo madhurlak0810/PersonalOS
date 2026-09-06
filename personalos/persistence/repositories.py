@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from personalos.domain.context import ExecutionContext
 from personalos.domain.models import (
     Job,
     JobStatus,
@@ -38,6 +39,10 @@ class JobRepository:
             # The column is `job_metadata`: `metadata` is reserved by
             # SQLAlchemy's declarative base and never reaches the database.
             job_metadata=job.metadata,
+            workflow_id=job.context.workflow_id,
+            run_id=job.context.run_id,
+            correlation_id=job.context.correlation_id,
+            actor_id=job.context.actor_id,
         )
         self.session.add(db_job)
         self.session.commit()
@@ -110,6 +115,12 @@ class JobRepository:
             updated_at=db_job.updated_at,
             started_at=db_job.started_at,
             completed_at=db_job.completed_at,
+            context=ExecutionContext(
+                workflow_id=db_job.workflow_id,
+                run_id=db_job.run_id,
+                correlation_id=db_job.correlation_id,
+                actor_id=db_job.actor_id,
+            ),
         )
 
 

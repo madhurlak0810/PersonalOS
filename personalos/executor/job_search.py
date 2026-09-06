@@ -17,7 +17,8 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from personalos.domain.errors import InternalError, PersonalOSError
-from personalos.domain.models import AgentState, Job, JobStatus
+from personalos.domain.models import AgentState, Event, EventType, Job, JobStatus
+from personalos.events import EventBus, get_event_bus
 from personalos.persistence.repositories import JobRepository
 from personalos.policy import IntentOrigin, ToolIntent
 from personalos.tools.gateway import ToolGateway, ToolResult
@@ -38,12 +39,19 @@ MAX_PERSISTED_MATCHES = 10
 class JobSearchExecutor:
     """Executes the job search loop over a policy-enforcing tool gateway."""
 
-    def __init__(self, repo: JobRepository, gateway: ToolGateway):
+    def __init__(
+        self,
+        repo: JobRepository,
+        gateway: ToolGateway,
+        event_bus: EventBus | None = None,
+    ):
         """Initialize with a repository and a tool gateway.
 
         The gateway is required rather than defaulted: an executor with no
         gateway would have to reach for a global tool manager, which is exactly
-        the policy bypass this boundary exists to prevent.
+        the policy bypass this boundary exists to prevent. `event_bus` defaults
+        to the process-global bus, mirroring how other wiring code defaults to
+        global singletons (see `personalos.mcp.manager.get_mcp_manager`).
         """
         if gateway is None:
             raise ValueError(
@@ -52,18 +60,25 @@ class JobSearchExecutor:
             )
         self.repo = repo
         self.gateway = gateway
+        self.event_bus = event_bus or get_event_bus()
 
     async def run_job_search(self, job: Job, agent_id: UUID | None = None) -> Job:
         """Run a job search task."""
         if agent_id is None:
             agent_id = uuid4()
 
-        logger.info(f"Starting job search: {job.id} with agent: {agent_id}")
+        logger.info(
+            "Starting job search: %s with agent: %s (%s)",
+            job.id,
+            agent_id,
+            job.context.as_log_str(),
+        )
 
         # Update job status
         job.status = JobStatus.RUNNING
         job.started_at = datetime.utcnow()
         job = self.repo.update(job)
+        await self._publish(job, EventType.JOB_STARTED, agent_id)
 
         try:
             # Step 1: Prepare search parameters
@@ -107,9 +122,15 @@ class JobSearchExecutor:
             job.status = JobStatus.COMPLETED
             job.completed_at = datetime.utcnow()
             job = self.repo.update(job)
+            await self._publish(
+                job, EventType.JOB_COMPLETED, agent_id, {"results_count": job.results_count}
+            )
 
             logger.info(
-                f"Job search completed: {job.id}, found {job.results_count} matches"
+                "Job search completed: %s, found %s matches (%s)",
+                job.id,
+                job.results_count,
+                job.context.as_log_str(),
             )
             return job
 
@@ -122,16 +143,20 @@ class JobSearchExecutor:
             # line below, not in a field the API can return to a caller.
             error = e if isinstance(e, PersonalOSError) else InternalError()
             logger.exception(
-                "Job search failed (job_id=%s, error_code=%s, context_id=%s)",
+                "Job search failed (job_id=%s, error_code=%s, context_id=%s, %s)",
                 job.id,
                 error.code.value,
                 error.context_id,
+                job.context.as_log_str(),
             )
             job.status = JobStatus.FAILED
             job.error_code = error.code.value
             job.error_message = error.message
             job.updated_at = datetime.utcnow()
             job = self.repo.update(job)
+            await self._publish(
+                job, EventType.JOB_FAILED, agent_id, {"error_code": error.code.value}
+            )
             raise
 
     # ------------------------------------------------------------------
@@ -217,5 +242,24 @@ class JobSearchExecutor:
             requested_by=f"executor:job_search#{state.current_step}",
             job_id=job.id,
             agent_id=state.agent_id,
+            context=job.context,
         )
         return await self.gateway.dispatch(intent)
+
+    async def _publish(
+        self,
+        job: Job,
+        event_type: EventType,
+        agent_id: UUID,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        """Publish a lifecycle event for this job, carrying its run context."""
+        await self.event_bus.publish(
+            Event(
+                event_type=event_type,
+                job_id=job.id,
+                agent_id=agent_id,
+                context=job.context,
+                data=data or {},
+            )
+        )

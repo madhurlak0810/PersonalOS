@@ -23,17 +23,27 @@ from personalos.domain.errors import InternalError, PersonalOSError, ValidationF
 logger = logging.getLogger(__name__)
 
 
+def _correlation_id(request: Request) -> str:
+    """The request's correlation id, or a placeholder if none was assigned.
+
+    A router-only app built directly from these handlers (as some tests do)
+    has no `CorrelationIdMiddleware`, so `request.state` may not carry one.
+    """
+    return str(getattr(request.state, "correlation_id", None) or "-")
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Attach the shared error-envelope handlers to `app`."""
 
     @app.exception_handler(PersonalOSError)
     async def handle_personalos_error(request: Request, exc: PersonalOSError):
         logger.error(
-            "%s %s failed (error_code=%s, context_id=%s): %s",
+            "%s %s failed (error_code=%s, context_id=%s, correlation_id=%s): %s",
             request.method,
             request.url.path,
             exc.code.value,
             exc.context_id,
+            _correlation_id(request),
             exc.message,
             exc_info=exc,
         )
@@ -43,10 +53,11 @@ def register_error_handlers(app: FastAPI) -> None:
     async def handle_validation_error(request: Request, exc: RequestValidationError):
         error = ValidationFailed(details={"errors": exc.errors()})
         logger.info(
-            "%s %s failed request validation (context_id=%s)",
+            "%s %s failed request validation (context_id=%s, correlation_id=%s)",
             request.method,
             request.url.path,
             error.context_id,
+            _correlation_id(request),
         )
         return JSONResponse(status_code=error.http_status, content=error.to_envelope())
 
@@ -54,10 +65,11 @@ def register_error_handlers(app: FastAPI) -> None:
     async def handle_unexpected_error(request: Request, exc: Exception):
         error = InternalError()
         logger.exception(
-            "%s %s failed with an unhandled exception (context_id=%s)",
+            "%s %s failed with an unhandled exception (context_id=%s, correlation_id=%s)",
             request.method,
             request.url.path,
             error.context_id,
+            _correlation_id(request),
         )
         return JSONResponse(status_code=error.http_status, content=error.to_envelope())
 

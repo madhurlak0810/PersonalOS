@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from personalos.domain.context import ExecutionContext
 from personalos.domain.errors import ValidationFailed
 
 # Minimum length for an idempotency key. Keys are supplied by callers and must
@@ -92,6 +93,10 @@ class Job(BaseModel):
     # Metadata
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    # Correlation identity for this run, carried through every intent and
+    # event the executor produces while working this job.
+    context: ExecutionContext = Field(default_factory=ExecutionContext.new)
+
     class Config:
         use_enum_values = True
 
@@ -132,6 +137,7 @@ class Event(BaseModel):
     agent_id: UUID | None = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     data: dict[str, Any] = Field(default_factory=dict)
+    context: ExecutionContext = Field(default_factory=ExecutionContext.new)
 
     class Config:
         use_enum_values = True
@@ -247,6 +253,7 @@ class ToolCallRequest(BaseModel):
 
     target: ActionTarget
     params: dict[str, Any] = Field(default_factory=dict)
+    context: ExecutionContext = Field(default_factory=ExecutionContext.new)
 
 
 class ToolCallErrorCode(str, Enum):
