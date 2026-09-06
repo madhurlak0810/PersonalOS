@@ -177,7 +177,10 @@ class MCPServer(ABC):
                 result = await result
             return ToolCallResult.succeeded(request.target, result)
         except Exception as e:
-            logger.error(f"Error executing '{tool_name}': {str(e)}", exc_info=True)
+            logger.error(
+                f"Error executing '{tool_name}': {str(e)} ({request.context.as_log_str()})",
+                exc_info=True,
+            )
             return ToolCallResult.failed(
                 request.target, ToolCallErrorCode.EXECUTION_ERROR, str(e)
             )
@@ -215,13 +218,22 @@ class MCPServer(ABC):
                 handler=handler,
             )
         except InvalidIdempotencyKey as e:
-            logger.warning(f"Idempotency check rejected '{target.tool}': {str(e)}")
+            logger.warning(
+                f"Idempotency check rejected '{target.tool}': {str(e)} "
+                f"({context.as_log_str()})"
+            )
             return ToolCallResult.failed(target, ToolCallErrorCode.VALIDATION_ERROR, str(e))
         except IdempotencyError as e:
-            logger.warning(f"Idempotency check rejected '{target.tool}': {str(e)}")
+            logger.warning(
+                f"Idempotency check rejected '{target.tool}': {str(e)} "
+                f"({context.as_log_str()})"
+            )
             return ToolCallResult.failed(target, ToolCallErrorCode.IDEMPOTENCY_CONFLICT, str(e))
         except Exception as e:
-            logger.error(f"Error executing '{target.tool}': {str(e)}", exc_info=True)
+            logger.error(
+                f"Error executing '{target.tool}': {str(e)} ({context.as_log_str()})",
+                exc_info=True,
+            )
             return ToolCallResult.failed(target, ToolCallErrorCode.EXECUTION_ERROR, str(e))
 
         try:
@@ -229,7 +241,10 @@ class MCPServer(ABC):
                 target, result, idempotency_key=idempotency_key, replayed=replayed
             )
         except Exception as e:
-            logger.error(f"Malformed result from '{target.tool}': {str(e)}", exc_info=True)
+            logger.error(
+                f"Malformed result from '{target.tool}': {str(e)} ({context.as_log_str()})",
+                exc_info=True,
+            )
             return ToolCallResult.failed(target, ToolCallErrorCode.EXECUTION_ERROR, str(e))
 
     @abstractmethod

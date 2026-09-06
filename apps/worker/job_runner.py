@@ -47,7 +47,12 @@ def main(job_id: str) -> None:
     logging.basicConfig(level=logging.INFO)
     register_mcp_servers()
     job = asyncio.run(run_job_search(UUID(job_id)))
-    logger.info("Job %s finished with status %s", job.id, job.status)
+    logger.info(
+        "Job %s finished with status %s (%s)",
+        job.id,
+        job.status,
+        job.context.as_log_str(),
+    )
 
 
 if __name__ == "__main__":
