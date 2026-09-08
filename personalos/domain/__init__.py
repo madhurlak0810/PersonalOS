@@ -1,5 +1,6 @@
 """Domain package."""
 
+from .context import ExecutionContext
 from .errors import (
     ErrorCode,
     IdempotencyConflict,
@@ -21,6 +22,7 @@ from .models import (
 )
 
 __all__ = [
+    "ExecutionContext",
     "Job",
     "JobStatus",
     "AgentState",

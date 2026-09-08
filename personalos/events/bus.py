@@ -29,7 +29,7 @@ class EventBus:
 
     async def publish(self, event: Event):
         """Publish an event."""
-        logger.info(f"Publishing event: {event.event_type}")
+        logger.info(f"Publishing event: {event.event_type} ({event.context.as_log_str()})")
         handlers = self._subscribers.get(event.event_type, [])
         for handler in handlers:
             try:

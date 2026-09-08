@@ -4,12 +4,14 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from personalos.domain.context import ExecutionContext
 from personalos.domain.errors import NotFound
-from personalos.domain.models import Job, JobStatus
+from personalos.domain.models import Event, EventType, Job, JobStatus
+from personalos.events import get_event_bus
 from personalos.persistence import get_session
 from personalos.persistence.repositories import JobRepository
 
@@ -74,6 +76,10 @@ class JobResponse(BaseModel):
     updated_at: str
     started_at: str | None = None
     completed_at: str | None = None
+    workflow_id: UUID
+    run_id: UUID
+    correlation_id: UUID
+    actor_id: str
 
     @classmethod
     def from_domain(cls, job: Job) -> "JobResponse":
@@ -96,6 +102,10 @@ class JobResponse(BaseModel):
             updated_at=job.updated_at.isoformat(),
             started_at=job.started_at.isoformat() if job.started_at else None,
             completed_at=job.completed_at.isoformat() if job.completed_at else None,
+            workflow_id=job.context.workflow_id,
+            run_id=job.context.run_id,
+            correlation_id=job.context.correlation_id,
+            actor_id=job.context.actor_id,
         )
 
 
@@ -108,8 +118,10 @@ class JobListResponse(BaseModel):
 
 @router.post("/", response_model=JobSummaryResponse, status_code=201)
 async def create_job_search(
+    http_request: Request,
     request: JobCreateRequest,
     session: Session = Depends(get_session),
+    x_actor_id: str | None = Header(default=None, alias="X-Actor-Id"),
 ):
     """Create a new job search task.
 
@@ -118,12 +130,24 @@ async def create_job_search(
     session: a request-scoped session is closed before background work would
     finish, so it cannot be reused there.
 
+    The job is stamped with an `ExecutionContext` seeded from this request's
+    correlation id (set by `CorrelationIdMiddleware`) and the caller's declared
+    actor identity, so a log line or tool call anywhere downstream -- including
+    in the worker process that eventually runs it -- can be traced back to this
+    request.
+
     Any failure here (validation aside, which FastAPI handles before this body
     runs) propagates to the app-level handlers registered in
     ``apps.api.errors``, which log it with a stack trace and return the
     sanitized error envelope.
     """
     repo = JobRepository(session)
+
+    correlation_id = getattr(http_request.state, "correlation_id", None)
+    context = ExecutionContext(
+        actor_id=x_actor_id or "api",
+        **({"correlation_id": correlation_id} if correlation_id else {}),
+    )
 
     job = repo.create(
         Job(
@@ -134,9 +158,14 @@ async def create_job_search(
             salary_min=request.salary_min,
             salary_max=request.salary_max,
             job_type=request.job_type,
+            context=context,
         )
     )
-    logger.info(f"Created job search: {job.id}")
+    logger.info("Created job search: %s (%s)", job.id, job.context.as_log_str())
+
+    await get_event_bus().publish(
+        Event(event_type=EventType.JOB_CREATED, job_id=job.id, context=job.context)
+    )
 
     return JobSummaryResponse.from_domain(job)
 

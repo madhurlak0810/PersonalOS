@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from personalos.domain.context import ExecutionContext
 from personalos.domain.models import (
     IDEMPOTENCY_KEY_MAX_LENGTH,
     IDEMPOTENCY_KEY_MIN_LENGTH,
@@ -159,9 +160,13 @@ class MCPServer(ABC):
             )
 
         if schema.mutating:
-            return await self._execute_mutating(request.target, schema, handler, intent)
+            return await self._execute_mutating(
+                request.target, schema, handler, intent, request.context
+            )
 
-        logger.info(f"Executing tool '{tool_name}' on {self.name}")
+        logger.info(
+            f"Executing tool '{tool_name}' on {self.name} ({request.context.as_log_str()})"
+        )
         try:
             result = handler(**intent.model_dump())
             # Awaits any awaitable rather than testing the handler itself, so
@@ -172,7 +177,10 @@ class MCPServer(ABC):
                 result = await result
             return ToolCallResult.succeeded(request.target, result)
         except Exception as e:
-            logger.error(f"Error executing '{tool_name}': {str(e)}", exc_info=True)
+            logger.error(
+                f"Error executing '{tool_name}': {str(e)} ({request.context.as_log_str()})",
+                exc_info=True,
+            )
             return ToolCallResult.failed(
                 request.target, ToolCallErrorCode.EXECUTION_ERROR, str(e)
             )
@@ -183,6 +191,7 @@ class MCPServer(ABC):
         schema: ToolSchema,
         handler: Callable,
         intent: MutatingIntent,
+        context: ExecutionContext,
     ) -> ToolCallResult:
         """Execute a mutating tool behind the idempotency guard."""
         if self._guard is None:
@@ -197,7 +206,10 @@ class MCPServer(ABC):
         params = intent.side_effect_params()
         idempotency_key = intent.idempotency_key
 
-        logger.info(f"Executing mutating tool '{target.tool}' on {self.name}")
+        logger.info(
+            f"Executing mutating tool '{target.tool}' on {self.name} "
+            f"({context.as_log_str()})"
+        )
         try:
             result, replayed = await self._guard.run(
                 operation=f"{self.name}.{target.tool}",
@@ -206,13 +218,22 @@ class MCPServer(ABC):
                 handler=handler,
             )
         except InvalidIdempotencyKey as e:
-            logger.warning(f"Idempotency check rejected '{target.tool}': {str(e)}")
+            logger.warning(
+                f"Idempotency check rejected '{target.tool}': {str(e)} "
+                f"({context.as_log_str()})"
+            )
             return ToolCallResult.failed(target, ToolCallErrorCode.VALIDATION_ERROR, str(e))
         except IdempotencyError as e:
-            logger.warning(f"Idempotency check rejected '{target.tool}': {str(e)}")
+            logger.warning(
+                f"Idempotency check rejected '{target.tool}': {str(e)} "
+                f"({context.as_log_str()})"
+            )
             return ToolCallResult.failed(target, ToolCallErrorCode.IDEMPOTENCY_CONFLICT, str(e))
         except Exception as e:
-            logger.error(f"Error executing '{target.tool}': {str(e)}", exc_info=True)
+            logger.error(
+                f"Error executing '{target.tool}': {str(e)} ({context.as_log_str()})",
+                exc_info=True,
+            )
             return ToolCallResult.failed(target, ToolCallErrorCode.EXECUTION_ERROR, str(e))
 
         try:
@@ -220,7 +241,10 @@ class MCPServer(ABC):
                 target, result, idempotency_key=idempotency_key, replayed=replayed
             )
         except Exception as e:
-            logger.error(f"Malformed result from '{target.tool}': {str(e)}", exc_info=True)
+            logger.error(
+                f"Malformed result from '{target.tool}': {str(e)} ({context.as_log_str()})",
+                exc_info=True,
+            )
             return ToolCallResult.failed(target, ToolCallErrorCode.EXECUTION_ERROR, str(e))
 
     @abstractmethod
