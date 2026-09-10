@@ -11,8 +11,25 @@ from .idempotency import (
     SqlOperationStore,
     fingerprint_request,
 )
-from .models import AgentStateModel, EventModel, JobModel, OperationModel
-from .repositories import JobRepository, OperationRepository
+from .models import (
+    AgentStateModel,
+    ApprovalModel,
+    CheckpointModel,
+    EventModel,
+    JobModel,
+    OperationModel,
+    UserModel,
+    WorkflowModel,
+    WorkflowRunModel,
+    WorkflowStepModel,
+)
+from .repositories import (
+    CheckpointRepository,
+    JobRepository,
+    OperationRepository,
+    WorkflowRepository,
+    WorkflowRunRepository,
+)
 
 __all__ = [
     "SessionLocal",
@@ -23,8 +40,17 @@ __all__ = [
     "EventModel",
     "AgentStateModel",
     "OperationModel",
+    "UserModel",
+    "WorkflowModel",
+    "WorkflowRunModel",
+    "WorkflowStepModel",
+    "CheckpointModel",
+    "ApprovalModel",
     "JobRepository",
     "OperationRepository",
+    "WorkflowRepository",
+    "WorkflowRunRepository",
+    "CheckpointRepository",
     "IdempotencyGuard",
     "IdempotencyError",
     "IdempotencyKeyReused",
