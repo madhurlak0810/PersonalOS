@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -14,7 +14,13 @@ from personalos.domain.models import (
     OperationRecord,
     OperationStatus,
 )
-from personalos.persistence.models import JobModel, OperationModel
+from personalos.persistence.models import (
+    CheckpointModel,
+    JobModel,
+    OperationModel,
+    WorkflowModel,
+    WorkflowRunModel,
+)
 
 
 class JobRepository:
@@ -258,4 +264,115 @@ class OperationRepository:
             created_at=db_op.created_at,
             updated_at=db_op.updated_at,
             completed_at=db_op.completed_at,
+        )
+
+
+class WorkflowRepository:
+    """Repository for workflow definitions."""
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def create(self, *, name: str, description: str | None = None) -> WorkflowModel:
+        """Create a new workflow definition."""
+        db_workflow = WorkflowModel(name=name, description=description)
+        self.session.add(db_workflow)
+        self.session.commit()
+        return db_workflow
+
+    def get_by_id(self, workflow_id: UUID) -> WorkflowModel | None:
+        """Get a workflow definition by ID."""
+        return self.session.query(WorkflowModel).filter(WorkflowModel.id == workflow_id).first()
+
+
+class WorkflowRunRepository:
+    """Repository for workflow run persistence.
+
+    A run is one execution attempt of a workflow, identified by the
+    `thread_id` its checkpoints are keyed by.
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def create(
+        self,
+        *,
+        workflow_id: UUID,
+        thread_id: str | None = None,
+        user_id: UUID | None = None,
+        actor_id: str = "system",
+        correlation_id: UUID | None = None,
+    ) -> WorkflowRunModel:
+        """Create a new workflow run."""
+        db_run = WorkflowRunModel(
+            workflow_id=workflow_id,
+            user_id=user_id,
+            thread_id=thread_id or str(uuid4()),
+            actor_id=actor_id,
+            correlation_id=correlation_id,
+        )
+        self.session.add(db_run)
+        self.session.commit()
+        return db_run
+
+    def get_by_id(self, run_id: UUID) -> WorkflowRunModel | None:
+        """Get a workflow run by ID."""
+        return self.session.query(WorkflowRunModel).filter(WorkflowRunModel.id == run_id).first()
+
+    def get_by_workflow_id(self, workflow_id: UUID) -> list[WorkflowRunModel]:
+        """Get every run of a workflow, so a restarted process can resume any of them."""
+        return (
+            self.session.query(WorkflowRunModel)
+            .filter(WorkflowRunModel.workflow_id == workflow_id)
+            .all()
+        )
+
+
+class CheckpointRepository:
+    """Repository for the LangGraph durable checkpointer's storage.
+
+    Checkpoints are keyed by `thread_id` / `checkpoint_ns` / `checkpoint_id`
+    and cross-indexed by `workflow_id` so a run's latest state can be found
+    without needing the checkpointer's own thread bookkeeping.
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def save(
+        self,
+        *,
+        workflow_id: UUID,
+        thread_id: str,
+        checkpoint: dict[str, Any],
+        workflow_run_id: UUID | None = None,
+        checkpoint_ns: str = "",
+        parent_checkpoint_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> CheckpointModel:
+        """Persist a new checkpoint."""
+        db_checkpoint = CheckpointModel(
+            workflow_id=workflow_id,
+            workflow_run_id=workflow_run_id,
+            thread_id=thread_id,
+            checkpoint_ns=checkpoint_ns,
+            parent_checkpoint_id=parent_checkpoint_id,
+            checkpoint=checkpoint,
+            checkpoint_metadata=metadata or {},
+        )
+        self.session.add(db_checkpoint)
+        self.session.commit()
+        return db_checkpoint
+
+    def get_latest_by_workflow_id(self, workflow_id: UUID) -> CheckpointModel | None:
+        """Get the most recently written checkpoint for a workflow, if any."""
+        return (
+            self.session.query(CheckpointModel)
+            .filter(CheckpointModel.workflow_id == workflow_id)
+            .order_by(CheckpointModel.created_at.desc())
+            .first()
         )

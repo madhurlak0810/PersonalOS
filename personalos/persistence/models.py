@@ -9,11 +9,13 @@ from sqlalchemy import (
     Column,
     DateTime,
     Enum,
+    ForeignKey,
     Index,
     Integer,
     String,
     Text,
     TypeDecorator,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase
@@ -211,6 +213,246 @@ class AgentStateModel(Base):
             "current_step": self.current_step,
             "step_data": self.step_data,
             "history": self.history,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
+# --- Workflow orchestration schema -----------------------------------------
+#
+# The tables below back any LangGraph-based workflow, independent of domain:
+# who ran it (users), what was run (workflows), each execution attempt
+# (workflow_runs) and its steps (workflow_steps), the durable checkpointer
+# state LangGraph needs to resume a run (checkpoints), and the human sign-off
+# a mutating action needed before it executed (approvals).
+
+
+class UserModel(Base):
+    """ORM model for a person or service identity that can initiate or approve work."""
+
+    __tablename__ = "users"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    email = Column(String(255), nullable=True, unique=True)
+    display_name = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "email": self.email,
+            "display_name": self.display_name,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
+class WorkflowModel(Base):
+    """ORM model for a workflow definition, e.g. 'job_search'."""
+
+    __tablename__ = "workflows"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_workflows_name", "name"),)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "name": self.name,
+            "description": self.description,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
+class WorkflowRunModel(Base):
+    """ORM model for one execution attempt of a workflow.
+
+    `thread_id` identifies the LangGraph thread this run drives and is the key
+    the durable checkpointer resumes by.
+    """
+
+    __tablename__ = "workflow_runs"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    workflow_id = Column(GUID(), ForeignKey("workflows.id"), nullable=False)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=True)
+    thread_id = Column(String(255), nullable=False, unique=True, default=lambda: str(uuid4()))
+    status = Column(
+        Enum("pending", "running", "completed", "failed", "cancelled", name="workflow_run_status"),
+        nullable=False,
+        default="pending",
+    )
+    # Correlation identity (see `personalos.domain.context.ExecutionContext`)
+    # for the run, so every log line and event it produces traces back here.
+    correlation_id = Column(GUID(), nullable=True)
+    actor_id = Column(String(255), nullable=False, default="system")
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_workflow_runs_workflow_id", "workflow_id"),)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "workflow_id": str(self.workflow_id),
+            "user_id": str(self.user_id) if self.user_id else None,
+            "thread_id": self.thread_id,
+            "status": self.status,
+            "correlation_id": str(self.correlation_id) if self.correlation_id else None,
+            "actor_id": self.actor_id,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
+class WorkflowStepModel(Base):
+    """ORM model for one step within a workflow run."""
+
+    __tablename__ = "workflow_steps"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    workflow_run_id = Column(GUID(), ForeignKey("workflow_runs.id"), nullable=False)
+    step_name = Column(String(255), nullable=False)
+    sequence = Column(Integer, nullable=False, default=0)
+    status = Column(
+        Enum("pending", "running", "completed", "failed", "skipped", name="workflow_step_status"),
+        nullable=False,
+        default="pending",
+    )
+    input_data = Column(JSON, nullable=False, default={})
+    output_data = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_workflow_steps_workflow_run_id", "workflow_run_id"),)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "workflow_run_id": str(self.workflow_run_id),
+            "step_name": self.step_name,
+            "sequence": self.sequence,
+            "status": self.status,
+            "input_data": self.input_data,
+            "output_data": self.output_data,
+            "error": self.error,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
+class CheckpointModel(Base):
+    """ORM model backing the LangGraph durable checkpointer.
+
+    Keyed by `thread_id` / `checkpoint_ns` / `checkpoint_id`, mirroring
+    LangGraph's own checkpoint tuple, and cross-indexed by `workflow_id` so a
+    workflow's checkpoints can be found without going through a run.
+    """
+
+    __tablename__ = "checkpoints"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    workflow_id = Column(GUID(), ForeignKey("workflows.id"), nullable=False)
+    workflow_run_id = Column(GUID(), ForeignKey("workflow_runs.id"), nullable=True)
+    thread_id = Column(String(255), nullable=False)
+    checkpoint_ns = Column(String(255), nullable=False, default="")
+    checkpoint_id = Column(String(255), nullable=False, default=lambda: str(uuid4()))
+    parent_checkpoint_id = Column(String(255), nullable=True)
+    checkpoint = Column(JSON, nullable=False, default={})
+    checkpoint_metadata = Column(JSON, nullable=False, default={})
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_checkpoints_workflow_id", "workflow_id"),
+        Index("ix_checkpoints_thread_id", "thread_id"),
+        UniqueConstraint(
+            "thread_id", "checkpoint_ns", "checkpoint_id", name="uq_checkpoints_thread_ns_checkpoint"
+        ),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "workflow_id": str(self.workflow_id),
+            "workflow_run_id": str(self.workflow_run_id) if self.workflow_run_id else None,
+            "thread_id": self.thread_id,
+            "checkpoint_ns": self.checkpoint_ns,
+            "checkpoint_id": self.checkpoint_id,
+            "parent_checkpoint_id": self.parent_checkpoint_id,
+            "checkpoint": self.checkpoint,
+            "checkpoint_metadata": self.checkpoint_metadata,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
+class ApprovalModel(Base):
+    """ORM model for a human sign-off on one proposed action.
+
+    `action_hash` is the fingerprint of the exact proposed action (see
+    `personalos.policy.intents.fingerprint_intent`); it is stored verbatim so
+    an approval can only ever be matched against the action it was granted
+    for; a changed action fingerprints differently and cannot reuse the row.
+    """
+
+    __tablename__ = "approvals"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    workflow_run_id = Column(GUID(), ForeignKey("workflow_runs.id"), nullable=True)
+    workflow_step_id = Column(GUID(), ForeignKey("workflow_steps.id"), nullable=True)
+    action_hash = Column(String(64), nullable=False)
+    status = Column(
+        Enum("pending", "approved", "denied", name="approval_status"),
+        nullable=False,
+        default="pending",
+    )
+    requested_by_user_id = Column(GUID(), ForeignKey("users.id"), nullable=True)
+    approved_by_user_id = Column(GUID(), ForeignKey("users.id"), nullable=True)
+    note = Column(Text, nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_approvals_action_hash", "action_hash"),)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "workflow_run_id": str(self.workflow_run_id) if self.workflow_run_id else None,
+            "workflow_step_id": str(self.workflow_step_id) if self.workflow_step_id else None,
+            "action_hash": self.action_hash,
+            "status": self.status,
+            "requested_by_user_id": str(self.requested_by_user_id)
+            if self.requested_by_user_id
+            else None,
+            "approved_by_user_id": str(self.approved_by_user_id)
+            if self.approved_by_user_id
+            else None,
+            "note": self.note,
+            "decided_at": self.decided_at.isoformat() if self.decided_at else None,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
