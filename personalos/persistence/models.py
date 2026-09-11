@@ -456,3 +456,224 @@ class ApprovalModel(Base):
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
+
+
+# --- Job-search domain schema ------------------------------------------------
+#
+# The canonical job-search tables: postings discovered from any source
+# (job_postings), a user's versioned targeting/preferences (candidate_profiles),
+# one user's tracked pursuit of one posting (applications), and the tailored
+# resume/cover-letter drafts generated for an application (artifact_versions).
+#
+# `applications.status` is constrained by its Enum to the values in
+# `personalos.domain.models.ApplicationStatus`, but the *transition* between
+# them -- whether DISCOVERED may become SAVED, never OFFER directly -- is
+# enforced by `ApplicationRepository.update_status` calling
+# `personalos.domain.models.validate_application_status_transition`. The
+# column alone only rejects an unknown status string, not an illegal move.
+
+
+class JobPostingModel(Base):
+    """ORM model for one job posting discovered from a source (board, referral, etc.).
+
+    `description_hash` and `normalized_json` are the dedupe inputs;
+    `dedupe_key` is derived from the posting's normalized content (not
+    `source` + `source_job_id`), so the same role scraped from two different
+    boards still collapses onto one row rather than creating a duplicate.
+    """
+
+    __tablename__ = "job_postings"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    source = Column(String(100), nullable=False)
+    source_job_id = Column(String(255), nullable=True)
+    title = Column(String(500), nullable=False)
+    company = Column(String(255), nullable=False)
+    location = Column(String(255), nullable=True)
+    url = Column(Text, nullable=True)
+    raw_json = Column(JSON, nullable=False, default={})
+    normalized_json = Column(JSON, nullable=False, default={})
+    description_hash = Column(String(64), nullable=False)
+    dedupe_key = Column(String(150), nullable=False)
+    posted_at = Column(DateTime, nullable=True)
+    discovered_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_job_postings_dedupe_key"),
+        Index("ix_job_postings_source", "source"),
+        Index("ix_job_postings_company", "company"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "source": self.source,
+            "source_job_id": self.source_job_id,
+            "title": self.title,
+            "company": self.company,
+            "location": self.location,
+            "url": self.url,
+            "raw_json": self.raw_json,
+            "normalized_json": self.normalized_json,
+            "description_hash": self.description_hash,
+            "dedupe_key": self.dedupe_key,
+            "posted_at": self.posted_at.isoformat() if self.posted_at else None,
+            "discovered_at": self.discovered_at.isoformat(),
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
+class CandidateProfileModel(Base):
+    """ORM model for one version of a user's job-search targeting profile.
+
+    Profiles are versioned rather than updated in place: `profile_version`
+    plus the unique constraint below let an application record exactly which
+    snapshot of a user's roles/locations/preferences it was prepared against.
+    """
+
+    __tablename__ = "candidate_profiles"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
+    profile_version = Column(Integer, nullable=False, default=1)
+    target_roles = Column(JSON, nullable=False, default=[])
+    target_locations = Column(JSON, nullable=False, default=[])
+    preferences = Column(JSON, nullable=False, default={})
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "profile_version", name="uq_candidate_profiles_user_version"
+        ),
+        Index("ix_candidate_profiles_user_id", "user_id"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "user_id": str(self.user_id),
+            "profile_version": self.profile_version,
+            "target_roles": self.target_roles,
+            "target_locations": self.target_locations,
+            "preferences": self.preferences,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
+class ApplicationModel(Base):
+    """ORM model for one user's tracked pursuit of one job posting.
+
+    See the module docstring above: `status` only constrains the value to a
+    known lifecycle state, not the transition between states.
+    """
+
+    __tablename__ = "applications"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    job_posting_id = Column(GUID(), ForeignKey("job_postings.id"), nullable=False)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
+    candidate_profile_id = Column(GUID(), ForeignKey("candidate_profiles.id"), nullable=True)
+    status = Column(
+        Enum(
+            "discovered",
+            "saved",
+            "preparing",
+            "ready_to_apply",
+            "applied",
+            "interviewing",
+            "offer",
+            "rejected",
+            "withdrawn",
+            "skipped",
+            name="application_status",
+        ),
+        nullable=False,
+        default="discovered",
+    )
+    resume_doc_id = Column(String(255), nullable=True)
+    notes = Column(Text, nullable=True)
+    applied_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "job_posting_id", "user_id", name="uq_applications_job_posting_user"
+        ),
+        Index("ix_applications_user_id", "user_id"),
+        Index("ix_applications_status", "status"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "job_posting_id": str(self.job_posting_id),
+            "user_id": str(self.user_id),
+            "candidate_profile_id": str(self.candidate_profile_id)
+            if self.candidate_profile_id
+            else None,
+            "status": self.status,
+            "resume_doc_id": self.resume_doc_id,
+            "notes": self.notes,
+            "applied_at": self.applied_at.isoformat() if self.applied_at else None,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
+class ArtifactVersionModel(Base):
+    """ORM model for one generated resume/cover-letter draft for an application.
+
+    `evidence` must cite the resume section(s) or project(s) the draft was
+    generated from (see `personalos.domain.models.validate_evidence_links`):
+    `ArtifactVersionRepository.create` rejects an empty list before the row
+    is ever written, so no draft can carry an unlinked claim.
+    """
+
+    __tablename__ = "artifact_versions"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    application_id = Column(GUID(), ForeignKey("applications.id"), nullable=False)
+    artifact_type = Column(
+        Enum("resume", "cover_letter", name="artifact_type"), nullable=False
+    )
+    version = Column(Integer, nullable=False, default=1)
+    doc_id = Column(String(255), nullable=True)
+    content = Column(Text, nullable=True)
+    evidence = Column(JSON, nullable=False)
+    generated_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "application_id",
+            "artifact_type",
+            "version",
+            name="uq_artifact_versions_app_type_version",
+        ),
+        Index("ix_artifact_versions_application_id", "application_id"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "application_id": str(self.application_id),
+            "artifact_type": self.artifact_type,
+            "version": self.version,
+            "doc_id": self.doc_id,
+            "content": self.content,
+            "evidence": self.evidence,
+            "generated_by": self.generated_by,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }

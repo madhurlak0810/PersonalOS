@@ -9,14 +9,21 @@ from sqlalchemy.orm import Session
 
 from personalos.domain.context import ExecutionContext
 from personalos.domain.models import (
+    ApplicationStatus,
     Job,
     JobStatus,
     OperationRecord,
     OperationStatus,
+    validate_application_status_transition,
+    validate_evidence_links,
 )
 from personalos.persistence.models import (
+    ApplicationModel,
+    ArtifactVersionModel,
+    CandidateProfileModel,
     CheckpointModel,
     JobModel,
+    JobPostingModel,
     OperationModel,
     WorkflowModel,
     WorkflowRunModel,
@@ -375,4 +382,216 @@ class CheckpointRepository:
             .filter(CheckpointModel.workflow_id == workflow_id)
             .order_by(CheckpointModel.created_at.desc())
             .first()
+        )
+
+
+class JobPostingRepository:
+    """Repository for discovered job postings.
+
+    `create` lets the dedupe unique constraint on `dedupe_key` do the work:
+    inserting a posting whose content already exists raises `IntegrityError`
+    rather than silently creating a duplicate row.
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def create(
+        self,
+        *,
+        source: str,
+        title: str,
+        company: str,
+        description_hash: str,
+        dedupe_key: str,
+        normalized_json: dict[str, Any] | None = None,
+        raw_json: dict[str, Any] | None = None,
+        source_job_id: str | None = None,
+        location: str | None = None,
+        url: str | None = None,
+        posted_at: datetime | None = None,
+    ) -> JobPostingModel:
+        """Insert a job posting. Raises `IntegrityError` on a duplicate `dedupe_key`."""
+        db_posting = JobPostingModel(
+            source=source,
+            source_job_id=source_job_id,
+            title=title,
+            company=company,
+            location=location,
+            url=url,
+            raw_json=raw_json or {},
+            normalized_json=normalized_json or {},
+            description_hash=description_hash,
+            dedupe_key=dedupe_key,
+            posted_at=posted_at,
+        )
+        self.session.add(db_posting)
+        self.session.commit()
+        return db_posting
+
+    def get_by_id(self, job_posting_id: UUID) -> JobPostingModel | None:
+        """Get a job posting by ID."""
+        return (
+            self.session.query(JobPostingModel)
+            .filter(JobPostingModel.id == job_posting_id)
+            .first()
+        )
+
+    def get_by_dedupe_key(self, dedupe_key: str) -> JobPostingModel | None:
+        """Get the job posting already stored for this dedupe key, if any."""
+        return (
+            self.session.query(JobPostingModel)
+            .filter(JobPostingModel.dedupe_key == dedupe_key)
+            .first()
+        )
+
+
+class CandidateProfileRepository:
+    """Repository for a user's versioned job-search targeting profile."""
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def create(
+        self,
+        *,
+        user_id: UUID,
+        profile_version: int = 1,
+        target_roles: list[str] | None = None,
+        target_locations: list[str] | None = None,
+        preferences: dict[str, Any] | None = None,
+    ) -> CandidateProfileModel:
+        """Insert a new profile version for a user."""
+        db_profile = CandidateProfileModel(
+            user_id=user_id,
+            profile_version=profile_version,
+            target_roles=target_roles or [],
+            target_locations=target_locations or [],
+            preferences=preferences or {},
+        )
+        self.session.add(db_profile)
+        self.session.commit()
+        return db_profile
+
+    def get_latest_by_user_id(self, user_id: UUID) -> CandidateProfileModel | None:
+        """Get a user's highest-numbered profile version, if any."""
+        return (
+            self.session.query(CandidateProfileModel)
+            .filter(CandidateProfileModel.user_id == user_id)
+            .order_by(CandidateProfileModel.profile_version.desc())
+            .first()
+        )
+
+
+class ApplicationRepository:
+    """Repository for a user's tracked pursuit of a job posting.
+
+    `status` is never written anywhere but `update_status`, and that method
+    always runs the move through `validate_application_status_transition`
+    first — the one path by which an application's lifecycle state can
+    change, so a caller (including an LLM-driven one) can request a
+    transition but never set the column outright.
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def create(
+        self,
+        *,
+        job_posting_id: UUID,
+        user_id: UUID,
+        candidate_profile_id: UUID | None = None,
+        resume_doc_id: str | None = None,
+    ) -> ApplicationModel:
+        """Start tracking a job posting for a user, in the initial DISCOVERED status."""
+        db_application = ApplicationModel(
+            job_posting_id=job_posting_id,
+            user_id=user_id,
+            candidate_profile_id=candidate_profile_id,
+            resume_doc_id=resume_doc_id,
+        )
+        self.session.add(db_application)
+        self.session.commit()
+        return db_application
+
+    def get_by_id(self, application_id: UUID) -> ApplicationModel | None:
+        """Get an application by ID."""
+        return (
+            self.session.query(ApplicationModel)
+            .filter(ApplicationModel.id == application_id)
+            .first()
+        )
+
+    def update_status(
+        self, application_id: UUID, new_status: ApplicationStatus
+    ) -> ApplicationModel:
+        """Move an application to `new_status`.
+
+        Raises `ValueError` if the application does not exist, or
+        `InvalidApplicationTransition` if `new_status` is not reachable from
+        the application's current status (e.g. DISCOVERED -> OFFER).
+        """
+        db_application = self.get_by_id(application_id)
+        if not db_application:
+            raise ValueError(f"Application {application_id} not found")
+
+        current = ApplicationStatus(db_application.status)
+        validate_application_status_transition(current, new_status)
+
+        db_application.status = new_status.value
+        db_application.updated_at = datetime.utcnow()
+        if new_status == ApplicationStatus.APPLIED:
+            db_application.applied_at = datetime.utcnow()
+        self.session.commit()
+        return db_application
+
+
+class ArtifactVersionRepository:
+    """Repository for tailored resume/cover-letter drafts generated for an application.
+
+    `create` runs `evidence` through `validate_evidence_links` before
+    constructing the row, so a draft can never be persisted without citing
+    the resume section(s) or project(s) it was generated from.
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def create(
+        self,
+        *,
+        application_id: UUID,
+        artifact_type: str,
+        evidence: list[dict[str, Any]],
+        version: int = 1,
+        doc_id: str | None = None,
+        content: str | None = None,
+        generated_by: str | None = None,
+    ) -> ArtifactVersionModel:
+        """Insert a new artifact version. Raises `InvalidEvidenceLinkage` if `evidence` is empty."""
+        validate_evidence_links(evidence)
+        db_artifact = ArtifactVersionModel(
+            application_id=application_id,
+            artifact_type=artifact_type,
+            version=version,
+            doc_id=doc_id,
+            content=content,
+            evidence=evidence,
+            generated_by=generated_by,
+        )
+        self.session.add(db_artifact)
+        self.session.commit()
+        return db_artifact
+
+    def get_by_application_id(self, application_id: UUID) -> list[ArtifactVersionModel]:
+        """Get every artifact version generated for an application."""
+        return (
+            self.session.query(ArtifactVersionModel)
+            .filter(ArtifactVersionModel.application_id == application_id)
+            .all()
         )
