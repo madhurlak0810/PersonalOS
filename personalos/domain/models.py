@@ -337,3 +337,124 @@ class AgentConfig(BaseModel):
 
     class Config:
         use_enum_values = True
+
+
+class ApplicationStatus(str, Enum):
+    """Lifecycle of a tracked job application.
+
+    Only the states an application is allowed to occupy; which moves between
+    them are legal is `ALLOWED_APPLICATION_TRANSITIONS` below. Nothing writes
+    to `applications.status` directly — every change goes through
+    `validate_application_status_transition`, so an LLM-driven caller can
+    request a move but never set the column outright.
+    """
+
+    DISCOVERED = "discovered"
+    SAVED = "saved"
+    PREPARING = "preparing"
+    READY_TO_APPLY = "ready_to_apply"
+    APPLIED = "applied"
+    INTERVIEWING = "interviewing"
+    OFFER = "offer"
+    REJECTED = "rejected"
+    WITHDRAWN = "withdrawn"
+    SKIPPED = "skipped"
+
+
+#: Documented lifecycle: DISCOVERED -> SAVED -> PREPARING -> READY_TO_APPLY ->
+#: APPLIED -> INTERVIEWING -> OFFER/REJECTED/WITHDRAWN. SKIPPED is reachable
+#: from any pre-APPLIED state (the candidate drops the lead before applying);
+#: REJECTED/WITHDRAWN are also reachable once APPLIED, since a rejection or
+#: withdrawal doesn't require an interview to have happened. Terminal states
+#: (OFFER aside, which can still be withdrawn) have no outgoing transitions.
+ALLOWED_APPLICATION_TRANSITIONS: dict[ApplicationStatus, frozenset[ApplicationStatus]] = {
+    ApplicationStatus.DISCOVERED: frozenset(
+        {ApplicationStatus.SAVED, ApplicationStatus.SKIPPED}
+    ),
+    ApplicationStatus.SAVED: frozenset(
+        {ApplicationStatus.PREPARING, ApplicationStatus.SKIPPED}
+    ),
+    ApplicationStatus.PREPARING: frozenset(
+        {ApplicationStatus.READY_TO_APPLY, ApplicationStatus.SKIPPED}
+    ),
+    ApplicationStatus.READY_TO_APPLY: frozenset(
+        {ApplicationStatus.APPLIED, ApplicationStatus.SKIPPED}
+    ),
+    ApplicationStatus.APPLIED: frozenset(
+        {
+            ApplicationStatus.INTERVIEWING,
+            ApplicationStatus.REJECTED,
+            ApplicationStatus.WITHDRAWN,
+        }
+    ),
+    ApplicationStatus.INTERVIEWING: frozenset(
+        {
+            ApplicationStatus.OFFER,
+            ApplicationStatus.REJECTED,
+            ApplicationStatus.WITHDRAWN,
+        }
+    ),
+    ApplicationStatus.OFFER: frozenset({ApplicationStatus.WITHDRAWN}),
+    ApplicationStatus.REJECTED: frozenset(),
+    ApplicationStatus.WITHDRAWN: frozenset(),
+    ApplicationStatus.SKIPPED: frozenset(),
+}
+
+
+class InvalidApplicationTransition(ValidationFailed, ValueError):
+    """Raised when an application status change is not on the documented lifecycle path.
+
+    Subclasses both `ValidationFailed` (reports through the shared error
+    taxonomy) and `ValueError` (its original base), matching
+    `InvalidIdempotencyKey` above.
+    """
+
+
+def validate_application_status_transition(
+    current: ApplicationStatus, new: ApplicationStatus
+) -> ApplicationStatus:
+    """Check that `current -> new` is an allowed step on the application lifecycle.
+
+    Returns `new` on success so callers can assign the result inline. Raises
+    `InvalidApplicationTransition` for anything else, including re-asserting
+    the current status — every transition must be an explicit, documented
+    move, not a status set directly by a caller (e.g. an LLM) without going
+    through this check.
+    """
+    allowed = ALLOWED_APPLICATION_TRANSITIONS.get(current, frozenset())
+    if new not in allowed:
+        raise InvalidApplicationTransition(
+            f"cannot transition application from '{current.value}' to '{new.value}'"
+        )
+    return new
+
+
+class ArtifactType(str, Enum):
+    """Kind of tailored document an `artifact_versions` row holds."""
+
+    RESUME = "resume"
+    COVER_LETTER = "cover_letter"
+
+
+class InvalidEvidenceLinkage(ValidationFailed, ValueError):
+    """Raised when a generated artifact does not cite the evidence it was built from."""
+
+
+def validate_evidence_links(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Require an artifact version to cite at least one concrete evidence source.
+
+    Each entry must name a `type` (e.g. "resume_section", "project") and a
+    `ref` identifying which one, so a generated resume/cover-letter draft can
+    never carry a claim that doesn't trace back to something in the
+    candidate's own record.
+    """
+    if not evidence:
+        raise InvalidEvidenceLinkage(
+            "artifact version must cite at least one evidence source"
+        )
+    for item in evidence:
+        if not isinstance(item, dict) or not item.get("type") or not item.get("ref"):
+            raise InvalidEvidenceLinkage(
+                "each evidence entry must have a non-blank 'type' and 'ref'"
+            )
+    return evidence
