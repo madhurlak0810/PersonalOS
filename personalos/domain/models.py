@@ -458,3 +458,20 @@ def validate_evidence_links(evidence: list[dict[str, Any]]) -> list[dict[str, An
                 "each evidence entry must have a non-blank 'type' and 'ref'"
             )
     return evidence
+
+
+class CommunicationEventClassification(str, Enum):
+    """How a recruiter-side message tied to an application was classified.
+
+    Recorded for every inbound communication so an application's history can
+    be read without re-parsing message content, even though the standalone
+    Communications Agent that will produce these classifications is out of
+    scope for this build — this table only captures its signal.
+    """
+
+    RECRUITER_RESPONSE = "recruiter_response"
+    INTERVIEW_INVITE = "interview_invite"
+    REJECTION = "rejection"
+    OFFER = "offer"
+    ACTION_REQUIRED = "action_required"
+    GENERAL_UPDATE = "general_update"

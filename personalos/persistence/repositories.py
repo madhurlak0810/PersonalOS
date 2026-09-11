@@ -22,6 +22,7 @@ from personalos.persistence.models import (
     ArtifactVersionModel,
     CandidateProfileModel,
     CheckpointModel,
+    CommunicationEventModel,
     JobModel,
     JobPostingModel,
     OperationModel,
@@ -593,5 +594,47 @@ class ArtifactVersionRepository:
         return (
             self.session.query(ArtifactVersionModel)
             .filter(ArtifactVersionModel.application_id == application_id)
+            .all()
+        )
+
+
+class CommunicationEventRepository:
+    """Repository for recruiter-side signals tied to an application.
+
+    `create` lets the unique constraint on (application_id,
+    provider_message_id) do the work: ingesting the same message twice
+    raises `IntegrityError` rather than creating a duplicate row.
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def create(
+        self,
+        *,
+        application_id: UUID,
+        classification: str,
+        occurred_at: datetime,
+        provider_message_id: str | None = None,
+        metadata_json: dict[str, Any] | None = None,
+    ) -> CommunicationEventModel:
+        """Insert a communication event. Raises `IntegrityError` on a duplicate provider message for the application."""
+        db_event = CommunicationEventModel(
+            application_id=application_id,
+            classification=classification,
+            provider_message_id=provider_message_id,
+            occurred_at=occurred_at,
+            metadata_json=metadata_json or {},
+        )
+        self.session.add(db_event)
+        self.session.commit()
+        return db_event
+
+    def get_by_application_id(self, application_id: UUID) -> list[CommunicationEventModel]:
+        """Get every communication event recorded for an application."""
+        return (
+            self.session.query(CommunicationEventModel)
+            .filter(CommunicationEventModel.application_id == application_id)
             .all()
         )

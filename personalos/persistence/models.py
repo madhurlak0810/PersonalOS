@@ -677,3 +677,58 @@ class ArtifactVersionModel(Base):
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
+
+
+class CommunicationEventModel(Base):
+    """ORM model for one recruiter-side signal tied to an application.
+
+    Captures the classification of an inbound message (interview invite,
+    rejection, etc.) so an application's communication history is queryable
+    without a standalone Communications Agent, which is out of scope for this
+    build. `provider_message_id` is unique per application so the same
+    message ingested twice collapses onto one row instead of duplicating.
+    """
+
+    __tablename__ = "communication_events"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    application_id = Column(GUID(), ForeignKey("applications.id"), nullable=False)
+    classification = Column(
+        Enum(
+            "recruiter_response",
+            "interview_invite",
+            "rejection",
+            "offer",
+            "action_required",
+            "general_update",
+            name="communication_event_classification",
+        ),
+        nullable=False,
+    )
+    provider_message_id = Column(String(255), nullable=True)
+    occurred_at = Column(DateTime, nullable=False)
+    metadata_json = Column(JSON, nullable=False, default={})
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "application_id",
+            "provider_message_id",
+            name="uq_communication_events_app_provider_message",
+        ),
+        Index("ix_communication_events_application_id", "application_id"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "application_id": str(self.application_id),
+            "classification": self.classification,
+            "provider_message_id": self.provider_message_id,
+            "occurred_at": self.occurred_at.isoformat(),
+            "metadata_json": self.metadata_json,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
