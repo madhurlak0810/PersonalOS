@@ -1,9 +1,11 @@
-"""Tests for the job-search domain schema: postings, profiles, applications, artifacts.
+"""Tests for the job-search domain schema: postings, profiles, applications,
+artifacts, and recruiter-side communication events.
 
-Covers the two acceptance criteria from the schema migration: the tables are
+Covers the acceptance criteria from the schema migrations: the tables are
 created with the documented constraints (dedupe uniqueness on job_postings,
-FK/uniqueness on the rest), and an application's status can only move along
-the documented lifecycle — never set directly to an arbitrary state.
+FK/uniqueness on the rest), an application's status can only move along the
+documented lifecycle — never set directly to an arbitrary state — and a
+communication_events row is queryable by its application_id.
 """
 
 import pytest
@@ -11,8 +13,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
+from datetime import datetime
+
 from personalos.domain.models import (
     ApplicationStatus,
+    CommunicationEventClassification,
     InvalidApplicationTransition,
     InvalidEvidenceLinkage,
     validate_application_status_transition,
@@ -23,6 +28,7 @@ from personalos.persistence.repositories import (
     ApplicationRepository,
     ArtifactVersionRepository,
     CandidateProfileRepository,
+    CommunicationEventRepository,
     JobPostingRepository,
 )
 
@@ -255,6 +261,89 @@ def test_candidate_profile_versions_are_unique_per_user(tmp_path):
         repo.create(user_id=user.id, profile_version=1, target_roles=["Staff Engineer"])
         with pytest.raises(IntegrityError):
             repo.create(user_id=user.id, profile_version=1, target_roles=["Principal Engineer"])
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_communication_event_is_queryable_by_application_id(tmp_path):
+    """Inserting an INTERVIEW_INVITE event makes it findable via its application_id."""
+    session, engine = _open(tmp_path / "jobs.db")
+    try:
+        from personalos.persistence.models import UserModel
+
+        user = UserModel(email="candidate5@example.com")
+        session.add(user)
+        session.commit()
+
+        posting = JobPostingRepository(session).create(
+            source="linkedin",
+            title="Backend Engineer",
+            company="Umbrella",
+            description_hash="e" * 64,
+            dedupe_key="umbrella:backend-engineer:e" * 3,
+        )
+        application = ApplicationRepository(session).create(
+            job_posting_id=posting.id, user_id=user.id
+        )
+
+        occurred_at = datetime(2026, 9, 10, 14, 30)
+        CommunicationEventRepository(session).create(
+            application_id=application.id,
+            classification=CommunicationEventClassification.INTERVIEW_INVITE.value,
+            occurred_at=occurred_at,
+            provider_message_id="msg-12345",
+            metadata_json={"subject": "Interview availability?"},
+        )
+
+        events = CommunicationEventRepository(session).get_by_application_id(application.id)
+        assert len(events) == 1
+        event = events[0]
+        assert event.application_id == application.id
+        assert event.classification == CommunicationEventClassification.INTERVIEW_INVITE.value
+        assert event.provider_message_id == "msg-12345"
+        assert event.occurred_at == occurred_at
+        assert event.metadata_json == {"subject": "Interview availability?"}
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_communication_event_duplicate_provider_message_is_rejected(tmp_path):
+    """The same provider_message_id for an application cannot be inserted twice."""
+    session, engine = _open(tmp_path / "jobs.db")
+    try:
+        from personalos.persistence.models import UserModel
+
+        user = UserModel(email="candidate6@example.com")
+        session.add(user)
+        session.commit()
+
+        posting = JobPostingRepository(session).create(
+            source="linkedin",
+            title="Backend Engineer II",
+            company="Umbrella",
+            description_hash="f" * 64,
+            dedupe_key="umbrella:backend-engineer-ii:f" * 3,
+        )
+        application = ApplicationRepository(session).create(
+            job_posting_id=posting.id, user_id=user.id
+        )
+
+        repo = CommunicationEventRepository(session)
+        repo.create(
+            application_id=application.id,
+            classification=CommunicationEventClassification.GENERAL_UPDATE.value,
+            occurred_at=datetime(2026, 9, 10, 9, 0),
+            provider_message_id="msg-dup",
+        )
+        with pytest.raises(IntegrityError):
+            repo.create(
+                application_id=application.id,
+                classification=CommunicationEventClassification.REJECTION.value,
+                occurred_at=datetime(2026, 9, 11, 9, 0),
+                provider_message_id="msg-dup",
+            )
     finally:
         session.close()
         engine.dispose()
