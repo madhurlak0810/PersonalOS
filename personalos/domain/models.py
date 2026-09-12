@@ -475,3 +475,37 @@ class CommunicationEventClassification(str, Enum):
     OFFER = "offer"
     ACTION_REQUIRED = "action_required"
     GENERAL_UPDATE = "general_update"
+
+
+class ToolExecutionStatus(str, Enum):
+    """Lifecycle of one recorded tool-call attempt, keyed by idempotency key.
+
+    Mirrors `OperationStatus`'s values under a table-scoped name, matching how
+    `JobStatus` and `WorkflowRunStatus`-shaped columns elsewhere each get
+    their own enum rather than sharing one across tables.
+    """
+
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class PolicyDecisionOutcome(str, Enum):
+    """Verdict recorded for one proposed tool call in `policy_decisions`.
+
+    Mirrors `personalos.policy.intents.Decision`'s values; duplicated rather
+    than imported so the persistence layer does not depend on the policy
+    layer (policy depends on domain and persistence depends on domain, never
+    the reverse).
+    """
+
+    ALLOW = "allow"
+    DENY = "deny"
+    REQUIRE_APPROVAL = "require_approval"
+
+
+class AuditEventResult(str, Enum):
+    """Outcome of the action an `audit_events` row records."""
+
+    SUCCESS = "success"
+    FAILURE = "failure"

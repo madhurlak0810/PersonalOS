@@ -14,18 +14,22 @@ from personalos.domain.models import (
     JobStatus,
     OperationRecord,
     OperationStatus,
+    ToolExecutionStatus,
     validate_application_status_transition,
     validate_evidence_links,
 )
 from personalos.persistence.models import (
     ApplicationModel,
     ArtifactVersionModel,
+    AuditEventModel,
     CandidateProfileModel,
     CheckpointModel,
     CommunicationEventModel,
     JobModel,
     JobPostingModel,
     OperationModel,
+    PolicyDecisionModel,
+    ToolExecutionModel,
     WorkflowModel,
     WorkflowRunModel,
 )
@@ -636,5 +640,180 @@ class CommunicationEventRepository:
         return (
             self.session.query(CommunicationEventModel)
             .filter(CommunicationEventModel.application_id == application_id)
+            .all()
+        )
+
+
+class ToolExecutionRepository:
+    """Repository for the tool-execution ledger.
+
+    Backs idempotency at the tool-call level: `claim` lets the unique
+    constraint on `idempotency_key` decide who owns execution, mirroring
+    `OperationRepository` but scoped to a specific tool and workflow run, with
+    `receipt_json` as the value a retried call replays.
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def claim(
+        self,
+        idempotency_key: str,
+        tool_name: str,
+        workflow_id: UUID | None = None,
+    ) -> tuple[ToolExecutionModel, bool]:
+        """Claim an idempotency key for a tool call.
+
+        Returns (record, claimed). When `claimed` is True the caller owns the
+        execution and must call `complete` or `fail`. When False, a record for
+        this key already exists -- if completed, its `receipt_json` should be
+        replayed instead of running the tool again.
+        """
+        existing = self._row_for_key(idempotency_key)
+        if existing is not None:
+            return existing, False
+
+        db_execution = ToolExecutionModel(
+            workflow_id=workflow_id,
+            tool_name=tool_name,
+            idempotency_key=idempotency_key,
+            status=ToolExecutionStatus.IN_PROGRESS.value,
+        )
+        self.session.add(db_execution)
+        try:
+            self.session.commit()
+        except IntegrityError:
+            # Lost the insert race: another attempt claimed this key first.
+            self.session.rollback()
+            winner = self._row_for_key(idempotency_key)
+            if winner is None:  # pragma: no cover - unique violation implies a row
+                raise
+            return winner, False
+        return db_execution, True
+
+    def complete(self, idempotency_key: str, receipt: dict[str, Any]) -> ToolExecutionModel:
+        """Record a successful outcome so a retried call replays `receipt`."""
+        db_execution = self._require_row(idempotency_key)
+        now = datetime.utcnow()
+        db_execution.status = ToolExecutionStatus.COMPLETED.value
+        db_execution.receipt_json = receipt
+        db_execution.error = None
+        db_execution.updated_at = now
+        db_execution.completed_at = now
+        self.session.commit()
+        return db_execution
+
+    def fail(self, idempotency_key: str, error: str) -> ToolExecutionModel:
+        """Record a failed outcome."""
+        db_execution = self._require_row(idempotency_key)
+        db_execution.status = ToolExecutionStatus.FAILED.value
+        db_execution.error = error
+        db_execution.updated_at = datetime.utcnow()
+        self.session.commit()
+        return db_execution
+
+    def get_by_key(self, idempotency_key: str) -> ToolExecutionModel | None:
+        """Get the tool execution recorded under an idempotency key, if any."""
+        return self._row_for_key(idempotency_key)
+
+    def _row_for_key(self, idempotency_key: str) -> ToolExecutionModel | None:
+        return (
+            self.session.query(ToolExecutionModel)
+            .filter(ToolExecutionModel.idempotency_key == idempotency_key)
+            .first()
+        )
+
+    def _require_row(self, idempotency_key: str) -> ToolExecutionModel:
+        db_execution = self._row_for_key(idempotency_key)
+        if not db_execution:
+            raise ValueError(f"Tool execution '{idempotency_key}' not found")
+        return db_execution
+
+
+class PolicyDecisionRepository:
+    """Repository for recorded policy verdicts.
+
+    Every decision the policy engine reaches is written here for audit,
+    independent of whether the underlying tool call ever ran.
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def create(
+        self,
+        *,
+        principal: str,
+        tool: str,
+        args_hash: str,
+        decision: str,
+        workflow_id: UUID | None = None,
+        requested_scopes: list[str] | None = None,
+    ) -> PolicyDecisionModel:
+        """Insert a policy decision record."""
+        db_decision = PolicyDecisionModel(
+            principal=principal,
+            workflow_id=workflow_id,
+            tool=tool,
+            args_hash=args_hash,
+            decision=decision,
+            requested_scopes=requested_scopes or [],
+        )
+        self.session.add(db_decision)
+        self.session.commit()
+        return db_decision
+
+    def get_by_workflow_id(self, workflow_id: UUID) -> list[PolicyDecisionModel]:
+        """Get every policy decision recorded for a workflow run."""
+        return (
+            self.session.query(PolicyDecisionModel)
+            .filter(PolicyDecisionModel.workflow_id == workflow_id)
+            .all()
+        )
+
+
+class AuditEventRepository:
+    """Repository for the append-only audit trail.
+
+    Only `create` and reads are exposed here -- there is no `update` or
+    `delete`, so application code has no path to rewrite or remove an event
+    once it has been recorded.
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def create(
+        self,
+        *,
+        actor: str,
+        action: str,
+        target_ref: str,
+        result: str,
+        workflow_id: UUID | None = None,
+        policy_decision: str | None = None,
+    ) -> AuditEventModel:
+        """Append an audit event."""
+        db_event = AuditEventModel(
+            actor=actor,
+            workflow_id=workflow_id,
+            action=action,
+            target_ref=target_ref,
+            policy_decision=policy_decision,
+            result=result,
+        )
+        self.session.add(db_event)
+        self.session.commit()
+        return db_event
+
+    def get_by_workflow_id(self, workflow_id: UUID) -> list[AuditEventModel]:
+        """Get every audit event recorded for a workflow run, oldest first."""
+        return (
+            self.session.query(AuditEventModel)
+            .filter(AuditEventModel.workflow_id == workflow_id)
+            .order_by(AuditEventModel.timestamp)
             .all()
         )
