@@ -732,3 +732,135 @@ class CommunicationEventModel(Base):
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
+
+
+# --- Tool execution, policy decision, and audit trail ------------------------
+#
+# The tables that make every mutating action inspectable and auditable: one
+# row per tool-call attempt (tool_executions), the verdict reached on a
+# proposed action (policy_decisions), and the append-only record of what
+# actually happened (audit_events). `AuditEventRepository` exposes only
+# `create` and reads -- there is no update or delete path in application code,
+# so the audit trail can only be added to, never rewritten.
+
+
+class ToolExecutionModel(Base):
+    """ORM model for one tool-call attempt, keyed by idempotency key.
+
+    Mirrors `OperationModel`'s idempotency semantics -- the unique constraint
+    on `idempotency_key` is the dedup primitive a retried call relies on to
+    get back the stored `receipt_json` instead of re-executing -- but scoped
+    to a specific tool and workflow run rather than the generic operation log.
+    """
+
+    __tablename__ = "tool_executions"
+
+    operation_id = Column(GUID(), primary_key=True, default=uuid4)
+    workflow_id = Column(GUID(), ForeignKey("workflows.id"), nullable=True)
+    tool_name = Column(String(255), nullable=False)
+    idempotency_key = Column(String(255), nullable=False, unique=True)
+    status = Column(
+        Enum("in_progress", "completed", "failed", name="tool_execution_status"),
+        nullable=False,
+        default="in_progress",
+    )
+    receipt_json = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (Index("ix_tool_executions_workflow_id", "workflow_id"),)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "operation_id": str(self.operation_id),
+            "workflow_id": str(self.workflow_id) if self.workflow_id else None,
+            "tool_name": self.tool_name,
+            "idempotency_key": self.idempotency_key,
+            "status": self.status,
+            "receipt_json": self.receipt_json,
+            "error": self.error,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
+class PolicyDecisionModel(Base):
+    """ORM model for the verdict reached on one proposed tool call.
+
+    `args_hash` is the fingerprint of the call's arguments (see
+    `personalos.policy.intents.fingerprint_intent`), stored rather than the
+    raw arguments so the decision log doesn't duplicate -- or leak -- whatever
+    the arguments themselves contained.
+    """
+
+    __tablename__ = "policy_decisions"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    principal = Column(String(255), nullable=False)
+    workflow_id = Column(GUID(), ForeignKey("workflows.id"), nullable=True)
+    tool = Column(String(255), nullable=False)
+    args_hash = Column(String(64), nullable=False)
+    decision = Column(
+        Enum("allow", "deny", "require_approval", name="policy_decision_outcome"),
+        nullable=False,
+    )
+    requested_scopes = Column(JSON, nullable=False, default=[])
+    decided_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_policy_decisions_workflow_id", "workflow_id"),)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "principal": self.principal,
+            "workflow_id": str(self.workflow_id) if self.workflow_id else None,
+            "tool": self.tool,
+            "args_hash": self.args_hash,
+            "decision": self.decision,
+            "requested_scopes": self.requested_scopes,
+            "decided_at": self.decided_at.isoformat(),
+        }
+
+
+class AuditEventModel(Base):
+    """ORM model for one append-only audit trail entry.
+
+    No repository method updates or deletes a row here: `AuditEventRepository`
+    only ever inserts and reads, so the only way to change the audit trail is
+    to add to it.
+    """
+
+    __tablename__ = "audit_events"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    actor = Column(String(255), nullable=False)
+    workflow_id = Column(GUID(), ForeignKey("workflows.id"), nullable=True)
+    action = Column(String(255), nullable=False)
+    target_ref = Column(String(500), nullable=False)
+    # Snapshot of the policy verdict (allow/deny/require_approval) in force
+    # for this action, stored as plain text rather than a foreign key or
+    # shared enum type, so this row stays a stable historical record even if
+    # `policy_decisions` or its vocabulary changes later.
+    policy_decision = Column(String(32), nullable=True)
+    result = Column(Enum("success", "failure", name="audit_event_result"), nullable=False)
+    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_audit_events_workflow_id", "workflow_id"),)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "actor": self.actor,
+            "workflow_id": str(self.workflow_id) if self.workflow_id else None,
+            "action": self.action,
+            "target_ref": self.target_ref,
+            "policy_decision": self.policy_decision,
+            "result": self.result,
+            "timestamp": self.timestamp.isoformat(),
+        }
