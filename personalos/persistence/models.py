@@ -864,3 +864,124 @@ class AuditEventModel(Base):
             "result": self.result,
             "timestamp": self.timestamp.isoformat(),
         }
+
+
+# --- Transactional outbox, event log, and projections ------------------------
+#
+# `outbox_events` backs the transactional-outbox pattern: a row is written in
+# the same DB transaction as the domain mutation that produced it (see
+# `OutboxEventRepository`/`ApplicationRepository.update_status`'s `commit`
+# parameter), so a committed domain change can never lose its corresponding
+# outbound message to a crash between the two writes. A worker claims a row
+# with `OutboxEventRepository.claim_next` -- `SELECT ... FOR UPDATE SKIP
+# LOCKED` on Postgres, an atomic conditional UPDATE everywhere else -- before
+# dispatching it, so exactly one worker ever owns a given row.
+#
+# `event_log` is the durable, append-only history of domain events, distinct
+# from `outbox_events`: outbox rows are deleted/dispatched-and-forgotten once
+# relayed, while event_log rows are never updated or deleted, only ever
+# inserted. `EventLogRepository` exposes no update or delete method.
+#
+# `application_status_view` is a mutable projection recomputed from
+# `event_log` -- the current-status read surface for an application, rebuilt
+# by `ApplicationStatusViewRepository.recompute` rather than written directly.
+
+
+class OutboxEventModel(Base):
+    """ORM model for one row in the transactional outbox.
+
+    `dedupe_key` is optional and unique when present, letting a producer
+    retry the enqueue itself (e.g. after a crash before its own commit is
+    confirmed) without risking a duplicate outbound message.
+    """
+
+    __tablename__ = "outbox_events"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    type = Column(String(255), nullable=False)
+    payload_json = Column(JSON, nullable=False, default={})
+    dedupe_key = Column(String(255), nullable=True, unique=True)
+    status = Column(
+        Enum("pending", "in_progress", "dispatched", "failed", name="outbox_event_status"),
+        nullable=False,
+        default="pending",
+    )
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    dispatched_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (Index("ix_outbox_events_status", "status"),)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "type": self.type,
+            "payload_json": self.payload_json,
+            "dedupe_key": self.dedupe_key,
+            "status": self.status,
+            "created_at": self.created_at.isoformat(),
+            "dispatched_at": self.dispatched_at.isoformat() if self.dispatched_at else None,
+        }
+
+
+class EventLogModel(Base):
+    """ORM model for one immutable entry in the durable domain event history.
+
+    No repository method updates or deletes a row here -- `EventLogRepository`
+    only ever inserts and reads, matching `AuditEventModel`'s append-only
+    contract but scoped to domain events feeding projections rather than the
+    security/compliance audit trail.
+    """
+
+    __tablename__ = "event_log"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    aggregate_type = Column(String(100), nullable=False)
+    aggregate_id = Column(GUID(), nullable=False)
+    event_type = Column(String(255), nullable=False)
+    payload_json = Column(JSON, nullable=False, default={})
+    occurred_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_event_log_aggregate_id", "aggregate_id"),
+        Index("ix_event_log_aggregate_type_aggregate_id", "aggregate_type", "aggregate_id"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "aggregate_type": self.aggregate_type,
+            "aggregate_id": str(self.aggregate_id),
+            "event_type": self.event_type,
+            "payload_json": self.payload_json,
+            "occurred_at": self.occurred_at.isoformat(),
+            "created_at": self.created_at.isoformat(),
+        }
+
+
+class ApplicationStatusViewModel(Base):
+    """ORM model for the mutable current-status projection of an application.
+
+    One row per application, overwritten in place by
+    `ApplicationStatusViewRepository.recompute` from `event_log` -- this table
+    holds no history of its own, only the latest recomputed state.
+    `last_event_id` records which event_log row the current snapshot reflects.
+    """
+
+    __tablename__ = "application_status_view"
+
+    application_id = Column(GUID(), ForeignKey("applications.id"), primary_key=True)
+    status = Column(String(32), nullable=False)
+    last_event_id = Column(GUID(), ForeignKey("event_log.id"), nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "application_id": str(self.application_id),
+            "status": self.status,
+            "last_event_id": str(self.last_event_id) if self.last_event_id else None,
+            "updated_at": self.updated_at.isoformat(),
+        }

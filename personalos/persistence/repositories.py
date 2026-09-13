@@ -14,20 +14,24 @@ from personalos.domain.models import (
     JobStatus,
     OperationRecord,
     OperationStatus,
+    OutboxEventStatus,
     ToolExecutionStatus,
     validate_application_status_transition,
     validate_evidence_links,
 )
 from personalos.persistence.models import (
     ApplicationModel,
+    ApplicationStatusViewModel,
     ArtifactVersionModel,
     AuditEventModel,
     CandidateProfileModel,
     CheckpointModel,
     CommunicationEventModel,
+    EventLogModel,
     JobModel,
     JobPostingModel,
     OperationModel,
+    OutboxEventModel,
     PolicyDecisionModel,
     ToolExecutionModel,
     WorkflowModel,
@@ -532,13 +536,17 @@ class ApplicationRepository:
         )
 
     def update_status(
-        self, application_id: UUID, new_status: ApplicationStatus
+        self, application_id: UUID, new_status: ApplicationStatus, *, commit: bool = True
     ) -> ApplicationModel:
         """Move an application to `new_status`.
 
         Raises `ValueError` if the application does not exist, or
         `InvalidApplicationTransition` if `new_status` is not reachable from
         the application's current status (e.g. DISCOVERED -> OFFER).
+
+        `commit=False` leaves the change pending on the session so a caller
+        can write an `outbox_events` row (see `OutboxEventRepository.create`)
+        in the same transaction and commit both together.
         """
         db_application = self.get_by_id(application_id)
         if not db_application:
@@ -551,7 +559,10 @@ class ApplicationRepository:
         db_application.updated_at = datetime.utcnow()
         if new_status == ApplicationStatus.APPLIED:
             db_application.applied_at = datetime.utcnow()
-        self.session.commit()
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
         return db_application
 
 
@@ -816,4 +827,214 @@ class AuditEventRepository:
             .filter(AuditEventModel.workflow_id == workflow_id)
             .order_by(AuditEventModel.timestamp)
             .all()
+        )
+
+
+class OutboxEventRepository:
+    """Repository for the transactional outbox.
+
+    `create(..., commit=False)` lets a caller stage an outbox row alongside a
+    domain mutation (e.g. `ApplicationRepository.update_status(...,
+    commit=False)`) and commit both in one transaction, so the outbound
+    message can never be lost relative to the change that produced it.
+
+    `claim_next` is the exactly-once claim a dispatch worker uses: on
+    Postgres it takes the row with `SELECT ... FOR UPDATE SKIP LOCKED` so
+    concurrent workers never block on or double-claim the same row; on any
+    other dialect (SQLite in tests) it falls back to an atomic conditional
+    UPDATE keyed on the row still being PENDING, which gives the same
+    exactly-once guarantee for a single-writer database.
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def create(
+        self,
+        *,
+        type: str,
+        payload: dict[str, Any],
+        dedupe_key: str | None = None,
+        commit: bool = True,
+    ) -> OutboxEventModel:
+        """Stage an outbox row. Raises `IntegrityError` on a duplicate `dedupe_key`."""
+        db_event = OutboxEventModel(
+            type=type,
+            payload_json=payload,
+            dedupe_key=dedupe_key,
+            status=OutboxEventStatus.PENDING.value,
+        )
+        self.session.add(db_event)
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
+        return db_event
+
+    def claim_next(self) -> OutboxEventModel | None:
+        """Claim the oldest pending outbox row for dispatch, or None if none is claimable.
+
+        The caller owns the returned row's dispatch and must follow up with
+        `mark_dispatched` or `mark_failed`.
+        """
+        query = self.session.query(OutboxEventModel).filter(
+            OutboxEventModel.status == OutboxEventStatus.PENDING.value
+        )
+        if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
+            query = query.order_by(OutboxEventModel.created_at, OutboxEventModel.id).with_for_update(
+                skip_locked=True
+            )
+        else:
+            query = query.order_by(OutboxEventModel.created_at, OutboxEventModel.id)
+        candidate = query.first()
+        if candidate is None:
+            return None
+
+        updated = (
+            self.session.query(OutboxEventModel)
+            .filter(
+                OutboxEventModel.id == candidate.id,
+                OutboxEventModel.status == OutboxEventStatus.PENDING.value,
+            )
+            .update(
+                {OutboxEventModel.status: OutboxEventStatus.IN_PROGRESS.value},
+                synchronize_session=False,
+            )
+        )
+        self.session.commit()
+        if updated == 0:
+            # Lost the race: another worker claimed this row first.
+            return None
+        self.session.refresh(candidate)
+        return candidate
+
+    def mark_dispatched(self, outbox_event_id: UUID) -> OutboxEventModel:
+        """Record that a claimed row was successfully dispatched."""
+        db_event = self._require_row(outbox_event_id)
+        db_event.status = OutboxEventStatus.DISPATCHED.value
+        db_event.dispatched_at = datetime.utcnow()
+        self.session.commit()
+        return db_event
+
+    def mark_failed(self, outbox_event_id: UUID) -> OutboxEventModel:
+        """Record that dispatch failed, leaving the row for inspection (not retried)."""
+        db_event = self._require_row(outbox_event_id)
+        db_event.status = OutboxEventStatus.FAILED.value
+        self.session.commit()
+        return db_event
+
+    def get_by_dedupe_key(self, dedupe_key: str) -> OutboxEventModel | None:
+        """Get the outbox row already staged for this dedupe key, if any."""
+        return (
+            self.session.query(OutboxEventModel)
+            .filter(OutboxEventModel.dedupe_key == dedupe_key)
+            .first()
+        )
+
+    def _require_row(self, outbox_event_id: UUID) -> OutboxEventModel:
+        db_event = self.session.query(OutboxEventModel).filter(
+            OutboxEventModel.id == outbox_event_id
+        ).first()
+        if not db_event:
+            raise ValueError(f"Outbox event {outbox_event_id} not found")
+        return db_event
+
+
+class EventLogRepository:
+    """Repository for the immutable, append-only domain event history.
+
+    Only `append` and reads are exposed here -- there is no `update` or
+    `delete`, matching `AuditEventRepository`'s contract: the only way to
+    change this log is to add to it. Projections (e.g.
+    `application_status_view`) are rebuilt from these rows rather than the
+    rows themselves ever changing.
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def append(
+        self,
+        *,
+        aggregate_type: str,
+        aggregate_id: UUID,
+        event_type: str,
+        payload: dict[str, Any],
+        occurred_at: datetime | None = None,
+        commit: bool = True,
+    ) -> EventLogModel:
+        """Append an event. `commit=False` to write it in the same transaction as other changes."""
+        db_event = EventLogModel(
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            event_type=event_type,
+            payload_json=payload,
+            occurred_at=occurred_at or datetime.utcnow(),
+        )
+        self.session.add(db_event)
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
+        return db_event
+
+    def get_by_aggregate_id(self, aggregate_id: UUID) -> list[EventLogModel]:
+        """Get every event recorded for an aggregate, oldest first."""
+        return (
+            self.session.query(EventLogModel)
+            .filter(EventLogModel.aggregate_id == aggregate_id)
+            .order_by(EventLogModel.occurred_at, EventLogModel.id)
+            .all()
+        )
+
+
+class ApplicationStatusViewRepository:
+    """Repository for the mutable current-status projection of an application.
+
+    `recompute` is the only write path -- it overwrites the single row for an
+    `application_id` rather than accumulating history, since history lives in
+    `event_log`, not here.
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def recompute(
+        self,
+        *,
+        application_id: UUID,
+        status: str,
+        last_event_id: UUID | None = None,
+        commit: bool = True,
+    ) -> ApplicationStatusViewModel:
+        """Overwrite the projection for `application_id` with its recomputed state."""
+        db_view = self.get_by_application_id(application_id)
+        now = datetime.utcnow()
+        if db_view is None:
+            db_view = ApplicationStatusViewModel(
+                application_id=application_id,
+                status=status,
+                last_event_id=last_event_id,
+                updated_at=now,
+            )
+            self.session.add(db_view)
+        else:
+            db_view.status = status
+            db_view.last_event_id = last_event_id
+            db_view.updated_at = now
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
+        return db_view
+
+    def get_by_application_id(self, application_id: UUID) -> ApplicationStatusViewModel | None:
+        """Get the current-status projection for an application, if computed."""
+        return (
+            self.session.query(ApplicationStatusViewModel)
+            .filter(ApplicationStatusViewModel.application_id == application_id)
+            .first()
         )

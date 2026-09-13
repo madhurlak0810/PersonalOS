@@ -509,3 +509,19 @@ class AuditEventResult(str, Enum):
 
     SUCCESS = "success"
     FAILURE = "failure"
+
+
+class OutboxEventStatus(str, Enum):
+    """Lifecycle of one row in the transactional outbox.
+
+    PENDING rows are written in the same transaction as the domain mutation
+    that produced them. A worker atomically claims a PENDING row (moving it
+    to IN_PROGRESS) before dispatching it elsewhere, mirroring
+    `ToolExecutionStatus`'s claim/complete/fail shape so exactly one worker
+    ever owns a given row at a time.
+    """
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    DISPATCHED = "dispatched"
+    FAILED = "failed"
