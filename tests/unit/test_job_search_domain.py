@@ -8,12 +8,12 @@ documented lifecycle — never set directly to an arbitrary state — and a
 communication_events row is queryable by its application_id.
 """
 
+from datetime import datetime
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
-
-from datetime import datetime
 
 from personalos.domain.models import (
     ApplicationStatus,
