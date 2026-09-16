@@ -1,8 +1,10 @@
 """Database models using SQLAlchemy ORM."""
 
+import json
 from datetime import datetime
 from uuid import UUID, uuid4
 
+from pgvector.sqlalchemy import Vector as PGVector
 from sqlalchemy import (
     JSON,
     CheckConstraint,
@@ -19,6 +21,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase
+
+# Default embedding width, matching OpenAI's text-embedding-3-small/ada-002.
+# A model that produces a different width needs its own migration to widen
+# the column; `embedding_model`/`embedding_version` on each table only make
+# re-embedding *within* this width traceable, not a dimension change.
+EMBEDDING_DIMENSION = 1536
 
 
 class Base(DeclarativeBase):
@@ -54,6 +62,46 @@ class GUID(TypeDecorator):
         if value is None:
             return None
         return value if isinstance(value, UUID) else UUID(str(value))
+
+
+class Vector(TypeDecorator):
+    """Platform-independent embedding-vector column.
+
+    Uses pgvector's native `vector(dim)` type on PostgreSQL -- searchable via
+    an ANN index (see the `add_pgvector_embedding_tables` migration) and the
+    `cosine_distance`/`l2_distance`/etc. comparators it adds to the mapped
+    column -- and falls back to a JSON-encoded list of floats on other
+    dialects, so embedding tables can be exercised against SQLite in tests
+    without a Postgres+pgvector instance. On that fallback, nearest-neighbor
+    search is done in Python (see `personalos.persistence.repositories`),
+    not by the database, mirroring `GUID`'s dialect split above.
+    """
+
+    impl = Text
+    cache_ok = True
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(PGVector(self.dim))
+        return dialect.type_descriptor(Text())
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == "postgresql":
+            return value
+        return json.dumps([float(v) for v in value])
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == "postgresql":
+            return list(value)
+        return json.loads(value)
 
 
 class JobModel(Base):
@@ -984,4 +1032,149 @@ class ApplicationStatusViewModel(Base):
             "status": self.status,
             "last_event_id": str(self.last_event_id) if self.last_event_id else None,
             "updated_at": self.updated_at.isoformat(),
+        }
+
+
+# --- Semantic retrieval (pgvector) -------------------------------------------
+#
+# Embedding tables backing evidence-grounded job matching and semantic
+# scoring/dedup: evidence_chunks (resume/project text cut into retrievable
+# chunks), job_posting_embeddings (one embedding per posting per embedding
+# model, for similarity scoring and near-duplicate detection), and
+# message_embeddings (recruiter message text, for semantic search over
+# communication history).
+#
+# Every row records `embedding_model` (and `embedding_version`) alongside its
+# vector so a model upgrade can be rolled out as a new set of rows rather
+# than an in-place overwrite: old and new embeddings coexist, queries pin a
+# model, and the old rows are cleaned up once callers have moved on. See
+# `Vector` above for how the column itself degrades from pgvector to a JSON
+# fallback on non-Postgres dialects, and
+# `personalos.persistence.repositories` for how nearest-neighbor search
+# follows that same split.
+
+
+class EvidenceChunkModel(Base):
+    """ORM model for one retrievable chunk of a candidate's resume or project write-up.
+
+    `chunk_index` orders chunks cut from the same `source_ref` back into
+    their original sequence; the uniqueness constraint below stops the same
+    chunk from being embedded twice if ingestion is retried.
+    """
+
+    __tablename__ = "evidence_chunks"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
+    source_type = Column(Enum("resume", "project", name="evidence_source_type"), nullable=False)
+    source_ref = Column(String(255), nullable=True)
+    chunk_text = Column(Text, nullable=False)
+    chunk_index = Column(Integer, nullable=False, default=0)
+    embedding = Column(Vector(EMBEDDING_DIMENSION), nullable=False)
+    embedding_model = Column(String(100), nullable=False)
+    embedding_version = Column(String(50), nullable=False, default="1")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "source_type",
+            "source_ref",
+            "chunk_index",
+            name="uq_evidence_chunks_user_source_chunk",
+        ),
+        Index("ix_evidence_chunks_user_id", "user_id"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "user_id": str(self.user_id),
+            "source_type": self.source_type,
+            "source_ref": self.source_ref,
+            "chunk_text": self.chunk_text,
+            "chunk_index": self.chunk_index,
+            "embedding_model": self.embedding_model,
+            "embedding_version": self.embedding_version,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
+class JobPostingEmbeddingModel(Base):
+    """ORM model for one embedding of a job posting's description.
+
+    Scoped per `embedding_model`/`embedding_version` (see the uniqueness
+    constraint below) rather than one row per posting, so re-embedding with a
+    new model doesn't discard the old vector before every caller has moved
+    off it.
+    """
+
+    __tablename__ = "job_posting_embeddings"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    job_posting_id = Column(GUID(), ForeignKey("job_postings.id"), nullable=False)
+    embedding = Column(Vector(EMBEDDING_DIMENSION), nullable=False)
+    embedding_model = Column(String(100), nullable=False)
+    embedding_version = Column(String(50), nullable=False, default="1")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "job_posting_id",
+            "embedding_model",
+            "embedding_version",
+            name="uq_job_posting_embeddings_posting_model_version",
+        ),
+        Index("ix_job_posting_embeddings_job_posting_id", "job_posting_id"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "job_posting_id": str(self.job_posting_id),
+            "embedding_model": self.embedding_model,
+            "embedding_version": self.embedding_version,
+            "created_at": self.created_at.isoformat(),
+        }
+
+
+class MessageEmbeddingModel(Base):
+    """ORM model for one embedding of a recruiter communication's text.
+
+    Mirrors `JobPostingEmbeddingModel`'s per-model versioning, scoped to
+    `communication_events` instead of `job_postings`, to support semantic
+    search over recruiter messages.
+    """
+
+    __tablename__ = "message_embeddings"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    communication_event_id = Column(GUID(), ForeignKey("communication_events.id"), nullable=False)
+    embedding = Column(Vector(EMBEDDING_DIMENSION), nullable=False)
+    embedding_model = Column(String(100), nullable=False)
+    embedding_version = Column(String(50), nullable=False, default="1")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "communication_event_id",
+            "embedding_model",
+            "embedding_version",
+            name="uq_message_embeddings_event_model_version",
+        ),
+        Index("ix_message_embeddings_communication_event_id", "communication_event_id"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "communication_event_id": str(self.communication_event_id),
+            "embedding_model": self.embedding_model,
+            "embedding_version": self.embedding_version,
+            "created_at": self.created_at.isoformat(),
         }
