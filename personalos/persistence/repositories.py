@@ -1,5 +1,6 @@
 """Repository pattern for data access."""
 
+import math
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -28,8 +29,11 @@ from personalos.persistence.models import (
     CheckpointModel,
     CommunicationEventModel,
     EventLogModel,
+    EvidenceChunkModel,
     JobModel,
+    JobPostingEmbeddingModel,
     JobPostingModel,
+    MessageEmbeddingModel,
     OperationModel,
     OutboxEventModel,
     PolicyDecisionModel,
@@ -37,6 +41,22 @@ from personalos.persistence.models import (
     WorkflowModel,
     WorkflowRunModel,
 )
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two equal-length vectors, in [-1, 1].
+
+    The non-Postgres fallback for nearest-neighbor search: on SQLite (see
+    `personalos.persistence.models.Vector`) there is no `<=>` operator to
+    push this into the database, so candidate rows are scored in Python
+    instead. Returns 0.0 for a zero vector rather than dividing by zero.
+    """
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 class JobRepository:
@@ -1038,3 +1058,218 @@ class ApplicationStatusViewRepository:
             .filter(ApplicationStatusViewModel.application_id == application_id)
             .first()
         )
+
+
+# --- Semantic retrieval (pgvector) -------------------------------------------
+#
+# `find_similar` on each repository below branches on dialect exactly like
+# `OutboxEventRepository.claim_next` does for its claim query: on Postgres it
+# pushes ranking into the database via pgvector's `cosine_distance` operator
+# (backed by the ivfflat index from the migration); on any other dialect
+# (SQLite in tests) it pulls the candidate rows and ranks them in Python with
+# `_cosine_similarity`. Both paths return the same shape -- a list of
+# `(row, similarity)` pairs, above `min_similarity`, most similar first --
+# so callers don't need to know which path ran.
+
+
+class EvidenceChunkRepository:
+    """Repository for resume/project evidence chunks used in evidence-grounded job matching."""
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def create(
+        self,
+        *,
+        user_id: UUID,
+        source_type: str,
+        chunk_text: str,
+        embedding: list[float],
+        embedding_model: str,
+        source_ref: str | None = None,
+        chunk_index: int = 0,
+        embedding_version: str = "1",
+        commit: bool = True,
+    ) -> EvidenceChunkModel:
+        """Embed and store one chunk of a candidate's resume or project write-up."""
+        db_chunk = EvidenceChunkModel(
+            user_id=user_id,
+            source_type=source_type,
+            source_ref=source_ref,
+            chunk_text=chunk_text,
+            chunk_index=chunk_index,
+            embedding=embedding,
+            embedding_model=embedding_model,
+            embedding_version=embedding_version,
+        )
+        self.session.add(db_chunk)
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
+        return db_chunk
+
+    def find_similar(
+        self,
+        *,
+        query_embedding: list[float],
+        embedding_model: str,
+        user_id: UUID | None = None,
+        top_k: int = 5,
+        min_similarity: float = 0.0,
+    ) -> list[tuple[EvidenceChunkModel, float]]:
+        """Rank chunks for `embedding_model` by cosine similarity to `query_embedding`."""
+        query = self.session.query(EvidenceChunkModel).filter(
+            EvidenceChunkModel.embedding_model == embedding_model
+        )
+        if user_id is not None:
+            query = query.filter(EvidenceChunkModel.user_id == user_id)
+
+        if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
+            distance = EvidenceChunkModel.embedding.cosine_distance(query_embedding)
+            rows = query.add_columns(distance).order_by(distance).limit(top_k).all()
+            return [
+                (chunk, 1 - dist) for chunk, dist in rows if (1 - dist) >= min_similarity
+            ]
+
+        scored = [
+            (chunk, _cosine_similarity(query_embedding, chunk.embedding))
+            for chunk in query.all()
+        ]
+        scored = [pair for pair in scored if pair[1] >= min_similarity]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored[:top_k]
+
+
+class JobPostingEmbeddingRepository:
+    """Repository for job-posting-description embeddings, scoped per embedding model/version.
+
+    A new `embedding_model` (or `embedding_version`) never overwrites an
+    existing row for the same posting -- see `create`'s `IntegrityError` on a
+    duplicate (posting, model, version) -- so re-embedding after a model
+    change is an additive rollout rather than a destructive one.
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def create(
+        self,
+        *,
+        job_posting_id: UUID,
+        embedding: list[float],
+        embedding_model: str,
+        embedding_version: str = "1",
+        commit: bool = True,
+    ) -> JobPostingEmbeddingModel:
+        """Store an embedding of a job posting's description. Raises `IntegrityError` on a duplicate."""
+        db_embedding = JobPostingEmbeddingModel(
+            job_posting_id=job_posting_id,
+            embedding=embedding,
+            embedding_model=embedding_model,
+            embedding_version=embedding_version,
+        )
+        self.session.add(db_embedding)
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
+        return db_embedding
+
+    def find_similar(
+        self,
+        *,
+        query_embedding: list[float],
+        embedding_model: str,
+        top_k: int = 5,
+        min_similarity: float = 0.0,
+    ) -> list[tuple[JobPostingEmbeddingModel, float]]:
+        """Rank postings for `embedding_model` by cosine similarity to `query_embedding`.
+
+        Used for both semantic scoring (rank postings against a candidate
+        profile embedding) and near-duplicate detection (rank a new
+        posting's embedding against existing ones and flag near-1.0 hits).
+        """
+        query = self.session.query(JobPostingEmbeddingModel).filter(
+            JobPostingEmbeddingModel.embedding_model == embedding_model
+        )
+
+        if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
+            distance = JobPostingEmbeddingModel.embedding.cosine_distance(query_embedding)
+            rows = query.add_columns(distance).order_by(distance).limit(top_k).all()
+            return [
+                (posting, 1 - dist) for posting, dist in rows if (1 - dist) >= min_similarity
+            ]
+
+        scored = [
+            (posting, _cosine_similarity(query_embedding, posting.embedding))
+            for posting in query.all()
+        ]
+        scored = [pair for pair in scored if pair[1] >= min_similarity]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored[:top_k]
+
+
+class MessageEmbeddingRepository:
+    """Repository for recruiter-message embeddings, enabling semantic search over communications.
+
+    Mirrors `JobPostingEmbeddingRepository`'s per-model versioning, scoped to
+    `communication_events` instead of `job_postings`.
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def create(
+        self,
+        *,
+        communication_event_id: UUID,
+        embedding: list[float],
+        embedding_model: str,
+        embedding_version: str = "1",
+        commit: bool = True,
+    ) -> MessageEmbeddingModel:
+        """Store an embedding of a recruiter communication's text. Raises `IntegrityError` on a duplicate."""
+        db_embedding = MessageEmbeddingModel(
+            communication_event_id=communication_event_id,
+            embedding=embedding,
+            embedding_model=embedding_model,
+            embedding_version=embedding_version,
+        )
+        self.session.add(db_embedding)
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
+        return db_embedding
+
+    def find_similar(
+        self,
+        *,
+        query_embedding: list[float],
+        embedding_model: str,
+        top_k: int = 5,
+        min_similarity: float = 0.0,
+    ) -> list[tuple[MessageEmbeddingModel, float]]:
+        """Rank messages for `embedding_model` by cosine similarity to `query_embedding`."""
+        query = self.session.query(MessageEmbeddingModel).filter(
+            MessageEmbeddingModel.embedding_model == embedding_model
+        )
+
+        if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
+            distance = MessageEmbeddingModel.embedding.cosine_distance(query_embedding)
+            rows = query.add_columns(distance).order_by(distance).limit(top_k).all()
+            return [
+                (message, 1 - dist) for message, dist in rows if (1 - dist) >= min_similarity
+            ]
+
+        scored = [
+            (message, _cosine_similarity(query_embedding, message.embedding))
+            for message in query.all()
+        ]
+        scored = [pair for pair in scored if pair[1] >= min_similarity]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored[:top_k]

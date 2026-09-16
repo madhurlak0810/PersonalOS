@@ -525,3 +525,15 @@ class OutboxEventStatus(str, Enum):
     IN_PROGRESS = "in_progress"
     DISPATCHED = "dispatched"
     FAILED = "failed"
+
+
+class EvidenceSourceType(str, Enum):
+    """What kind of candidate material an `evidence_chunks` row was cut from.
+
+    Distinguishes resume content from project write-ups so a retrieval query
+    can restrict to one kind of evidence when grounding a generated claim
+    (see `personalos.persistence.models.EvidenceChunkModel`).
+    """
+
+    RESUME = "resume"
+    PROJECT = "project"
