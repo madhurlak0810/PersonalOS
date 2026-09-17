@@ -23,6 +23,25 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     needs: boundaries
+    services:
+      postgres:
+        # pgvector/pgvector ships the `vector` extension the pgvector
+        # migration (202609150001) needs, which the stock postgres image
+        # doesn't have.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: personalos
+          POSTGRES_PASSWORD: personalos
+          POSTGRES_DB: personalos
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U personalos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://personalos:personalos@localhost:5432/personalos
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
