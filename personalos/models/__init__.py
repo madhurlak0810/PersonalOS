@@ -1,3 +1,5 @@
 """Models package."""
 
-__all__ = []
+from .routing import IntentClassifier, KeywordIntentClassifier
+
+__all__ = ["IntentClassifier", "KeywordIntentClassifier"]
