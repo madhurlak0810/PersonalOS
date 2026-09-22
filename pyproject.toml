@@ -38,7 +38,7 @@ dependencies = [
     "redis>=5.0",
     
     # Graph/workflow
-    "langgraph>=0.0.1",
+    "langgraph>=0.2.0",
     "langchain>=0.1",
     
     # Observability
