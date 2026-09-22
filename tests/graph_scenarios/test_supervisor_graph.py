@@ -146,18 +146,97 @@ async def test_graph_compiles_with_a_checkpointer_and_store_and_persists_state()
     assert snapshot.values["route_decision"]["domain"] == "job"
 
 
-async def test_cross_thread_facts_are_loaded_from_the_long_term_store():
+async def test_an_injected_checkpointer_is_the_one_actually_written_through():
+    """The graph persists via the checkpointer it is given, not one it builds itself.
+
+    This is what makes swapping in the durable, Postgres-backed saver from the
+    follow-up issue a wiring change rather than a change to this module: an
+    in-memory saver stands in for it here only because no durable backend is
+    installed in the test environment.
+    """
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    class SpyCheckpointer(InMemorySaver):
+        # NB: not `self.writes` -- InMemorySaver already uses that attribute
+        # for its own write storage.
+        def __init__(self):
+            super().__init__()
+            self.put_calls = 0
+
+        async def aput(self, *args, **kwargs):
+            self.put_calls += 1
+            return await super().aput(*args, **kwargs)
+
+    checkpointer = SpyCheckpointer()
+    decision = RouteDecision(domain=RouteDomain.JOB, confidence=0.9)
+    graph = build_graph(StubClassifier(decision), RecordingJobSubgraph(), checkpointer=checkpointer)
+
+    config = {"configurable": {"thread_id": "t-injected"}}
+    await graph.ainvoke({"message": "find a job"}, config=config)
+
+    assert checkpointer.put_calls > 0
+    snapshot = await graph.aget_state(config)
+    assert snapshot.values["message"] == "find a job"
+
+
+async def test_facts_are_loaded_from_the_long_term_store():
     from langgraph.store.memory import InMemoryStore
 
     store = InMemoryStore()
-    store.put(("supervisor_facts", "t-facts"), "prefers_remote", {"value": True})
+    store.put(("supervisor_facts", "actor-1"), "prefers_remote", {"value": True})
 
     decision = RouteDecision(domain=RouteDomain.JOB, confidence=0.9)
     graph = build_graph(StubClassifier(decision), RecordingJobSubgraph(), store=store)
 
     final = await graph.ainvoke(
         {"message": "find a job"},
-        config={"configurable": {"thread_id": "t-facts"}},
+        config={"configurable": {"thread_id": "t-facts", "actor_id": "actor-1"}},
     )
 
-    assert final["thread_facts"] == {"prefers_remote": {"value": True}}
+    assert final["actor_facts"] == {"prefers_remote": {"value": True}}
+
+
+async def test_facts_cross_thread_boundaries_for_the_same_actor():
+    """The point of the long-term store: what one conversation learned, the next one knows.
+
+    Facts are namespaced by actor, not thread -- a thread-scoped namespace
+    would duplicate what the checkpointer already covers and would carry
+    nothing across conversations.
+    """
+    from langgraph.store.memory import InMemoryStore
+
+    store = InMemoryStore()
+    store.put(("supervisor_facts", "actor-1"), "prefers_remote", {"value": True})
+
+    decision = RouteDecision(domain=RouteDomain.JOB, confidence=0.9)
+    graph = build_graph(StubClassifier(decision), RecordingJobSubgraph(), store=store)
+
+    first = await graph.ainvoke(
+        {"message": "find a job"},
+        config={"configurable": {"thread_id": "thread-1", "actor_id": "actor-1"}},
+    )
+    # A brand-new conversation: different thread, same person.
+    second = await graph.ainvoke(
+        {"message": "find another job"},
+        config={"configurable": {"thread_id": "thread-2", "actor_id": "actor-1"}},
+    )
+
+    assert first["actor_facts"] == {"prefers_remote": {"value": True}}
+    assert second["actor_facts"] == first["actor_facts"]
+
+
+async def test_facts_are_not_shared_between_actors():
+    from langgraph.store.memory import InMemoryStore
+
+    store = InMemoryStore()
+    store.put(("supervisor_facts", "actor-1"), "prefers_remote", {"value": True})
+
+    decision = RouteDecision(domain=RouteDomain.JOB, confidence=0.9)
+    graph = build_graph(StubClassifier(decision), RecordingJobSubgraph(), store=store)
+
+    final = await graph.ainvoke(
+        {"message": "find a job"},
+        config={"configurable": {"thread_id": "thread-3", "actor_id": "actor-2"}},
+    )
+
+    assert final["actor_facts"] == {}
