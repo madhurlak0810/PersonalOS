@@ -36,14 +36,24 @@ from personalos.domain.routing import (
     ensure_supported_domain,
     route_decision_from_mapping,
 )
-from personalos.domain.tasks import TaskDAG, TaskNode
+from personalos.domain.tasks import InvalidTaskDAG, TaskDAG, TaskNode
 from personalos.models.routing import IntentClassifier
 
 logger = logging.getLogger(__name__)
 
 #: Long-term store namespace root for cross-thread facts. The full namespace
-#: for a given thread is `(_FACTS_NAMESPACE, thread_id)`.
+#: for a given actor is `(_FACTS_NAMESPACE, actor_id)`.
+#:
+#: Namespacing by actor rather than thread is the whole point of the store:
+#: a checkpointer already persists one thread's state, so facts keyed by
+#: `thread_id` would be scoped to exactly what the checkpointer covers and
+#: nothing would ever be carried *across* threads. Keyed by actor, a fact
+#: learned in one conversation is visible in the next one.
 _FACTS_NAMESPACE = "supervisor_facts"
+
+#: Matches `ExecutionContext.actor_id`'s default, so a run started without an
+#: explicit actor reads and writes the same namespace either way.
+_DEFAULT_ACTOR_ID = "system"
 
 #: langgraph node/edge names, so they aren't inline string literals in two
 #: places.
@@ -79,7 +89,7 @@ class SupervisorState(TypedDict, total=False):
     """
 
     message: str
-    thread_facts: dict[str, Any]
+    actor_facts: dict[str, Any]
     route_decision: dict[str, Any] | None
     task_dag: dict[str, Any] | None
     clarification: str | None
@@ -169,10 +179,16 @@ class SupervisorGraph:
     # ------------------------------------------------------------------
 
     def _load_context(self, state: SupervisorState, config: RunnableConfig) -> dict[str, Any]:
-        """Load cross-thread facts for this thread from the long-term store."""
-        thread_id = (config.get("configurable") or {}).get("thread_id", "default")
-        facts = {item.key: item.value for item in self.store.search((_FACTS_NAMESPACE, thread_id))}
-        return {"thread_facts": facts}
+        """Load this actor's long-term facts, carried across all of their threads.
+
+        Keyed by `actor_id` (see `personalos.domain.context.ExecutionContext`),
+        not `thread_id`, so what was learned in an earlier conversation is
+        available in this one.
+        """
+        configurable = config.get("configurable") or {}
+        actor_id = configurable.get("actor_id") or _DEFAULT_ACTOR_ID
+        facts = {item.key: item.value for item in self.store.search((_FACTS_NAMESPACE, actor_id))}
+        return {"actor_facts": facts}
 
     def _classify_intent(self, state: SupervisorState) -> dict[str, Any]:
         """Classify the message into a typed `RouteDecision`.
@@ -209,7 +225,10 @@ class SupervisorGraph:
 
     def _plan_work(self, state: SupervisorState) -> dict[str, Any]:
         """Produce the bounded task DAG for a confidently-routed, supported domain."""
-        decision = route_decision_from_mapping(state["route_decision"])
+        raw_decision = state.get("route_decision")
+        if raw_decision is None:  # pragma: no cover - the router only reaches here with one
+            raise UnsupportedRouteDomain("plan_work reached without a route decision")
+        decision = route_decision_from_mapping(raw_decision)
         ensure_supported_domain(decision)  # re-checked: plan_work must never plan the unsupported
 
         if decision.domain == RouteDomain.JOB:
@@ -221,7 +240,9 @@ class SupervisorGraph:
 
     async def _run_job_subgraph(self, state: SupervisorState) -> dict[str, Any]:
         """Hand the planned DAG to the Job Search subgraph and record its result."""
-        task_dag = state["task_dag"]
+        task_dag = state.get("task_dag")
+        if task_dag is None:  # pragma: no cover - plan_work always sets one before this node
+            raise InvalidTaskDAG("job subgraph reached without a planned task DAG")
         result = await self.job_subgraph(task_dag, state)
         return {"result": result}
 

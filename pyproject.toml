@@ -67,6 +67,12 @@ dev = [
     "pre-commit>=3.5",
 ]
 
+llm = [
+    # Backs personalos.models.routing.anthropic_intent_classifier. Optional:
+    # the Supervisor graph runs on KeywordIntentClassifier without it.
+    "langchain-anthropic>=0.3",
+]
+
 test = [
     "pytest>=7.4",
     "pytest-asyncio>=0.21",
