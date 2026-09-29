@@ -109,6 +109,29 @@ pauses.
   can write to the database is a graph whose state transitions are untraceable.
   Delegate both to an executor.
 
+A graph therefore reaches the outside world in exactly one way: it declares a
+port — a `Protocol` in the graph module — and the composition root binds an
+adapter to it. [`graphs/job_search.py`](../personalos/graphs/job_search.py) is
+the worked example. Nine of its ports are required constructor arguments — a
+profile store, job board providers, a scorer, an evidence checker, a packet
+builder, an approval gate, an action executor, an application store and an
+event emitter — for the same reason `JobSearchExecutor` requires a
+`ToolGateway`: a graph that can fall back to a global default is a graph whose
+reach is not visible at its construction site. Three are genuinely optional:
+the posting normalizer (which has a pure, dependency-free default), and the
+recruiter inbox plus its classifier, which are what turn the
+recruiter-response branch on and must be supplied together.
+
+One node in that graph is load-bearing for this boundary.
+`approval_checkpoint_for_external_submission` is the only node holding an
+`ApprovalGate` and an `ActionExecutor`; every other node that wants to act
+outwardly returns an `ActionIntent` and lets the graph route it there. The
+checkpoint reviews and redeems in one place — the same authorize-then-execute
+shape as `PolicyEnforcingToolGateway.dispatch` — and redeems only when
+`ApprovalDecision.authorizes()` accepts the intent, which binds the verdict to
+that intent's fingerprint. There is no edge from a node that builds an
+`ActionIntent` to anything that acts on one.
+
 ### `persistence` — `personalos/persistence/`
 
 Storage and retrieval: ORM models, sessions, repositories, and the idempotency
