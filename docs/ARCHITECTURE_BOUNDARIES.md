@@ -134,12 +134,31 @@ that intent's fingerprint. There is no edge from a node that builds an
 
 ### `persistence` — `personalos/persistence/`
 
-Storage and retrieval: ORM models, sessions, repositories, and the idempotency
-guard that makes mutating operations at-most-once.
+Storage and retrieval: ORM models, sessions, repositories, the idempotency guard
+that makes mutating operations at-most-once, and the three pieces that make a
+workflow survive its own process —
+[`checkpointer.py`](../personalos/persistence/checkpointer.py),
+[`leases.py`](../personalos/persistence/leases.py) and
+[`action_journal.py`](../personalos/persistence/action_journal.py).
 
 - **May import:** `domain`, `config`.
 - **Must not:** make decisions, call tools, or import `executor` / `graphs` /
   `policy`. Repositories translate between domain models and rows; that is all.
+
+Durability lives here rather than in `graphs` because `graphs` may not import
+`persistence` at all. That constraint shapes the design rather than bending it:
+
+- **`SqlAlchemyCheckpointSaver`** implements LangGraph's own
+  `BaseCheckpointSaver` port, which the graphs already compile against. A graph
+  is handed a durable saver by the composition root and does not change a line.
+- **`WorkflowLeaseStore`** takes an exclusive, expiring lease on a
+  `workflow_id`, so two workers cannot resume the same business process.
+- **`JournaledActionExecutor`** *wraps* the graph's `ActionExecutor` port rather
+  than reaching inside the approval node, declaring the shape it wraps as a
+  local `Protocol`. Same inversion as `PolicyEnforcingToolGateway` one level up:
+  the adapter the composition root binds is what adds the guarantee, and the
+  caller's contract does not change. The approval node keeps its own invariant —
+  reviewing and redeeming stay together in one place.
 
 ### `mcp` — `personalos/mcp/`
 
@@ -196,6 +215,11 @@ The two entry points that use it:
 - [`apps/worker/job_runner.py`](../apps/worker/job_runner.py) runs them, in a
   session it opens itself. A request-scoped session is closed once the response
   is sent, so background work cannot borrow one.
+- [`apps/worker/workflow_runner.py`](../apps/worker/workflow_runner.py) starts
+  and resumes durable workflows. It holds a compiled graph rather than building
+  one — which ports a graph is wired to is decided where the graph is
+  constructed — plus the thread registry and the lease store, and it takes the
+  workflow's lease around every invocation.
 
 ## Dependency direction
 
@@ -247,6 +271,81 @@ A job search, end to end:
 8. The executor persists results through `JobRepository`.
 
 Policy is crossed exactly once per tool call, in exactly one place.
+
+## Durable workflows
+
+Orchestration that can be interrupted needs two identifiers, and keeping them
+distinct is the whole design.
+[`domain/workflow.py`](../personalos/domain/workflow.py) owns both:
+
+| Identifier | Names | Resumed by |
+| --- | --- | --- |
+| `thread_id` | one conversational/orchestration thread | LangGraph's checkpointer, which stores and loads state under it |
+| `workflow_id` | one long-running business process, possibly several threads | an operator; it is also what a lease is taken against |
+
+A `thread_id` is **derived**, not minted (`derive_thread_id(namespace, *parts)`).
+A thread id invented per invocation produces a graph that checkpoints diligently
+and can never resume, because nothing ever looks the state up again — which is
+what `JobSearchSubgraphRunner` used to do, and why it now takes its thread id
+from the composition root instead.
+
+Each kind of thread has one derivation helper — `job_search_thread_id`,
+`supervisor_thread_id` — and every caller goes through it. Two places deriving
+"the obvious way" is not a style question: whatever registers a thread and
+whatever runs on it must produce the byte-identical string, and a disagreement
+does not fail anywhere. The run simply starts from scratch every time.
+
+A thread must be **registered** (`WorkflowThreadRegistry.register`) before it can
+be checkpointed. Registration is get-or-create on `workflows` and
+`workflow_runs`, so a restarted worker recomputing the same derived id rejoins
+its existing run; an unregistered thread is refused rather than checkpointed
+under an invented `workflow_id`, which is a checkpoint an operator resuming that
+workflow would never find.
+
+### Where state is persisted relative to a side effect
+
+The guarantee is: state is durable before any external side effect and again
+after that effect's receipt, so a crash between the two cannot produce a
+duplicate on resume. Two mechanisms, at two granularities:
+
+1. **Super-step boundaries.** LangGraph writes the checkpoint for a step before
+   running that step's tasks, and records each finished task's writes in
+   `checkpoint_writes`. A worker killed inside a node resumes *at that node*,
+   with everything before it restored.
+2. **The action journal, around the effect itself.** A checkpoint boundary is
+   coarser than one tool call, so `JournaledActionExecutor` commits a claim on
+   the action's `idempotency_key` immediately before the call and the receipt
+   immediately after. A resumed run that finds the receipt replays it; one that
+   finds a claim with no receipt returns a not-ok receipt and does **not** call
+   out again, because a duplicate application cannot be withdrawn while a missed
+   one can be resubmitted deliberately.
+
+`SqlAlchemyCheckpointSaver`'s async methods run inline rather than on a worker
+thread, and that is part of the guarantee rather than an oversight — see the
+class docstring. LangGraph submits checkpoint writes as chained background
+tasks; an `await asyncio.to_thread(...)` inside one yields before the row is
+written, so the chain falls behind the run it is recording and a kill loses
+everything still queued. That was measured, not theorized.
+
+### Resuming
+
+`DurableWorkflowRunner.resume(workflow_id=...)` or `(thread_id=...)`:
+
+1. Resolve the thread (by workflow, or named directly). A workflow with several
+   threads is `AmbiguousWorkflowResume` rather than a guess about which half of
+   the process to advance.
+2. Take the workflow's lease, or raise `WorkflowLeaseUnavailable`.
+3. Invoke with `None`, not the initial state. With no input LangGraph continues
+   the stored run; passing the inputs again is what *starting* looks like.
+4. Release the lease, including on failure.
+
+The lease's mutual exclusion rests on a unique constraint on
+`workflow_leases.workflow_id` and a token-guarded single-statement `UPDATE`, not
+on `SELECT ... FOR UPDATE` — which is taken on Postgres, but is a silent no-op on
+SQLite, so a guarantee that depended on it would hold in production and nowhere
+else. Leases expire so a hard-killed worker does not strand its workflow, and
+every takeover mints a new fencing token so a stalled holder cannot release or
+renew the lease that replaced it.
 
 ## Adding things
 

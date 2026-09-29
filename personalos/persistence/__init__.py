@@ -1,5 +1,11 @@
 """Persistence package."""
 
+from .action_journal import JournaledActionExecutor
+from .checkpointer import (
+    SqlAlchemyCheckpointSaver,
+    UnregisteredWorkflowThread,
+    WorkflowThreadRegistry,
+)
 from .database import SessionLocal, engine, get_session, init_db
 from .idempotency import (
     IdempotencyError,
@@ -11,14 +17,21 @@ from .idempotency import (
     SqlOperationStore,
     fingerprint_request,
 )
+from .leases import (
+    WorkflowLeaseLost,
+    WorkflowLeaseStore,
+    WorkflowLeaseUnavailable,
+)
 from .models import (
     AgentStateModel,
     ApprovalModel,
     CheckpointModel,
+    CheckpointWriteModel,
     EventModel,
     JobModel,
     OperationModel,
     UserModel,
+    WorkflowLeaseModel,
     WorkflowModel,
     WorkflowRunModel,
     WorkflowStepModel,
@@ -45,6 +58,8 @@ __all__ = [
     "WorkflowRunModel",
     "WorkflowStepModel",
     "CheckpointModel",
+    "CheckpointWriteModel",
+    "WorkflowLeaseModel",
     "ApprovalModel",
     "JobRepository",
     "OperationRepository",
@@ -59,4 +74,11 @@ __all__ = [
     "SqlOperationStore",
     "InMemoryOperationStore",
     "fingerprint_request",
+    "SqlAlchemyCheckpointSaver",
+    "WorkflowThreadRegistry",
+    "UnregisteredWorkflowThread",
+    "WorkflowLeaseStore",
+    "WorkflowLeaseUnavailable",
+    "WorkflowLeaseLost",
+    "JournaledActionExecutor",
 ]

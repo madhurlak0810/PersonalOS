@@ -415,6 +415,18 @@ class CheckpointModel(Base):
     Keyed by `thread_id` / `checkpoint_ns` / `checkpoint_id`, mirroring
     LangGraph's own checkpoint tuple, and cross-indexed by `workflow_id` so a
     workflow's checkpoints can be found without going through a run.
+
+    `checkpoint` holds the snapshot as the
+    `{"type": ..., "data": <base64>}` envelope
+    `personalos.persistence.checkpointer.SqlAlchemyCheckpointSaver` writes, not
+    queryable JSON: the value is whatever LangGraph's serializer produced for
+    that state, and re-encoding it as plain JSON would round-trip some channel
+    values into something the graph cannot rebuild. `checkpoint_metadata` is
+    the opposite trade -- JSON-coerced, and therefore inspectable and
+    filterable, because that is all it is for.
+
+    The writes belonging to each checkpoint live in `checkpoint_writes`; see
+    `CheckpointWriteModel` for why they are a separate table.
     """
 
     __tablename__ = "checkpoints"
@@ -451,6 +463,130 @@ class CheckpointModel(Base):
             "parent_checkpoint_id": self.parent_checkpoint_id,
             "checkpoint": self.checkpoint,
             "checkpoint_metadata": self.checkpoint_metadata,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
+class CheckpointWriteModel(Base):
+    """ORM model for the writes a task produced against one checkpoint.
+
+    The other half of the LangGraph checkpointer's storage, and not an
+    optimization: when a worker dies part way through a super-step, the tasks
+    that *had* finished are recorded here rather than in the checkpoint, so a
+    resume replays only the work that never landed. Without this table a crash
+    mid-step would re-run every task in that step, which is exactly the
+    duplicate-side-effect case the durable checkpointer exists to prevent.
+
+    Keyed by `(thread_id, checkpoint_ns, checkpoint_id, task_id, idx)`, mirroring
+    LangGraph's own write tuple. `idx` is negative for the reserved channels in
+    `langgraph.checkpoint.base.WRITES_IDX_MAP` (`__error__`, `__interrupt__`,
+    ...), which are overwritten on re-write, and non-negative for ordinary
+    channel writes, which are not -- see
+    `personalos.persistence.checkpointer.SqlAlchemyCheckpointSaver.put_writes`.
+    """
+
+    __tablename__ = "checkpoint_writes"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    thread_id = Column(String(255), nullable=False)
+    checkpoint_ns = Column(String(255), nullable=False, default="")
+    checkpoint_id = Column(String(255), nullable=False)
+    task_id = Column(String(255), nullable=False)
+    idx = Column(Integer, nullable=False, default=0)
+    channel = Column(String(255), nullable=False)
+    #: Serialized write value, as the `{"type": ..., "data": <base64>}` envelope
+    #: `personalos.persistence.checkpointer` writes. Opaque to SQL on purpose:
+    #: a channel value is whatever the graph put on that channel, and coercing
+    #: it to queryable JSON would change what comes back out.
+    value = Column(JSON, nullable=False, default={})
+    task_path = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index(
+            "ix_checkpoint_writes_thread_ns_checkpoint",
+            "thread_id",
+            "checkpoint_ns",
+            "checkpoint_id",
+        ),
+        UniqueConstraint(
+            "thread_id",
+            "checkpoint_ns",
+            "checkpoint_id",
+            "task_id",
+            "idx",
+            name="uq_checkpoint_writes_thread_ns_checkpoint_task_idx",
+        ),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "thread_id": self.thread_id,
+            "checkpoint_ns": self.checkpoint_ns,
+            "checkpoint_id": self.checkpoint_id,
+            "task_id": self.task_id,
+            "idx": self.idx,
+            "channel": self.channel,
+            "value": self.value,
+            "task_path": self.task_path,
+            "created_at": self.created_at.isoformat(),
+        }
+
+
+class WorkflowLeaseModel(Base):
+    """ORM model for the exclusive, expiring claim one worker holds on a workflow.
+
+    One row per workflow, enforced by the unique constraint on `workflow_id`:
+    that constraint is the primitive, not a hint. Two workers racing to resume
+    the same workflow from empty both try to insert, and the loser gets an
+    `IntegrityError` rather than a second lease -- which is what makes the
+    guarantee hold on SQLite too, where `SELECT ... FOR UPDATE` is silently a
+    no-op.
+
+    Held-ness is a function of the row, not its existence: a lease is held
+    while `released_at IS NULL` and `expires_at` is in the future. An expired
+    row is takeable, so a worker that was killed without releasing does not
+    strand its workflow forever, and `lease_token` changes on every takeover so
+    the previous holder cannot release or renew a lease it has lost. See
+    `personalos.persistence.leases`.
+    """
+
+    __tablename__ = "workflow_leases"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    # Uniqueness is declared once, as the named constraint in `__table_args__`:
+    # `unique=True` here as well would emit a second, anonymous UNIQUE clause in
+    # `create_all` that the migration does not create, so the schema the tests
+    # build and the schema production runs would quietly differ.
+    workflow_id = Column(GUID(), ForeignKey("workflows.id"), nullable=False)
+    thread_id = Column(String(255), nullable=True)
+    owner = Column(String(255), nullable=False)
+    lease_token = Column(GUID(), nullable=False, default=uuid4)
+    acquired_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    released_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_workflow_leases_expires_at", "expires_at"),
+        UniqueConstraint("workflow_id", name="uq_workflow_leases_workflow_id"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "workflow_id": str(self.workflow_id),
+            "thread_id": self.thread_id,
+            "owner": self.owner,
+            "lease_token": str(self.lease_token),
+            "acquired_at": self.acquired_at.isoformat(),
+            "expires_at": self.expires_at.isoformat(),
+            "released_at": self.released_at.isoformat() if self.released_at else None,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }

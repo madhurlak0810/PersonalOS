@@ -546,6 +546,78 @@ fails if a node is added without a contract test), and one fake per port in
 `ApplicationStore`, a gateway-backed `ActionExecutor`, real job board
 providers) are a follow-up. The graph is complete and exercised against fakes.
 
+### 13. Durable Checkpointing and Resume
+
+Both graphs default to `InMemorySaver`, which is a test fixture: a restart loses
+every thread it held. The production checkpointer is
+[`persistence/checkpointer.py`](personalos/persistence/checkpointer.py), backed
+by the `checkpoints` and `checkpoint_writes` tables, and the composition root
+passes it in — the graphs themselves are unchanged, because they already compile
+against LangGraph's `BaseCheckpointSaver` port.
+
+**Two identifiers, deliberately distinct**
+([`domain/workflow.py`](personalos/domain/workflow.py)):
+
+| | Names | Notes |
+| --- | --- | --- |
+| `thread_id` | one conversational/orchestration thread | *Derived*, via `derive_thread_id`, so a restarted process recomputes it instead of having to have kept it. A thread id minted per invocation checkpoints diligently and can never resume. |
+| `workflow_id` | one long-running business process | May span several threads (a Supervisor conversation and the Job Search subgraph it delegated to). What an operator resumes, and what a lease is taken against. |
+
+A thread is bound to its workflow by `WorkflowThreadRegistry.register`
+(get-or-create on `workflows`/`workflow_runs`, so re-registering a derived id
+rejoins its run). The saver refuses to checkpoint a thread that is not bound —
+the alternative is a checkpoint under an invented `workflow_id`, which is a
+checkpoint nobody resuming that workflow will find.
+
+**Nothing is written twice.** Three layers, coarse to fine:
+
+| Layer | Guarantees |
+| --- | --- |
+| Checkpoint per super-step | LangGraph writes the step's checkpoint *before* running its tasks, so a worker killed inside a node resumes at that node with everything before it intact. |
+| `checkpoint_writes` | Tasks that finished inside the in-flight step are recorded, so a resume replays only what never landed. |
+| [`action_journal.py`](personalos/persistence/action_journal.py) | Commits a claim on the action's `idempotency_key` immediately before the external call and the receipt immediately after. A resume that finds the receipt replays it; one that finds a claim with no receipt returns a not-ok receipt and does **not** call out again. |
+
+That last rule is the one with a cost: an action whose outcome is genuinely
+unknown needs a human rather than a retry. It is the only rule consistent with
+"a crash between those two points cannot produce a duplicate write on resume" —
+a duplicate application cannot be withdrawn, while a missed one can be
+resubmitted deliberately.
+
+**Resuming** is [`apps/worker/workflow_runner.py`](apps/worker/workflow_runner.py):
+`DurableWorkflowRunner.resume(workflow_id=...)` takes the workflow's lease,
+checks the checkpoint says there is a step left, and invokes the graph with
+`None` — with no input LangGraph continues the stored run, where passing the
+inputs again is what *starting* looks like.
+
+**Two workers cannot resume one workflow.**
+[`leases.py`](personalos/persistence/leases.py) holds one row per workflow. The
+exclusion rests on a unique constraint on `workflow_leases.workflow_id` plus a
+token-guarded single-statement `UPDATE`, not on `SELECT ... FOR UPDATE` — that is
+taken on Postgres but is a silent no-op on SQLite, so a guarantee depending on it
+would hold in production and nowhere else. Leases expire (a `kill -9` never
+releases one, and a workflow must not be stranded), and every takeover mints a
+new fencing token so a stalled holder cannot release or renew its successor's
+lease.
+
+**Tests:**
+
+- [`tests/graph_scenarios/test_durable_resume.py`](tests/graph_scenarios/test_durable_resume.py)
+  — the acceptance criteria. A real subprocess runs the workflow and `SIGKILL`s
+  itself at the approval step; a restarted worker resumes and the test asserts
+  the job boards were searched exactly *once* across both processes. A second
+  test kills the worker after the external submission but before its receipt and
+  asserts the resumed run does not submit again. A third runs two resumes of one
+  workflow at the same time and asserts exactly one proceeded.
+- [`tests/unit/test_durable_checkpointer.py`](tests/unit/test_durable_checkpointer.py),
+  [`test_workflow_lease.py`](tests/unit/test_workflow_lease.py),
+  [`test_action_journal.py`](tests/unit/test_action_journal.py),
+  [`test_workflow_identity.py`](tests/unit/test_workflow_identity.py) — each
+  component's own contract.
+
+A kill is a real `SIGKILL` from a real child process, not an exception raised in
+a node: an exception unwinds, runs `finally` blocks and flushes buffers, which is
+the graceful path a crash does not take. Testing against it would prove nothing.
+
 ---
 
 ## MCP Framework Guide
