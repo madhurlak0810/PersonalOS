@@ -33,6 +33,8 @@ from personalos.domain.job_search import (
     ActionReceipt,
     ApplicationPacket,
     ApprovalDecision,
+    ApprovalRefusal,
+    ApprovalRequest,
     ApprovalVerdict,
     EmittedEvent,
     EvidenceCheck,
@@ -47,6 +49,8 @@ from personalos.domain.job_search import (
     RawPosting,
     RecruiterMessage,
     RecruiterResponse,
+    RefusalReason,
+    RiskLevel,
     ScoredPosting,
     SearchProfile,
     ShortlistEntry,
@@ -54,11 +58,11 @@ from personalos.domain.job_search import (
 from personalos.domain.models import ApplicationStatus, CommunicationEventClassification
 from personalos.graphs import job_search as jsg
 from personalos.graphs.job_search import (
-    APPROVAL_CHECKPOINT,
     END,
     HANDLE_RECRUITER_RESPONSE,
     PERSIST_APPLICATION,
     PREPARE_APPLICATION_PACKET,
+    REQUEST_APPROVAL,
     STAGE_RECRUITER_OUTREACH,
     STAGE_SUBMISSION,
     JobSearchGraph,
@@ -93,6 +97,30 @@ def dumped(*values) -> list[dict]:
 
 
 PROFILE_STATE = {"search_profile": fakes.profile().model_dump(mode="json")}
+
+
+def _awaiting(intent, request=None) -> dict:
+    """State as `approval_checkpoint` finds it: an action with its request raised."""
+    request = request or fakes.approval_request(intent)
+    return {
+        "pending_actions": dumped(intent),
+        "approval_requests": dumped(request),
+        "approval_stage": STAGE_SUBMISSION,
+    }
+
+
+def _answered(intent, request, decision) -> dict:
+    """State as `execute_approved_actions` finds it, after the interrupt resumed.
+
+    `intent` is passed separately from `request` on purpose: the two disagreeing
+    is exactly the situation the executor's hash recomputation exists to catch.
+    """
+    return {
+        "pending_actions": dumped(intent),
+        "approval_requests": dumped(request),
+        "approvals": dumped(decision),
+        "approval_stage": STAGE_SUBMISSION,
+    }
 
 
 # --- load_search_profile ------------------------------------------------------
@@ -584,50 +612,97 @@ class TestPrepareApplicationPacket:
             ApplicationPacket(dedupe_key="k", posting=fakes.posting(), artifacts=())
 
 
+# --- request_approval ---------------------------------------------------------
+
+
+class TestRequestApproval:
+    def test_it_raises_a_reviewable_request_for_every_pending_action(self):
+        subgraph, ports = graph()
+        intent = fakes.submit_intent()
+
+        update = subgraph.request_approval({"pending_actions": dumped(intent)})
+
+        assert set(update) == {"approval_requests"}
+        request = ApprovalRequest.model_validate(update["approval_requests"][0])
+        assert request.action_id == intent.action_id
+        assert request.action_hash == intent.fingerprint()
+        assert request.target == intent.target
+        assert request.summary == intent.summary
+        assert request.risk == RiskLevel.HIGH
+        assert request.requested_scopes == ("applications:submit", "artifacts:read")
+        assert request.expires_at > request.requested_at
+        # It only describes the action; nothing has been reviewed or executed.
+        assert ports["approval_gate"].reviewed == []
+        assert ports["action_executor"].executed == []
+
+    def test_the_expiry_comes_from_the_action_kind_unless_overridden(self):
+        intent = fakes.submit_intent()
+        subgraph, _ = graph(clock=lambda: fakes.NOW)
+
+        update = subgraph.request_approval({"pending_actions": dumped(intent)})
+        request = ApprovalRequest.model_validate(update["approval_requests"][0])
+        assert request.expires_at == fakes.NOW + timedelta(days=7)
+
+        strict, _ = graph(clock=lambda: fakes.NOW, approval_ttl=timedelta(minutes=30))
+        update = strict.request_approval({"pending_actions": dumped(intent)})
+        request = ApprovalRequest.model_validate(update["approval_requests"][0])
+        assert request.expires_at == fakes.NOW + timedelta(minutes=30)
+
+    def test_requests_from_an_earlier_stage_are_kept(self):
+        """The node runs twice per recruiter-handling run; requests accumulate."""
+        subgraph, _ports = graph()
+        earlier = fakes.approval_request()
+
+        update = subgraph.request_approval(
+            {
+                "pending_actions": dumped(fakes.submit_intent()),
+                "approval_requests": dumped(earlier),
+            }
+        )
+
+        assert len(update["approval_requests"]) == 2
+        assert update["approval_requests"][0]["request_id"] == str(earlier.request_id)
+
+    def test_nothing_pending_raises_nothing(self):
+        subgraph, _ports = graph()
+
+        assert subgraph.request_approval({"pending_actions": []}) == {"approval_requests": []}
+
+
 # --- approval_checkpoint ------------------------------------------------------
 
 
 class TestApprovalCheckpoint:
-    async def test_an_approved_intent_is_reviewed_then_redeemed(self):
+    """Contract tests for the node that parks the run.
+
+    The interrupt itself is not asserted here: `interrupt()` only works inside
+    a runnable context, so calling this node directly can only cover the paths
+    that *do not* pause. What the run looks like when it does pause, and what a
+    reviewer is shown, is covered end-to-end in
+    `tests/graph_scenarios/test_approval_interrupts.py`.
+    """
+
+    async def test_a_standing_approval_is_recorded_without_interrupting(self):
         subgraph, ports = graph()
         intent = fakes.submit_intent()
 
-        update = await subgraph.approval_checkpoint({"pending_actions": dumped(intent)})
+        update = await subgraph.approval_checkpoint(_awaiting(intent))
 
-        assert set(update) == {"approvals", "action_receipts"}
+        assert set(update) == {"approvals"}
         decision = ApprovalDecision.model_validate(update["approvals"][0])
         assert decision.verdict == ApprovalVerdict.APPROVED
         assert decision.action_id == intent.action_id
-        receipt = ActionReceipt.model_validate(update["action_receipts"][0])
-        assert receipt.ok is True
         assert [i.action_id for i in ports["approval_gate"].reviewed] == [intent.action_id]
-        assert [i.action_id for i, _ in ports["action_executor"].executed] == [intent.action_id]
-
-    @pytest.mark.parametrize("verdict", [ApprovalVerdict.REJECTED, ApprovalVerdict.PENDING])
-    async def test_a_verdict_that_is_not_approval_yields_no_receipt(self, verdict):
-        subgraph, ports = graph(approval_gate=fakes.FakeApprovalGate(verdict))
-
-        update = await subgraph.approval_checkpoint(
-            {"pending_actions": dumped(fakes.submit_intent())}
-        )
-
-        assert update["action_receipts"] == []
+        # The checkpoint decides; it never acts.
         assert ports["action_executor"].executed == []
+
+    @pytest.mark.parametrize("verdict", [ApprovalVerdict.REJECTED, ApprovalVerdict.APPROVED])
+    async def test_a_binding_verdict_on_file_is_not_put_to_a_human(self, verdict):
+        subgraph, _ports = graph(approval_gate=fakes.FakeApprovalGate(verdict))
+
+        update = await subgraph.approval_checkpoint(_awaiting(fakes.submit_intent()))
+
         assert update["approvals"][0]["verdict"] == verdict.value
-
-    async def test_an_approval_bound_to_another_payload_does_not_authorize(self):
-        subgraph, ports = graph(
-            approval_gate=fakes.FakeApprovalGate(
-                ApprovalVerdict.APPROVED, fingerprint_override="stale"
-            )
-        )
-
-        update = await subgraph.approval_checkpoint(
-            {"pending_actions": dumped(fakes.submit_intent())}
-        )
-
-        assert update["action_receipts"] == []
-        assert ports["action_executor"].executed == []
 
     async def test_earlier_stages_decisions_are_kept_not_overwritten(self):
         """The node runs twice per recruiter-handling run; the audit trail accumulates."""
@@ -640,32 +715,199 @@ class TestApprovalCheckpoint:
         )
 
         update = await subgraph.approval_checkpoint(
-            {
-                "pending_actions": dumped(fakes.submit_intent()),
-                "approvals": dumped(prior),
-                "action_receipts": dumped(ActionReceipt(action_id=prior.action_id, ok=True)),
-            }
+            {**_awaiting(fakes.submit_intent()), "approvals": dumped(prior)}
         )
 
         assert len(update["approvals"]) == 2
-        assert len(update["action_receipts"]) == 2
 
     async def test_nothing_pending_means_nothing_reviewed(self):
         subgraph, ports = graph()
 
         update = await subgraph.approval_checkpoint({"pending_actions": []})
 
-        assert update == {"approvals": [], "action_receipts": []}
+        assert update == {}
         assert ports["approval_gate"].reviewed == []
+
+    async def test_an_action_with_no_request_on_file_is_a_contract_error(self):
+        """`request_approval` must have run; without it there is no hash to check."""
+        subgraph, _ports = graph()
+
+        with pytest.raises(JobSearchContractError, match="no request on file"):
+            await subgraph.approval_checkpoint(
+                {"pending_actions": dumped(fakes.submit_intent()), "approval_requests": []}
+            )
 
     async def test_an_action_intent_without_a_summary_cannot_be_built(self):
         """The summary is what a reviewer approves, so it is not optional."""
         with pytest.raises(ValidationError, match="human-readable summary"):
             ActionIntent(
                 kind=ActionKind.SUBMIT_APPLICATION,
+                target="https://example.test/acme",
                 summary="   ",
                 idempotency_key="key-that-is-long-enough",
             )
+
+    async def test_an_action_intent_without_a_target_cannot_be_built(self):
+        """A reviewer checks where the write lands separately from what it says."""
+        with pytest.raises(ValidationError, match="human-readable summary"):
+            ActionIntent(
+                kind=ActionKind.SUBMIT_APPLICATION,
+                target="  ",
+                summary="Submit an application to Acme",
+                idempotency_key="key-that-is-long-enough",
+            )
+
+
+# --- execute_approved_actions -------------------------------------------------
+
+
+class TestExecuteApprovedActions:
+    async def test_an_action_whose_approval_still_fits_it_is_redeemed(self):
+        subgraph, ports = graph()
+        intent = fakes.submit_intent()
+        request = fakes.approval_request(intent)
+
+        update = await subgraph.execute_approved_actions(
+            _answered(intent, request, fakes.approval_decision(request))
+        )
+
+        assert set(update) == {"action_receipts", "approval_refusals"}
+        assert update["approval_refusals"] == []
+        receipt = ActionReceipt.model_validate(update["action_receipts"][0])
+        assert receipt.ok is True
+        assert [i.action_id for i, _ in ports["action_executor"].executed] == [intent.action_id]
+
+    async def test_an_action_mutated_after_approval_is_refused(self):
+        """The check the whole interrupt design exists for."""
+        subgraph, ports = graph()
+        approved = fakes.submit_intent()
+        request = fakes.approval_request(approved)
+        decision = fakes.approval_decision(request)
+        # The reviewer said yes to `approved`; state now holds something else
+        # under the same action id.
+        mutated = approved.model_copy(update={"payload": {"dedupe_key": "somewhere:else"}})
+
+        update = await subgraph.execute_approved_actions(_answered(mutated, request, decision))
+
+        assert update["action_receipts"] == []
+        assert ports["action_executor"].executed == []
+        refusal = ApprovalRefusal.model_validate(update["approval_refusals"][0])
+        assert refusal.reason == RefusalReason.HASH_MISMATCH
+        assert refusal.approved_hash == request.action_hash
+        assert refusal.recomputed_hash == mutated.fingerprint()
+        assert refusal.suspicious is True
+
+    async def test_redirecting_an_action_at_a_new_target_is_refused(self):
+        """The target is part of the hash, so re-pointing an action voids its approval."""
+        subgraph, ports = graph()
+        approved = fakes.submit_intent()
+        request = fakes.approval_request(approved)
+        decision = fakes.approval_decision(request)
+        redirected = approved.model_copy(update={"target": "https://evil.test/collect"})
+
+        update = await subgraph.execute_approved_actions(_answered(redirected, request, decision))
+
+        assert ports["action_executor"].executed == []
+        assert (
+            ApprovalRefusal.model_validate(update["approval_refusals"][0]).reason
+            == RefusalReason.HASH_MISMATCH
+        )
+
+    async def test_an_approval_that_expired_while_the_run_was_parked_is_refused(self):
+        intent = fakes.submit_intent()
+        request = fakes.approval_request(intent)
+        subgraph, ports = graph(clock=lambda: request.expires_at + timedelta(seconds=1))
+
+        update = await subgraph.execute_approved_actions(
+            _answered(intent, request, fakes.approval_decision(request))
+        )
+
+        assert ports["action_executor"].executed == []
+        refusal = ApprovalRefusal.model_validate(update["approval_refusals"][0])
+        assert refusal.reason == RefusalReason.EXPIRED
+        assert refusal.suspicious is False
+
+    @pytest.mark.parametrize(
+        "verdict", [ApprovalVerdict.REJECTED, ApprovalVerdict.PENDING]
+    )
+    async def test_a_verdict_that_is_not_an_approval_yields_no_receipt(self, verdict):
+        subgraph, ports = graph()
+        intent = fakes.submit_intent()
+        request = fakes.approval_request(intent)
+
+        update = await subgraph.execute_approved_actions(
+            _answered(intent, request, fakes.approval_decision(request, verdict))
+        )
+
+        assert update["action_receipts"] == []
+        assert ports["action_executor"].executed == []
+        assert (
+            ApprovalRefusal.model_validate(update["approval_refusals"][0]).reason
+            == RefusalReason.NOT_APPROVED
+        )
+
+    async def test_an_approval_bound_to_another_payload_does_not_authorize(self):
+        subgraph, ports = graph()
+        intent = fakes.submit_intent()
+        request = fakes.approval_request(intent)
+        decision = fakes.approval_decision(request, action_fingerprint="stale")
+
+        update = await subgraph.execute_approved_actions(_answered(intent, request, decision))
+
+        assert ports["action_executor"].executed == []
+        assert (
+            ApprovalRefusal.model_validate(update["approval_refusals"][0]).reason
+            == RefusalReason.HASH_MISMATCH
+        )
+
+    async def test_a_decision_answering_a_different_request_is_refused(self):
+        subgraph, ports = graph()
+        intent = fakes.submit_intent()
+        request = fakes.approval_request(intent)
+        decision = fakes.approval_decision(request, request_id=uuid4())
+
+        update = await subgraph.execute_approved_actions(_answered(intent, request, decision))
+
+        assert ports["action_executor"].executed == []
+        assert (
+            ApprovalRefusal.model_validate(update["approval_refusals"][0]).reason
+            == RefusalReason.MISDIRECTED_DECISION
+        )
+
+    async def test_an_action_that_never_reached_a_reviewer_is_refused(self):
+        subgraph, ports = graph()
+        intent = fakes.submit_intent()
+
+        update = await subgraph.execute_approved_actions(
+            {"pending_actions": dumped(intent), "approval_requests": [], "approvals": []}
+        )
+
+        assert ports["action_executor"].executed == []
+        assert (
+            ApprovalRefusal.model_validate(update["approval_refusals"][0]).reason
+            == RefusalReason.NO_REQUEST
+        )
+
+    async def test_earlier_stages_receipts_are_kept_not_overwritten(self):
+        subgraph, _ports = graph()
+        intent = fakes.submit_intent()
+        request = fakes.approval_request(intent)
+        prior = ActionReceipt(action_id=uuid4(), ok=True)
+
+        update = await subgraph.execute_approved_actions(
+            {
+                **_answered(intent, request, fakes.approval_decision(request)),
+                "action_receipts": dumped(prior),
+            }
+        )
+
+        assert len(update["action_receipts"]) == 2
+
+    async def test_nothing_pending_means_nothing_executed(self):
+        subgraph, ports = graph()
+
+        assert await subgraph.execute_approved_actions({"pending_actions": []}) == {}
+        assert ports["action_executor"].executed == []
 
 
 # --- persist_application ------------------------------------------------------
@@ -736,6 +978,7 @@ class TestPersistApplication:
         subgraph, _ports = graph()
         reply = ActionIntent(
             kind=ActionKind.SEND_RECRUITER_MESSAGE,
+            target="recruiter@acme.test (thread msg-1)",
             summary="Reply to the recruiter",
             idempotency_key="reply-key-long-enough",
         )
@@ -1101,13 +1344,14 @@ class TestRouters:
         subgraph, _ports = recruiter_graph()
         reply = ActionIntent(
             kind=ActionKind.SEND_RECRUITER_MESSAGE,
+            target="recruiter@acme.test (thread msg-1)",
             summary="Reply to the recruiter",
             idempotency_key="reply-key-long-enough",
         )
 
         assert (
             subgraph.route_after_follow_up({"pending_actions": dumped(reply)})
-            == APPROVAL_CHECKPOINT
+            == REQUEST_APPROVAL
         )
         assert subgraph.route_after_follow_up({"pending_actions": []}) == END
 
@@ -1130,7 +1374,9 @@ NODE_TEST_CLASSES = {
     jsg.RANK: TestRank,
     jsg.SHORTLIST: TestShortlist,
     jsg.PREPARE_APPLICATION_PACKET: TestPrepareApplicationPacket,
+    jsg.REQUEST_APPROVAL: TestRequestApproval,
     jsg.APPROVAL_CHECKPOINT: TestApprovalCheckpoint,
+    jsg.EXECUTE_APPROVED_ACTIONS: TestExecuteApprovedActions,
     jsg.PERSIST_APPLICATION: TestPersistApplication,
     jsg.EMIT_APPLICATION_CREATED: TestEmitApplicationCreated,
     jsg.HANDLE_RECRUITER_RESPONSE: TestHandleRecruiterResponse,

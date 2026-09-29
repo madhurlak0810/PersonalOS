@@ -22,6 +22,7 @@ from personalos.domain.job_search import (
     ActionReceipt,
     ApplicationPacket,
     ApprovalDecision,
+    ApprovalRequest,
     ApprovalVerdict,
     ArtifactDraft,
     EmittedEvent,
@@ -184,10 +185,43 @@ def submit_intent(target: NormalizedPosting | None = None) -> ActionIntent:
     target = target or posting()
     return ActionIntent(
         kind=ActionKind.SUBMIT_APPLICATION,
+        target=target.url or f"{target.company} / {target.title}",
         summary=f"Submit an application to {target.company} for {target.title}",
         payload={"dedupe_key": target.dedupe_key, "company": target.company},
         idempotency_key=f"submit-{target.dedupe_key}"[:255],
     )
+
+
+def approval_request(intent: ActionIntent | None = None, **overrides: Any) -> ApprovalRequest:
+    """The `ApprovalRequest` `request_approval` raises for an intent.
+
+    Minted from the intent rather than hand-written, so a test that checks a
+    refusal is comparing against the hash the graph would really have recorded.
+    """
+    intent = intent or submit_intent()
+    request = ApprovalRequest.for_intent(intent, now=NOW)
+    return request.model_copy(update=overrides) if overrides else request
+
+
+def approval_decision(
+    request: ApprovalRequest,
+    verdict: ApprovalVerdict = ApprovalVerdict.APPROVED,
+    *,
+    decided_by: str = "reviewer@example.test",
+    **overrides: Any,
+) -> ApprovalDecision:
+    """A reviewer's answer to one request, correctly bound to it.
+
+    This is the shape a caller resumes the approval interrupt with.
+    """
+    decision = ApprovalDecision(
+        action_id=request.action_id,
+        action_fingerprint=request.action_hash,
+        verdict=verdict,
+        decided_by=decided_by,
+        request_id=request.request_id,
+    )
+    return decision.model_copy(update=overrides) if overrides else decision
 
 
 def recruiter_message(
@@ -348,6 +382,30 @@ class FakeApprovalGate:
             action_fingerprint=self.fingerprint_override or intent.fingerprint(),
             verdict=self.verdict,
             decided_by=self.decided_by,
+        )
+
+
+class NoStandingApprovalGate:
+    """An approval gate with nothing on file, so the run interrupts.
+
+    The same behaviour as
+    `personalos.graphs.job_search.InterruptOnlyApprovalGate`, re-declared here
+    so an approval-interrupt test can also see *which* intents were asked
+    about. A test that wants the run to pause uses this; a test about some
+    other part of the pipeline uses `FakeApprovalGate`, whose standing
+    `APPROVED` keeps the run moving.
+    """
+
+    def __init__(self):
+        self.reviewed: list[ActionIntent] = []
+
+    async def review(self, intent: ActionIntent) -> ApprovalDecision:
+        self.reviewed.append(intent)
+        return ApprovalDecision(
+            action_id=intent.action_id,
+            action_fingerprint=intent.fingerprint(),
+            verdict=ApprovalVerdict.PENDING,
+            decided_by="system:no_standing_approval",
         )
 
 

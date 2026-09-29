@@ -19,7 +19,8 @@ hard kill and not an exception, deliberately: an exception unwinds, runs
 crash does *not* take, and testing against it would prove nothing about
 durability.
 
-Run as `python -m tests.fixtures.durable_workflow <db> <log> <thread-id> [kill-at]`.
+Run as `python -m tests.fixtures.durable_workflow <db> <log> <thread-id> [mode]
+[decision-file]`.
 """
 
 import json
@@ -67,6 +68,22 @@ EVENT_RUN_FINISHED = "run.finished"
 #: receipt is recorded, which is the window a resume must not reopen.
 KILL_AT_APPROVAL = "approval"
 KILL_AT_AFTER_SUBMISSION = "after_submission"
+
+#: Modes that exercise the approval *interrupt* rather than a crash. The worker
+#: runs with a gate that has nothing on file, so the graph parks at the
+#: interrupt and the process exits normally -- which is the situation a real
+#: deployment is in for most of an approval's life, and the one a restart has to
+#: survive.
+MODE_AWAIT_APPROVAL = "await_approval"
+#: Resume a parked workflow with a decision supplied on disk by another process.
+MODE_RESUME_APPROVAL = "resume_approval"
+
+#: Modes in which the worker never takes a side effect on its own initiative.
+_INTERRUPT_MODES = (MODE_AWAIT_APPROVAL, MODE_RESUME_APPROVAL)
+
+#: Recorded when a run ends parked at the approval interrupt rather than
+#: finishing, so a test spanning two processes can tell the two apart.
+EVENT_RUN_PAUSED = "run.paused"
 
 
 # --- Recording ---------------------------------------------------------------
@@ -164,6 +181,23 @@ class RecordingApprovalGate(fakes.FakeApprovalGate):
         return await super().review(intent)
 
 
+class RecordingInterruptOnlyGate(fakes.NoStandingApprovalGate):
+    """A gate with no decision on file, recording each action it was asked about.
+
+    Every review it logs is an action that then parked the run: this is the
+    witness for "the worker reached the approval point and stopped there
+    without acting".
+    """
+
+    def __init__(self, log: EventLog):
+        super().__init__()
+        self.log = log
+
+    async def review(self, intent: ActionIntent) -> ApprovalDecision:
+        self.log.append(EVENT_APPROVAL_REVIEW, kind=intent.kind.value)
+        return await super().review(intent)
+
+
 class RecordingActionExecutor(fakes.FakeActionExecutor):
     """An action executor whose 'external write' is a log line, and can die after it.
 
@@ -232,12 +266,18 @@ def build_graph(
     registry: WorkflowThreadRegistry | None = None,
     workflow_id: UUID | None = None,
     approval_delay: float = 0.0,
+    mode: str | None = None,
 ):
     """Compile the Job Search subgraph on a durable checkpointer, with logging ports.
 
     Returns `(compiled_graph, ports)`. `ports` carries the concrete fakes so a
     single-process test can assert against them directly; a test spanning a kill
     reads `log` instead, because the ports died with their process.
+
+    `mode` decides which approval gate is wired. The crash tests want a gate
+    with a standing `APPROVED` so the run reaches the side effect they are about
+    to interrupt; the approval-interrupt tests want one with nothing on file, so
+    the run parks at `interrupt()` instead.
     """
     from personalos.graphs.job_search import JobSearchGraph
 
@@ -246,15 +286,19 @@ def build_graph(
     if journal:
         executor = JournaledActionExecutor(executor, factory, workflow_id=workflow_id)
 
+    gate: Any = (
+        RecordingInterruptOnlyGate(log)
+        if mode in _INTERRUPT_MODES
+        else RecordingApprovalGate(log, die=(kill_at == KILL_AT_APPROVAL), delay=approval_delay)
+    )
+
     ports: dict[str, Any] = {
         "profile_store": fakes.FakeProfileStore(),
         "providers": [RecordingProvider(log)],
         "scorer": fakes.FakeScorer(),
         "evidence_checker": fakes.FakeEvidenceChecker(),
         "packet_builder": fakes.FakePacketBuilder(),
-        "approval_gate": RecordingApprovalGate(
-            log, die=(kill_at == KILL_AT_APPROVAL), delay=approval_delay
-        ),
+        "approval_gate": gate,
         "action_executor": executor,
         "application_store": RecordingApplicationStore(log),
         "event_emitter": fakes.FakeEventEmitter(),
@@ -272,7 +316,11 @@ def initial_state() -> dict[str, Any]:
 
 
 def main(argv: Sequence[str]) -> int:
-    """Run one workflow on a durable checkpointer, optionally dying part way.
+    """Run one workflow on a durable checkpointer, optionally dying or pausing part way.
+
+    `mode` is either a `KILL_AT_*` value (die at that step) or a `MODE_*` value
+    (park at the approval interrupt, or resume a parked run with a decision read
+    from `decision-file`).
 
     Deliberately does not catch the graph's exceptions: a worker that swallowed
     them would leave a database state no real crash produces.
@@ -281,10 +329,12 @@ def main(argv: Sequence[str]) -> int:
 
     if len(argv) < 3:
         raise SystemExit(
-            "usage: python -m tests.fixtures.durable_workflow <db> <log> <thread-id> " "[kill-at]"
+            "usage: python -m tests.fixtures.durable_workflow <db> <log> <thread-id> "
+            "[mode] [decision-file]"
         )
     db_path, log_path, thread_id = argv[0], argv[1], argv[2]
-    kill_at = argv[3] if len(argv) > 3 else None
+    mode = argv[3] if len(argv) > 3 else None
+    decision_path = argv[4] if len(argv) > 4 else None
 
     log = EventLog(log_path)
     factory = session_factory(db_path)
@@ -295,7 +345,12 @@ def main(argv: Sequence[str]) -> int:
         thread_id=thread_id, workflow_name=WORKFLOW_NAME, user_id=fakes.USER_ID
     )
     graph, _ports = build_graph(
-        factory, log, kill_at=kill_at, registry=registry, workflow_id=thread.workflow_id
+        factory,
+        log,
+        kill_at=None if mode in _INTERRUPT_MODES else mode,
+        registry=registry,
+        workflow_id=thread.workflow_id,
+        mode=mode,
     )
 
     async def run() -> None:
@@ -308,8 +363,25 @@ def main(argv: Sequence[str]) -> int:
             leases=WorkflowLeaseStore(factory),
             owner=f"worker:{os.getpid()}",
         )
-        await runner.start(thread, initial_state())
-        log.append(EVENT_RUN_FINISHED)
+
+        if mode == MODE_RESUME_APPROVAL:
+            # The decision was minted by another process entirely, from the
+            # request this one reads back out of the checkpoint. That is the
+            # whole shape of a days-later approval: the answer arrives from
+            # somewhere the original run no longer exists.
+            from langgraph.types import Command
+
+            decisions = json.loads(Path(decision_path).read_text(encoding="utf-8"))
+            await runner.resume(
+                thread_id=thread_id, resume_input=Command(resume=decisions)
+            )
+        else:
+            await runner.start(thread, initial_state())
+
+        # Parked and finished are different outcomes, and a test spanning two
+        # processes can only tell them apart if the worker says which happened.
+        state = await runner.inspect(thread)
+        log.append(EVENT_RUN_PAUSED if state.next else EVENT_RUN_FINISHED)
 
     asyncio.run(run())
     return 0

@@ -512,23 +512,48 @@ build implements:
 load_search_profile -> search_providers -> normalize_jobs -> deduplicate
 -> hard_filter -> score_candidates -> evidence_check -> rank -> shortlist
 -> [optional] prepare_application_packet
--> approval_checkpoint_for_external_submission
+-> request_approval_for_external_write
+-> approval_checkpoint_for_external_submission     (interrupts here)
+-> execute_approved_actions
 -> persist_application -> emit application.created -> END
 ```
 
 with a recruiter-response branch off the end (`handle_recruiter_response` ->
-`create_follow_up_checkpoint`), which loops an owed reply back through the
-approval checkpoint. Recruiter handling and follow-up checkpoints live here
+`create_follow_up_checkpoint`), which loops an owed reply back through the same
+approval sequence. Recruiter handling and follow-up checkpoints live here
 rather than in a Communications or Calendar subgraph: for a job-search-only
 build they are steps in the application's own lifecycle.
+
+**Approval interrupts before external writes.** Every point at which the graph
+is about to do something the outside world can see goes through those three
+nodes, and only through them:
+
+- `request_approval` raises an `ApprovalRequest` per pending action — the
+  action's hash, its target, a human-readable summary, a risk level, the scopes
+  it consumes and an expiry — and returns, so all of it is checkpointed.
+- `approval_checkpoint` calls LangGraph's `interrupt()`. The run stops with its
+  whole state durable; the answer may arrive hours or days later, from a process
+  that did not exist when the request was raised. Resume it with
+  `Command(resume=[ApprovalDecision(...)])`.
+- `execute_approved_actions` runs a super-step later, re-reads the pending
+  action from the checkpoint, **recomputes its hash**, and executes only if it
+  still matches the hash the approval was granted against. Anything else is
+  recorded as an `ApprovalRefusal` and not called.
+
+That last check is what stops an approval of "apply to the backend role at
+Acme" being spent on whatever the pending action says by the time it is
+redeemed. Risk levels, requested scopes and per-kind approval TTLs are a table
+in `personalos/domain/job_search.py` (`ACTION_RISK_PROFILES`), so a new kind of
+side effect cannot reach a reviewer without someone deciding what reviewing it
+costs.
 
 Three properties hold across every node:
 
 | Property | How |
 | --- | --- |
 | A node is a transformer, not an agent | Reads a narrow slice of `JobSearchState`, calls injected ports only, returns a typed partial update. The `graphs` layer cannot import `tools`, `mcp` or `persistence` at all. |
-| Nothing executes a side effect | A node returns an `ActionIntent`; only `approval_checkpoint_for_external_submission` holds an `ApprovalGate` and an `ActionExecutor`, and it redeems an intent only when `ApprovalDecision.authorizes()` accepts it (verdict **and** fingerprint match). |
-| State is JSON, not objects | Every `JobSearchState` value round-trips through a `BaseCheckpointSaver`, which is what lets a `PENDING` verdict end the run and a human answer it later. |
+| Nothing executes a side effect without a human answer | A node returns an `ActionIntent` and has no executor and no edge to one. Only `execute_approved_actions` holds an `ActionExecutor`, and it acts only when `authorize_execution` clears the action against its checkpointed `ApprovalRequest` — right verdict, right request, unexpired, and a recomputed hash that still matches. |
+| State is JSON, not objects | Every `JobSearchState` value round-trips through a `BaseCheckpointSaver`, which is what lets the run park at the interrupt and a human answer it later, from another process. |
 
 The typed values passed between nodes are in
 [`personalos/domain/job_search.py`](personalos/domain/job_search.py) — all
@@ -539,7 +564,12 @@ and a provider cannot smuggle an unexpected field through normalization.
 `tests/graph_scenarios/test_job_search_graph.py`, per-node input/output
 contracts in `tests/unit/test_job_search_nodes.py` (including a guard that
 fails if a node is added without a contract test), and one fake per port in
-`tests/fixtures/job_search_fakes.py`.
+`tests/fixtures/job_search_fakes.py`. The approval interrupt has its own two
+files: `tests/unit/test_approval_requests.py` for the request and the guard as
+pure values, and `tests/graph_scenarios/test_approval_interrupts.py` for the
+end-to-end cases — approving and resuming, mutating the pending action between
+the approval and the resume (refused), and parking a run in one process,
+approving it in a second and resuming it in a third.
 
 **Not yet wired:** `personalos/bootstrap.py` does not build a
 `JobSearchGraph` — the concrete adapters behind its ports (a repository-backed

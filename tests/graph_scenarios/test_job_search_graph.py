@@ -26,7 +26,11 @@ from personalos.domain.job_search import (
     NormalizedPosting,
 )
 from personalos.domain.models import ApplicationStatus, CommunicationEventClassification
-from personalos.graphs.job_search import STAGE_RECRUITER_OUTREACH, JobSearchGraph
+from personalos.graphs.job_search import (
+    STAGE_RECRUITER_OUTREACH,
+    STAGE_SUBMISSION,
+    JobSearchGraph,
+)
 from tests.fixtures import job_search_fakes as fakes
 
 
@@ -151,13 +155,15 @@ async def test_a_rejected_submission_is_persisted_as_prepared_but_not_sent():
     ]
 
 
-async def test_a_pending_verdict_stops_the_run_at_the_checkpoint():
-    """An unanswered approval request ends the run rather than proceeding.
+async def test_an_unanswered_approval_pauses_the_run_at_the_interrupt():
+    """With no decision on file, the run parks instead of proceeding.
 
     Nothing is executed and nothing is persisted: the checkpointed thread is
-    what a later human answer resumes from.
+    what a later human answer resumes from. The interrupt itself, and what
+    happens on the way back, are covered in
+    `tests/graph_scenarios/test_approval_interrupts.py`.
     """
-    graph, ports = build(approval_gate=fakes.FakeApprovalGate(ApprovalVerdict.PENDING))
+    graph, ports = build(approval_gate=fakes.NoStandingApprovalGate())
 
     final = await run(graph)
 
@@ -165,7 +171,10 @@ async def test_a_pending_verdict_stops_the_run_at_the_checkpoint():
     assert ports["application_store"].created == []
     assert ports["event_emitter"].events == []
     assert final.get("application") is None
-    assert final["approvals"][0]["verdict"] == ApprovalVerdict.PENDING.value
+    assert final.get("approvals") is None
+    assert [interrupt.value["stage"] for interrupt in final["__interrupt__"]] == [
+        STAGE_SUBMISSION
+    ]
 
 
 async def test_an_approval_bound_to_a_different_payload_does_not_authorize_the_action():

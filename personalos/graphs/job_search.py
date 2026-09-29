@@ -5,7 +5,9 @@ Pipeline, in order:
     load_search_profile -> search_providers -> normalize_jobs -> deduplicate
     -> hard_filter -> score_candidates -> evidence_check -> rank -> shortlist
     -> [optional] prepare_application_packet
-    -> approval_checkpoint_for_external_submission
+    -> request_approval_for_external_write
+    -> approval_checkpoint_for_external_submission   (interrupts here)
+    -> execute_approved_actions
     -> persist_application -> emit application.created -> END
 
 with a recruiter-response branch hanging off the end (see
@@ -23,20 +25,37 @@ client, opens a session, or imports an SDK -- the `graphs` layer may not import
 `docs/ARCHITECTURE_BOUNDARIES.md`), so the ports below are the only way out of
 this module, and the composition root is what binds them to real adapters.
 
-**Nothing here executes a side effect.** A node that wants to act on the
-outside world returns a `personalos.domain.job_search.ActionIntent` in
-`pending_actions` and lets the graph route it to `approval_checkpoint`. That
-node is the only one holding an `ApprovalGate` and an `ActionExecutor`, and it
-reviews then redeems in one place -- deliberately the same authorize-then-
-execute shape as `personalos.tools.gateway.PolicyEnforcingToolGateway`, one
-level up. An intent is redeemed only if `ApprovalDecision.authorizes()` accepts
-it, which binds the approval to that intent's fingerprint, so a decision cannot
-clear a mutated payload.
+**Nothing here executes a side effect without a human answer.** A node that
+wants to act on the outside world returns a
+`personalos.domain.job_search.ActionIntent` in `pending_actions`; it has no
+executor and no edge to one. Every such intent reaches the outside world only
+through the three-node approval sequence above, which is entered from both
+branches that can propose an action:
+
+    request_approval          mints an `ApprovalRequest` per action -- the
+                              action's hash, target, human-readable summary,
+                              risk level, requested scopes and expiry -- and
+                              returns, so all of that is *checkpointed*.
+    approval_checkpoint       calls LangGraph's `interrupt()`. The run stops
+                              here and the thread is durable; the answer may
+                              come back hours or days later.
+    execute_approved_actions  recomputes each action's hash and executes only
+                              the ones that still match the hash their
+                              approval was granted against.
+
+The split is not cosmetic. LangGraph discards the state update of a node that
+interrupts, so a node that minted the request and then interrupted would lose
+the request -- and that recorded hash is the only thing a resume can check a
+mutated action against. And the recompute has to happen on the far side of the
+pause: while the run is parked, `pending_actions` is just state, so an action
+can be rewritten between the request and the resume. A rewritten action fails
+closed (see `personalos.domain.job_search.authorize_execution`).
 
 **State is JSON, not objects.** Every field of `JobSearchState` is
 JSON-compatible so the run round-trips through any `BaseCheckpointSaver` --
-which matters most at the approval checkpoint, where a `PENDING` verdict ends
-the run and a human answers later against the checkpointed thread.
+which matters most at the approval interrupt, where the whole run is written to
+storage and a human answers against it later, quite possibly from a different
+process.
 
 Recruiter-response handling and follow-up checkpoints are branches *of this
 graph*, not a Communications or Calendar subgraph. For a job-search-only build
@@ -45,7 +64,7 @@ graph for it would exist only to hand state straight back to this one.
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from typing import Any, Protocol, TypedDict, TypeVar
 from uuid import UUID
@@ -54,6 +73,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import interrupt
 from pydantic import BaseModel
 
 from personalos.domain.job_search import (
@@ -63,6 +83,8 @@ from personalos.domain.job_search import (
     ActionReceipt,
     ApplicationPacket,
     ApprovalDecision,
+    ApprovalRefusal,
+    ApprovalRequest,
     ApprovalVerdict,
     EmittedEvent,
     EvidenceCheck,
@@ -80,6 +102,7 @@ from personalos.domain.job_search import (
     ScoredPosting,
     SearchProfile,
     ShortlistEntry,
+    authorize_execution,
 )
 from personalos.domain.models import ApplicationStatus, CommunicationEventClassification
 from personalos.domain.workflow import job_search_thread_id
@@ -103,7 +126,9 @@ EVIDENCE_CHECK = "evidence_check"
 RANK = "rank"
 SHORTLIST = "shortlist"
 PREPARE_APPLICATION_PACKET = "prepare_application_packet"
+REQUEST_APPROVAL = "request_approval_for_external_write"
 APPROVAL_CHECKPOINT = "approval_checkpoint_for_external_submission"
+EXECUTE_APPROVED_ACTIONS = "execute_approved_actions"
 PERSIST_APPLICATION = "persist_application"
 EMIT_APPLICATION_CREATED = "emit_application_created"
 HANDLE_RECRUITER_RESPONSE = "handle_recruiter_response"
@@ -208,12 +233,22 @@ class ApplicationPacketBuilder(Protocol):
 
 
 class ApprovalGate(Protocol):
-    """The human-in-the-loop seam: reviews one proposed outward-facing action.
+    """Answers "is there already a decision on file for this action?".
 
-    This is the port the approval subsystem implements. A `PENDING` verdict is
-    a first-class answer and ends the run at the checkpoint -- the graph never
-    proceeds on an unanswered request, and the checkpointed thread is what a
-    later human answer resumes.
+    Deliberately *not* a second approver. The human-in-the-loop seam is
+    LangGraph's `interrupt()` in `approval_checkpoint`; this port exists for the
+    answers that already exist before the graph gets there -- a standing grant,
+    a decision an operator recorded through the API, a policy that pre-clears a
+    specific low-risk action.
+
+    `PENDING` is the honest answer to "nobody has decided yet", and it is what
+    makes the run interrupt. A deployment with no source of pre-existing
+    decisions wires `InterruptOnlyApprovalGate` and pauses on every outward-
+    facing write, which is the default shape of this graph.
+
+    A gate that returns `APPROVED` does not skip the safety checks: whatever it
+    returns is still bound to the checkpointed `ApprovalRequest` and re-checked
+    against a freshly recomputed action hash by `execute_approved_actions`.
     """
 
     async def review(self, intent: ActionIntent) -> ApprovalDecision:
@@ -295,6 +330,27 @@ class RecruiterMessageClassifier(Protocol):
 # ---------------------------------------------------------------------------
 # Default pure implementations
 # ---------------------------------------------------------------------------
+
+
+class InterruptOnlyApprovalGate:
+    """An `ApprovalGate` with nothing on file, so every action interrupts.
+
+    The default a deployment wants unless it has somewhere to look up decisions
+    made outside this run. It is a real implementation rather than an `| None`
+    default on the constructor: `JobSearchGraph` requires every port so its
+    reach is readable at the construction site, and "pause for a human every
+    time" is a policy worth naming rather than an absence.
+    """
+
+    async def review(self, intent: ActionIntent) -> ApprovalDecision:
+        """Report that nobody has answered, which is what parks the run."""
+        return ApprovalDecision(
+            action_id=intent.action_id,
+            action_fingerprint=intent.fingerprint(),
+            verdict=ApprovalVerdict.PENDING,
+            decided_by="system:interrupt_only_gate",
+            note="no decision on file; awaiting a human answer at the interrupt",
+        )
 
 
 class DictPostingNormalizer:
@@ -437,7 +493,9 @@ class JobSearchState(TypedDict, total=False):
     application_packet: dict[str, Any] | None
     pending_actions: list[dict[str, Any]]
     approval_stage: str | None
+    approval_requests: list[dict[str, Any]]
     approvals: list[dict[str, Any]]
+    approval_refusals: list[dict[str, Any]]
     action_receipts: list[dict[str, Any]]
     application: dict[str, Any] | None
     emitted_events: list[dict[str, Any]]
@@ -491,6 +549,8 @@ class JobSearchGraph:
         recruiter_inbox: RecruiterInbox | None = None,
         recruiter_classifier: RecruiterMessageClassifier | None = None,
         checkpointer: BaseCheckpointSaver | None = None,
+        approval_ttl: timedelta | None = None,
+        clock: Callable[[], datetime] = datetime.utcnow,
     ):
         """Wire the ports this graph's nodes delegate to."""
         required = {
@@ -527,6 +587,14 @@ class JobSearchGraph:
         self.event_emitter = event_emitter
         self.recruiter_inbox = recruiter_inbox
         self.recruiter_classifier = recruiter_classifier
+        # `None` means each action kind's own `approval_ttl` applies; an
+        # explicit value overrides all of them, which is what a deployment with
+        # a stricter review window (or a test with a much shorter one) passes.
+        self.approval_ttl = approval_ttl
+        # Injected so the expiry a request is minted with and the `now` the
+        # executor checks it against come from the same source, and a test can
+        # move time without sleeping.
+        self.clock = clock
         # In-memory checkpointing is for tests only -- it loses every thread when
         # the process ends. A real deployment passes
         # `personalos.persistence.checkpointer.SqlAlchemyCheckpointSaver`, built
@@ -548,7 +616,9 @@ class JobSearchGraph:
         graph.add_node(RANK, self.rank)
         graph.add_node(SHORTLIST, self.shortlist)
         graph.add_node(PREPARE_APPLICATION_PACKET, self.prepare_application_packet)
+        graph.add_node(REQUEST_APPROVAL, self.request_approval)
         graph.add_node(APPROVAL_CHECKPOINT, self.approval_checkpoint)
+        graph.add_node(EXECUTE_APPROVED_ACTIONS, self.execute_approved_actions)
         graph.add_node(PERSIST_APPLICATION, self.persist_application)
         graph.add_node(EMIT_APPLICATION_CREATED, self.emit_application_created)
         graph.add_node(HANDLE_RECRUITER_RESPONSE, self.handle_recruiter_response)
@@ -571,14 +641,30 @@ class JobSearchGraph:
             self.route_after_shortlist,
             {PREPARE_APPLICATION_PACKET: PREPARE_APPLICATION_PACKET, END: END},
         )
-        graph.add_edge(PREPARE_APPLICATION_PACKET, APPROVAL_CHECKPOINT)
+        graph.add_edge(PREPARE_APPLICATION_PACKET, REQUEST_APPROVAL)
 
-        # The approval node is entered from both branches that can propose an
+        # The approval triple is entered from both branches that can propose an
         # outward-facing action, and routes back by stage. This is the whole
         # point of routing through it: there is no edge from a node that builds
         # an ActionIntent to anything that acts on one.
+        #
+        # Three nodes rather than one, and the split is load-bearing rather
+        # than cosmetic. LangGraph checkpoints between super-steps and discards
+        # the partial update of a node that interrupts, so a node that both
+        # minted the `ApprovalRequest` and then interrupted would lose the
+        # request it had just written -- and the recorded hash is the only
+        # thing a resume can check a mutated action against. So:
+        #
+        #   request_approval  mints the requests and *returns*, which
+        #                     checkpoints them;
+        #   approval_checkpoint  interrupts, and its resume value is the
+        #                     reviewer's decisions;
+        #   execute_approved_actions  re-derives each action's hash and
+        #                     executes only what still matches.
+        graph.add_edge(REQUEST_APPROVAL, APPROVAL_CHECKPOINT)
+        graph.add_edge(APPROVAL_CHECKPOINT, EXECUTE_APPROVED_ACTIONS)
         graph.add_conditional_edges(
-            APPROVAL_CHECKPOINT,
+            EXECUTE_APPROVED_ACTIONS,
             self.route_after_approval,
             {PERSIST_APPLICATION: PERSIST_APPLICATION, END: END},
         )
@@ -592,7 +678,7 @@ class JobSearchGraph:
         graph.add_conditional_edges(
             CREATE_FOLLOW_UP_CHECKPOINT,
             self.route_after_follow_up,
-            {APPROVAL_CHECKPOINT: APPROVAL_CHECKPOINT, END: END},
+            {REQUEST_APPROVAL: REQUEST_APPROVAL, END: END},
         )
 
         return graph.compile(checkpointer=self.checkpointer)
@@ -785,6 +871,14 @@ class JobSearchGraph:
         packet = await self.packet_builder.build(top, profile)
         intent = ActionIntent(
             kind=ActionKind.SUBMIT_APPLICATION,
+            # Where the write lands, as a reviewer would check it: the posting's
+            # own URL when the provider gave one, and otherwise the company and
+            # role it was listed under. Part of the action's hash, so
+            # re-pointing an otherwise identical submission invalidates its
+            # approval.
+            target=(
+                packet.posting.url or f"{packet.posting.company} / {packet.posting.title}"
+            ),
             summary=(
                 f"Submit an application to {packet.posting.company} " f"for {packet.posting.title}"
             ),
@@ -807,44 +901,174 @@ class JobSearchGraph:
             "approval_stage": STAGE_SUBMISSION,
         }
 
-    async def approval_checkpoint(self, state: JobSearchState) -> dict[str, Any]:
-        """Review each proposed action, and redeem only the ones actually approved.
+    def request_approval(self, state: JobSearchState) -> dict[str, Any]:
+        """Raise an `ApprovalRequest` for every action about to leave the system.
 
-        The single chokepoint for every outward-facing action this subgraph can
-        take. Review and redemption live together here on purpose, mirroring
-        `PolicyEnforcingToolGateway.dispatch`: separating them would create a
-        window in which an approved-but-unredeemed intent sits in state, where
-        a later node could reach it without the decision that cleared it.
+        Runs immediately before the interrupt and does nothing else, because
+        what it writes has to be *checkpointed* before the run pauses. Each
+        request pins the action's hash, target, summary, risk level, requested
+        scopes and expiry as they stood at this moment; that pinned hash is the
+        fixed point `execute_approved_actions` compares against when the run
+        comes back, possibly days later, and it cannot be re-derived then --
+        re-deriving it would compare a mutated action against itself.
 
-        An intent is executed only if `ApprovalDecision.authorizes()` accepts
-        it, which requires an `APPROVED` verdict *and* a fingerprint match -- so
-        a decision issued for one payload cannot clear a different one.
+        Appended rather than replaced: the node runs twice in a run that also
+        answers a recruiter, and the submission's request stays part of the
+        audit trail.
         """
         intents = _load(ActionIntent, state.get("pending_actions"))
-        decisions: list[ApprovalDecision] = []
-        receipts: list[ActionReceipt] = []
+        now = self.clock()
+        requests = [
+            ApprovalRequest.for_intent(intent, now=now, ttl=self.approval_ttl)
+            for intent in intents
+        ]
+        for request in requests:
+            logger.info(
+                "approval requested for action %s (%s, risk=%s) on target '%s'; "
+                "expires %s",
+                request.action_id,
+                request.kind.value,
+                request.risk.value,
+                request.target,
+                request.expires_at.isoformat(),
+            )
+        return {
+            "approval_requests": [*(state.get("approval_requests") or []), *_dump(requests)]
+        }
+
+    async def approval_checkpoint(self, state: JobSearchState) -> dict[str, Any]:
+        """Park the run until every proposed external write has an answer.
+
+        The single chokepoint for every outward-facing action this subgraph can
+        take, and the only node in the graph that calls LangGraph's
+        `interrupt()`. Reaching it means the next thing that would happen is a
+        write somebody outside this system can see.
+
+        The `ApprovalGate` is consulted first, and it is *not* a second
+        approver: it answers only "is there already a decision on file for
+        this?" -- a standing grant, an answer recorded through the API before
+        the graph got here. Anything it returns `PENDING` for is genuinely
+        unanswered, and that is what triggers the interrupt. A deployment with
+        no such source wires `InterruptOnlyApprovalGate` and interrupts on
+        every action, which is the default this design assumes.
+
+        The interrupt's value is the list of live `ApprovalRequest`s; its resume
+        value is the reviewer's `ApprovalDecision`s. Nothing is executed here --
+        a decision collected at this node has not yet been checked against the
+        action it will be spent on, and doing both in one node would put that
+        check on the same side of the checkpoint boundary as the answer it is
+        supposed to be auditing.
+        """
+        intents = _load(ActionIntent, state.get("pending_actions"))
+        if not intents:
+            return {}
+
+        requests = {
+            request.action_id: request
+            for request in _load(ApprovalRequest, state.get("approval_requests"))
+        }
+        answered: dict[UUID, ApprovalDecision] = {}
+        outstanding: list[ActionIntent] = []
 
         for intent in intents:
-            decision = await self.approval_gate.review(intent)
-            decisions.append(decision)
-
-            if not decision.authorizes(intent):
-                logger.info(
-                    "action %s (%s) not executed: verdict=%s",
-                    intent.action_id,
-                    intent.kind.value,
-                    decision.verdict.value,
+            if intent.action_id not in requests:
+                raise JobSearchContractError(
+                    f"action {intent.action_id} ({intent.kind.value}) reached the approval "
+                    f"checkpoint with no request on file; request_approval must run first"
                 )
-                continue
+            decision = await self.approval_gate.review(intent)
+            if decision.verdict == ApprovalVerdict.PENDING:
+                outstanding.append(intent)
+            else:
+                answered[intent.action_id] = decision
 
-            receipts.append(await self.action_executor.execute(intent, decision))
+        if outstanding:
+            payload = {
+                "workflow": "job_search",
+                "stage": state.get("approval_stage"),
+                "requests": [
+                    requests[intent.action_id].model_dump(mode="json") for intent in outstanding
+                ],
+            }
+            logger.info(
+                "pausing the run: %s action(s) await approval (%s)",
+                len(outstanding),
+                ", ".join(intent.kind.value for intent in outstanding),
+            )
+            # Raises `GraphInterrupt` the first time through, which checkpoints
+            # the thread and ends the invocation; on a resume it returns the
+            # value the caller supplied instead. Everything the answer is
+            # checked against was written by the previous super-step, so the
+            # gap between these two moments can be days long.
+            for decision in _decisions_from_resume(interrupt(payload)):
+                answered[decision.action_id] = decision
 
+        decisions = [
+            answered[intent.action_id] for intent in intents if intent.action_id in answered
+        ]
         # Appended, not replaced: this node runs twice in a run that handles a
         # recruiter reply, and the submission's decision is part of the audit
         # trail the final state has to carry.
+        return {"approvals": [*(state.get("approvals") or []), *_dump(decisions)]}
+
+    async def execute_approved_actions(self, state: JobSearchState) -> dict[str, Any]:
+        """Redeem the actions whose approval still fits them, and refuse the rest.
+
+        The one place an outward-facing action actually happens, and it runs a
+        super-step *after* the decision was collected -- so it re-reads the
+        pending action from the checkpoint rather than trusting the copy the
+        reviewer was shown. `authorize_execution` then recomputes the action's
+        hash and refuses if it is not the hash the request went out with.
+
+        That recomputation is the point of the whole arrangement. While the run
+        is parked, `pending_actions` is just state, and a later node (or a model
+        driving one) can rewrite it. An approval of "apply to the backend role
+        at Acme" must not be spendable on whatever the action says by the time
+        it is redeemed, so a changed action fails closed: no call is made, and
+        an `ApprovalRefusal` is recorded in its place.
+        """
+        intents = _load(ActionIntent, state.get("pending_actions"))
+        if not intents:
+            return {}
+
+        requests = {
+            request.action_id: request
+            for request in _load(ApprovalRequest, state.get("approval_requests"))
+        }
+        decisions = {
+            decision.action_id: decision
+            for decision in _load(ApprovalDecision, state.get("approvals"))
+        }
+        now = self.clock()
+
+        receipts: list[ActionReceipt] = []
+        refusals: list[ApprovalRefusal] = []
+
+        for intent in intents:
+            refusal = authorize_execution(
+                intent=intent,
+                request=requests.get(intent.action_id),
+                decision=decisions.get(intent.action_id),
+                now=now,
+            )
+            if refusal is not None:
+                # Logged at warning only when the refusal means the action and
+                # its approval drifted apart; a reviewer saying no is an
+                # ordinary outcome, not an incident.
+                (logger.warning if refusal.suspicious else logger.info)(
+                    "refusing to execute action %s (%s): %s",
+                    intent.action_id,
+                    intent.kind.value,
+                    refusal.detail,
+                )
+                refusals.append(refusal)
+                continue
+
+            receipts.append(await self.action_executor.execute(intent, decisions[intent.action_id]))
+
         return {
-            "approvals": [*(state.get("approvals") or []), *_dump(decisions)],
             "action_receipts": [*(state.get("action_receipts") or []), *_dump(receipts)],
+            "approval_refusals": [*(state.get("approval_refusals") or []), *_dump(refusals)],
         }
 
     async def persist_application(self, state: JobSearchState) -> dict[str, Any]:
@@ -971,6 +1195,10 @@ class JobSearchGraph:
                 intents.append(
                     ActionIntent(
                         kind=ActionKind.SEND_RECRUITER_MESSAGE,
+                        target=(
+                            f"{message.from_address or 'recruiter'} "
+                            f"(thread {response.provider_message_id})"
+                        ),
                         summary=(
                             f"Reply to the recruiter's "
                             f"{response.classification.value.replace('_', ' ')} for "
@@ -1046,9 +1274,14 @@ class JobSearchGraph:
     def route_after_approval(self, state: JobSearchState) -> str:
         """Return to the branch that proposed the action, by stage.
 
-        A `PENDING` verdict ends the run at the checkpoint regardless of stage:
-        the human has not answered, and proceeding on an unanswered request is
-        exactly what a checkpoint exists to prevent.
+        Runs after `execute_approved_actions`, so by here every action has
+        either a receipt or a recorded refusal. A submission that was refused
+        still routes on to `persist_application`: the packet is real work, and
+        it is stored as prepared-but-unsent rather than thrown away.
+
+        A `PENDING` verdict ends the run regardless of stage. That is a
+        reviewer who resumed the interrupt with "not yet" -- the run holds
+        where it is rather than proceeding on an unanswered request.
         """
         if _has_pending_verdict(state):
             return END
@@ -1072,7 +1305,7 @@ class JobSearchGraph:
         approval node.
         """
         if state.get("pending_actions"):
-            return APPROVAL_CHECKPOINT
+            return REQUEST_APPROVAL
         return END
 
 
@@ -1151,6 +1384,40 @@ def _follow_ups_for(
                 ),
             )
     return list(by_kind.values())
+
+
+def _decisions_from_resume(resumed: Any) -> list[ApprovalDecision]:
+    """Parse whatever a caller resumed the interrupt with into typed decisions.
+
+    Accepts one decision or several, typed or in dumped form, because the value
+    arrives from outside the graph -- an API handler, an operator's CLI, a test
+    -- and normalizing it once here is better than each caller having to know
+    the graph's internal shape. What it will *not* do is invent a decision:
+    anything it cannot parse raises, so a malformed resume stops the run rather
+    than silently leaving an action unapproved (which
+    `authorize_execution` would then refuse anyway, but with a misleading
+    reason).
+    """
+    if resumed is None:
+        return []
+    if isinstance(resumed, ApprovalDecision):
+        return [resumed]
+    if isinstance(resumed, dict):
+        # A mapping of request id -> decision is a natural shape for a caller
+        # answering several requests at once; a bare decision is the common one.
+        if "action_id" in resumed:
+            return [ApprovalDecision.model_validate(resumed)]
+        return _decisions_from_resume(list(resumed.values()))
+    if isinstance(resumed, Sequence) and not isinstance(resumed, str | bytes):
+        decisions: list[ApprovalDecision] = []
+        for item in resumed:
+            decisions.extend(_decisions_from_resume(item))
+        return decisions
+    raise JobSearchContractError(
+        f"cannot read an approval decision out of a resume value of type "
+        f"{type(resumed).__name__}; resume the approval checkpoint with "
+        f"ApprovalDecision(s)"
+    )
 
 
 def _has_pending_verdict(state: JobSearchState) -> bool:
@@ -1294,6 +1561,7 @@ __all__ = [
     "JobSearchState",
     "JobSearchSubgraphRunner",
     "DictPostingNormalizer",
+    "InterruptOnlyApprovalGate",
     # Ports
     "SearchProfileStore",
     "JobBoardProvider",
@@ -1318,7 +1586,9 @@ __all__ = [
     "RANK",
     "SHORTLIST",
     "PREPARE_APPLICATION_PACKET",
+    "REQUEST_APPROVAL",
     "APPROVAL_CHECKPOINT",
+    "EXECUTE_APPROVED_ACTIONS",
     "PERSIST_APPLICATION",
     "EMIT_APPLICATION_CREATED",
     "HANDLE_RECRUITER_RESPONSE",

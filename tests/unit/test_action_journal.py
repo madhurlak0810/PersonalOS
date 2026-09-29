@@ -77,6 +77,7 @@ class RaisingExecutor:
 def _intent(key: str = "submit-acme-backend") -> ActionIntent:
     return ActionIntent(
         kind=ActionKind.SUBMIT_APPLICATION,
+        target="https://example.test/acme/backend",
         summary="Submit an application to Acme for Backend Engineer",
         payload={"dedupe_key": "acme:backend"},
         idempotency_key=key,

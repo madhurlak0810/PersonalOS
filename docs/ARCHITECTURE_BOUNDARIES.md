@@ -122,15 +122,38 @@ the posting normalizer (which has a pure, dependency-free default), and the
 recruiter inbox plus its classifier, which are what turn the
 recruiter-response branch on and must be supplied together.
 
-One node in that graph is load-bearing for this boundary.
-`approval_checkpoint_for_external_submission` is the only node holding an
-`ApprovalGate` and an `ActionExecutor`; every other node that wants to act
-outwardly returns an `ActionIntent` and lets the graph route it there. The
-checkpoint reviews and redeems in one place — the same authorize-then-execute
-shape as `PolicyEnforcingToolGateway.dispatch` — and redeems only when
-`ApprovalDecision.authorizes()` accepts the intent, which binds the verdict to
-that intent's fingerprint. There is no edge from a node that builds an
-`ActionIntent` to anything that acts on one.
+Three nodes in that graph are load-bearing for this boundary. Every node that
+wants to act outwardly returns an `ActionIntent` and has no executor and no edge
+to one; the only route from an intent to the outside world is:
+
+    request_approval_for_external_write
+      -> approval_checkpoint_for_external_submission   (LangGraph `interrupt()`)
+      -> execute_approved_actions
+
+`request_approval` mints an `ApprovalRequest` — the action's hash, target,
+human-readable summary, risk level, requested scopes and expiry — and returns,
+so all of it is checkpointed. `approval_checkpoint` is the only node that calls
+`interrupt()`; the run parks there and the answer may arrive days later, from a
+different process. `execute_approved_actions` is the only node holding an
+`ActionExecutor`, and it runs a super-step *later*, so it re-reads the pending
+action from the checkpoint and passes it through
+`personalos.domain.job_search.authorize_execution` before acting.
+
+The split is why it is three nodes and not one. LangGraph discards the state
+update of a node that interrupts, so a node that minted the request and then
+interrupted would lose it — and that recorded hash is the only fixed point a
+resume can check a mutated action against. And the recompute has to happen on
+the far side of the pause: while a run is parked, `pending_actions` is just
+state, so an action can be rewritten between the request and the resume. A
+rewritten action fails closed, with a recorded `ApprovalRefusal` and no call.
+
+The `ApprovalGate` port that remains is not a second approver. It answers only
+"is there already a decision on file for this?" — a standing grant, an answer
+recorded through the API before the graph got here. `PENDING` is its honest
+answer to "nobody has decided", and that is what triggers the interrupt; a
+deployment with no such source wires `InterruptOnlyApprovalGate` and pauses on
+every outward-facing write. Whatever it returns is still bound to the
+checkpointed request and re-checked against a freshly recomputed hash.
 
 ### `persistence` — `personalos/persistence/`
 
@@ -157,8 +180,9 @@ Durability lives here rather than in `graphs` because `graphs` may not import
   than reaching inside the approval node, declaring the shape it wraps as a
   local `Protocol`. Same inversion as `PolicyEnforcingToolGateway` one level up:
   the adapter the composition root binds is what adds the guarantee, and the
-  caller's contract does not change. The approval node keeps its own invariant —
-  reviewing and redeeming stay together in one place.
+  caller's contract does not change. The graph's own invariant is untouched:
+  `execute_approved_actions` still decides *whether* to act, and the journal
+  only decides whether the act has already happened.
 
 ### `mcp` — `personalos/mcp/`
 
