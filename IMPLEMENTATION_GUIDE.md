@@ -143,7 +143,9 @@ PersonalOS-agent/
 │   │
 │   ├── bootstrap.py           # Composition root (wires the layers)
 │   │
-│   ├── graphs/                # Workflow graphs (TODO)
+│   ├── graphs/                # Orchestration (LangGraph)
+│   │   ├── supervisor.py      # Top-level graph: context, typed routing, delegation
+│   │   └── job_search.py      # The Job Search domain subgraph + its ports
 │   ├── models/                # AI models (TODO)
 │   ├── state/                 # State management (TODO)
 │   ├── retrieval/             # RAG/search (TODO)
@@ -494,6 +496,55 @@ Commands:
 - `MCP_IMPLEMENTATION.md` - MCP architecture summary
 - `TEST_RESULTS.md` - Full test coverage report
 - `IMPLEMENTATION_GUIDE.md` - This comprehensive guide
+
+### 12. Orchestration Graphs (`personalos/graphs/`)
+
+**`supervisor.py` — the top-level graph.** Loads the actor's long-term facts,
+classifies the request into a typed `RouteDecision`, and either asks for
+clarification or plans a bounded `TaskDAG` and hands it to a domain subgraph. It
+holds no tool and no repository: `IntentClassifier` and `JobSubgraphRunner` are
+injected ports.
+
+**`job_search.py` — the Job Search subgraph**, the one domain subgraph this
+build implements:
+
+```
+load_search_profile -> search_providers -> normalize_jobs -> deduplicate
+-> hard_filter -> score_candidates -> evidence_check -> rank -> shortlist
+-> [optional] prepare_application_packet
+-> approval_checkpoint_for_external_submission
+-> persist_application -> emit application.created -> END
+```
+
+with a recruiter-response branch off the end (`handle_recruiter_response` ->
+`create_follow_up_checkpoint`), which loops an owed reply back through the
+approval checkpoint. Recruiter handling and follow-up checkpoints live here
+rather than in a Communications or Calendar subgraph: for a job-search-only
+build they are steps in the application's own lifecycle.
+
+Three properties hold across every node:
+
+| Property | How |
+| --- | --- |
+| A node is a transformer, not an agent | Reads a narrow slice of `JobSearchState`, calls injected ports only, returns a typed partial update. The `graphs` layer cannot import `tools`, `mcp` or `persistence` at all. |
+| Nothing executes a side effect | A node returns an `ActionIntent`; only `approval_checkpoint_for_external_submission` holds an `ApprovalGate` and an `ActionExecutor`, and it redeems an intent only when `ApprovalDecision.authorizes()` accepts it (verdict **and** fingerprint match). |
+| State is JSON, not objects | Every `JobSearchState` value round-trips through a `BaseCheckpointSaver`, which is what lets a `PENDING` verdict end the run and a human answer it later. |
+
+The typed values passed between nodes are in
+[`personalos/domain/job_search.py`](personalos/domain/job_search.py) — all
+`frozen=True` and `extra="forbid"`, so a node cannot mutate a posting in place
+and a provider cannot smuggle an unexpected field through normalization.
+
+**Tests:** a full happy path against fake providers in
+`tests/graph_scenarios/test_job_search_graph.py`, per-node input/output
+contracts in `tests/unit/test_job_search_nodes.py` (including a guard that
+fails if a node is added without a contract test), and one fake per port in
+`tests/fixtures/job_search_fakes.py`.
+
+**Not yet wired:** `personalos/bootstrap.py` does not build a
+`JobSearchGraph` — the concrete adapters behind its ports (a repository-backed
+`ApplicationStore`, a gateway-backed `ActionExecutor`, real job board
+providers) are a follow-up. The graph is complete and exercised against fakes.
 
 ---
 
