@@ -117,10 +117,14 @@ profile store, job board providers, a scorer, an evidence checker, a packet
 builder, an approval gate, an action executor, an application store and an
 event emitter — for the same reason `JobSearchExecutor` requires a
 `ToolGateway`: a graph that can fall back to a global default is a graph whose
-reach is not visible at its construction site. Three are genuinely optional:
-the posting normalizer (which has a pure, dependency-free default), and the
+reach is not visible at its construction site. Four are genuinely optional:
+the posting normalizer (which has a pure, dependency-free default), the
 recruiter inbox plus its classifier, which are what turn the
-recruiter-response branch on and must be supplied together.
+recruiter-response branch on and must be supplied together, and the pending
+checkpoint scheduler, which turns durable follow-up waits on. That last one is
+optional rather than defaulted because scheduling a wait no process will ever
+sweep is worse than scheduling none — the row reads, in SQL, as a follow-up
+that is coming.
 
 Three nodes in that graph are load-bearing for this boundary. Every node that
 wants to act outwardly returns an `ActionIntent` and has no executor and no edge
@@ -155,6 +159,13 @@ deployment with no such source wires `InterruptOnlyApprovalGate` and pauses on
 every outward-facing write. Whatever it returns is still bound to the
 checkpointed request and re-checked against a freshly recomputed hash.
 
+The graph has a second entry point, and it enters *into* that same triple. A
+run invoked with `fired_checkpoints` in its input is a durable wait coming due;
+`route_from_start` sends it to `draft_follow_up_for_triggered_checkpoint`
+instead of to discovery, and that node proposes an `ActionIntent` like every
+other node that wants to act. It holds no executor, so a follow-up drafted at
+3am by a sweep with no human anywhere near it still parks at the interrupt.
+
 ### `persistence` — `personalos/persistence/`
 
 Storage and retrieval: ORM models, sessions, repositories, the idempotency guard
@@ -176,6 +187,9 @@ Durability lives here rather than in `graphs` because `graphs` may not import
   is handed a durable saver by the composition root and does not change a line.
 - **`WorkflowLeaseStore`** takes an exclusive, expiring lease on a
   `workflow_id`, so two workers cannot resume the same business process.
+- **`PendingCheckpointStore`** owns `pending_checkpoints`, the table behind a
+  durable conditional wait. The graph reaches it through a
+  `PendingCheckpointScheduler` port, same inversion as everywhere else.
 - **`JournaledActionExecutor`** *wraps* the graph's `ActionExecutor` port rather
   than reaching inside the approval node, declaring the shape it wraps as a
   local `Protocol`. Same inversion as `PolicyEnforcingToolGateway` one level up:
@@ -244,6 +258,11 @@ The two entry points that use it:
   one — which ports a graph is wired to is decided where the graph is
   constructed — plus the thread registry and the lease store, and it takes the
   workflow's lease around every invocation.
+- [`apps/worker/checkpoint_monitor.py`](../apps/worker/checkpoint_monitor.py)
+  sweeps pending checkpoints. It is composition for the same reason: it holds
+  the store, a condition evaluator, the thread registry and a runner, and joins
+  them. The decision it applies is not its own — see **Pending checkpoints**
+  below.
 
 ## Dependency direction
 
@@ -370,6 +389,44 @@ SQLite, so a guarantee that depended on it would hold in production and nowhere
 else. Leases expire so a hard-killed worker does not strand its workflow, and
 every takeover mints a new fencing token so a stalled holder cannot release or
 renew the lease that replaced it.
+
+## Pending checkpoints
+
+A durable conditional wait — *"seven days after applying, if no recruiter
+response exists, draft a follow-up"* — is spread across three layers, and the
+split is the design:
+
+| Layer | Piece | Owns |
+| --- | --- | --- |
+| `domain` | [`checkpoints.py`](../personalos/domain/checkpoints.py) | the shape of a wait, and `decide_checkpoint` — the whole policy as a pure function |
+| `persistence` | [`pending_checkpoints.py`](../personalos/persistence/pending_checkpoints.py) | the row, idempotent scheduling, the `due` query, the guarded close |
+| `apps` | [`checkpoint_monitor.py`](../apps/worker/checkpoint_monitor.py) | the sweep: ask the condition, apply the outcome, start the thread |
+
+Three properties are load-bearing, and each is a constraint on how this may be
+extended:
+
+1. **A wait is a row, not a timer.** Nothing holds it open: no sleeping task,
+   no parked connection, no scheduled future. That is what lets it survive a
+   deploy, a crash and a weekend, and it is why the wait stores a `thread_id`
+   (a *lookup key*, resolved at trigger time) rather than any kind of handle.
+2. **The condition is stored as a question and asked at trigger time.**
+   `CheckpointCondition` is a value, not a closure — a closure cannot be
+   written to a row, and, worse, it would capture the world as it looked when
+   the wait started, which is exactly the world the wait exists to let change.
+   `CheckpointConditionEvaluator` is the port that answers it, and an
+   implementation that cannot tell must raise rather than guess: answering
+   `True` silently cancels a follow-up nobody decided to cancel.
+3. **`expires_at` is separate from `trigger_at`, and beats it.** A monitor that
+   was down for a week must not then send a week-late follow-up, and a
+   checkpoint nobody ever swept must not sit `pending` for ever. Both are the
+   same rule, and it is the one case where the ordering inside
+   `decide_checkpoint` is the whole point: met condition → resolve, expired →
+   expire, due → fire.
+
+The sweep claims before it acts (`close(..., FIRED)` is a guarded `UPDATE`
+exactly one of two racing monitors wins) and starts the graph path only if it
+won. It defers a thread already parked on an unanswered approval rather than
+stacking a second request on it.
 
 ## Adding things
 

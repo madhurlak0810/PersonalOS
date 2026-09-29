@@ -267,6 +267,9 @@ def build_graph(
     workflow_id: UUID | None = None,
     approval_delay: float = 0.0,
     mode: str | None = None,
+    checkpoint_scheduler: Any = None,
+    recruiter_inbox: Any = None,
+    recruiter_classifier: Any = None,
 ):
     """Compile the Job Search subgraph on a durable checkpointer, with logging ports.
 
@@ -278,6 +281,10 @@ def build_graph(
     with a standing `APPROVED` so the run reaches the side effect they are about
     to interrupt; the approval-interrupt tests want one with nothing on file, so
     the run parks at `interrupt()` instead.
+
+    `checkpoint_scheduler` and the recruiter pair are left unwired unless a test
+    passes them: the pending-checkpoint tests need the recruiter branch to run
+    (it is what schedules a durable wait), and the crash tests need it not to.
     """
     from personalos.graphs.job_search import JobSearchGraph
 
@@ -304,6 +311,14 @@ def build_graph(
         "event_emitter": fakes.FakeEventEmitter(),
         "checkpointer": SqlAlchemyCheckpointSaver(factory, registry),
     }
+    # Off unless a test asks for them, so the pipeline tests keep the shape
+    # they were written against: no recruiter branch, and no durable waits
+    # scheduled behind their backs.
+    if checkpoint_scheduler is not None:
+        ports["checkpoint_scheduler"] = checkpoint_scheduler
+    if recruiter_inbox is not None:
+        ports["recruiter_inbox"] = recruiter_inbox
+        ports["recruiter_classifier"] = recruiter_classifier
     return JobSearchGraph(**ports).build(), ports
 
 

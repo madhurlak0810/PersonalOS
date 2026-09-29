@@ -16,6 +16,11 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from personalos.domain.checkpoints import (
+    CheckpointCondition,
+    ConditionKind,
+    PendingCheckpoint,
+)
 from personalos.domain.job_search import (
     ActionIntent,
     ActionKind,
@@ -491,6 +496,47 @@ class FakeApplicationStore:
 
     async def record_follow_up(self, checkpoint: FollowUpCheckpoint) -> None:
         self.follow_ups.append(checkpoint)
+
+
+class FakePendingCheckpointScheduler:
+    """An in-memory stand-in for the durable wait store.
+
+    Deduplicates on `dedupe_key` exactly as
+    `personalos.persistence.pending_checkpoints.PendingCheckpointStore` does,
+    and returns the *existing* wait when one is already held. That is not
+    convenience: a node test whose fake accepted a second wait for the same
+    application would agree with a graph the unique constraint would reject.
+    """
+
+    def __init__(self):
+        self.scheduled: dict[str, PendingCheckpoint] = {}
+
+    async def schedule(self, checkpoint: PendingCheckpoint) -> PendingCheckpoint:
+        return self.scheduled.setdefault(checkpoint.dedupe_key, checkpoint)
+
+    def waits(self) -> list[PendingCheckpoint]:
+        """Every wait scheduled, in the order it was first seen."""
+        return list(self.scheduled.values())
+
+
+class ScriptedConditionEvaluator:
+    """Answers checkpoint conditions from a script, recording each question.
+
+    Keyed by `ConditionKind` rather than by checkpoint id, because that is the
+    only thing the evaluator is actually given -- the port exists so the
+    decision can be made from the stored condition alone, and a fake that
+    cheated by looking the checkpoint up would hide a condition that failed to
+    round-trip.
+    """
+
+    def __init__(self, met: dict[ConditionKind, bool] | None = None, *, default: bool = False):
+        self.met = dict(met or {})
+        self.default = default
+        self.asked: list[CheckpointCondition] = []
+
+    async def is_met(self, condition: CheckpointCondition) -> bool:
+        self.asked.append(condition)
+        return self.met.get(condition.kind, self.default)
 
 
 class FakeEventEmitter:

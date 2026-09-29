@@ -27,6 +27,11 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from personalos.domain.checkpoints import (
+    ConditionKind,
+    PendingCheckpoint,
+    PendingCheckpointStatus,
+)
 from personalos.domain.job_search import (
     ActionIntent,
     ActionKind,
@@ -1071,6 +1076,24 @@ def recruiter_graph(messages=None, **overrides):
 
 APPLIED_STATE = {"application": _application().model_dump(mode="json")}
 
+#: The config a run is invoked with. `thread_id` is not state -- it is the
+#: identity of the thread state is stored under -- so a node that schedules a
+#: durable wait has to read it from here.
+THREAD_CONFIG = {"configurable": {"thread_id": "thread-under-test"}}
+
+
+def _pending_wait(**overrides) -> PendingCheckpoint:
+    """A durable wait as the monitor hands one back to the graph."""
+    wait = PendingCheckpoint.for_follow_up(
+        application_id=fakes.APPLICATION_ID,
+        kind=FollowUpKind.NO_RESPONSE,
+        due_at=fakes.NOW + timedelta(days=7),
+        reason="no recruiter response received yet",
+        thread_id="thread-under-test",
+        created_at=fakes.NOW,
+    )
+    return wait.model_copy(update=overrides) if overrides else wait
+
 
 class TestHandleRecruiterResponse:
     async def test_classifies_records_and_proposes_a_reply(self):
@@ -1162,7 +1185,11 @@ class TestCreateFollowUpCheckpoint:
             {**APPLIED_STATE, "recruiter_responses": dumped(response)}
         )
 
-        assert set(update) == {"follow_up_checkpoints", "emitted_events"}
+        assert set(update) == {
+            "follow_up_checkpoints",
+            "pending_checkpoints",
+            "emitted_events",
+        }
         checkpoints = [
             FollowUpCheckpoint.model_validate(row) for row in update["follow_up_checkpoints"]
         ]
@@ -1232,6 +1259,156 @@ class TestCreateFollowUpCheckpoint:
                 due_at=datetime.utcnow() + timedelta(days=1),
                 reason="  ",
             )
+
+    async def test_a_scheduled_reminder_is_also_stored_as_a_durable_wait(self):
+        """The in-run checkpoint and the stored one are written together.
+
+        They are different objects because they have different lifetimes: the
+        `FollowUpCheckpoint` is part of this run's story, and the
+        `PendingCheckpoint` is what makes something come back in seven days
+        after the run, the worker and the process are gone.
+        """
+        scheduler = fakes.FakePendingCheckpointScheduler()
+        subgraph, _ports = recruiter_graph(checkpoint_scheduler=scheduler)
+
+        update = await subgraph.create_follow_up_checkpoint(
+            {**APPLIED_STATE, "recruiter_responses": []}, THREAD_CONFIG
+        )
+
+        in_run = FollowUpCheckpoint.model_validate(update["follow_up_checkpoints"][0])
+        stored = PendingCheckpoint.model_validate(update["pending_checkpoints"][0])
+        assert scheduler.waits() == [stored]
+        assert stored.status == PendingCheckpointStatus.PENDING
+        assert stored.trigger_at == in_run.due_at
+        # The three things the state copy has no use for and the row cannot
+        # work without.
+        assert stored.condition.kind == ConditionKind.RECRUITER_RESPONSE_RECEIVED
+        assert stored.expires_at > stored.trigger_at
+        assert stored.thread_id == "thread-under-test"
+
+    async def test_a_replayed_super_step_rejoins_the_existing_wait(self):
+        """Re-entering the branch must not stack a second reminder.
+
+        The node is re-run whenever the graph replays that super-step, and each
+        pass proposes the same wait. The scheduler deduplicates on
+        `dedupe_key`, so the second pass gets the first wait back -- including
+        its original trigger date, because re-dating it on every replay is the
+        subtle way of never firing.
+        """
+        scheduler = fakes.FakePendingCheckpointScheduler()
+        subgraph, _ports = recruiter_graph(checkpoint_scheduler=scheduler)
+        state = {**APPLIED_STATE, "recruiter_responses": []}
+
+        first = await subgraph.create_follow_up_checkpoint(state, THREAD_CONFIG)
+        second = await subgraph.create_follow_up_checkpoint(state, THREAD_CONFIG)
+
+        assert len(scheduler.waits()) == 1
+        assert second["pending_checkpoints"] == first["pending_checkpoints"]
+
+    async def test_scheduling_a_wait_on_a_run_with_no_thread_is_refused(self):
+        """A wait that cannot name a thread has nowhere to come back to.
+
+        Refused where it is built rather than stored and never fired: an
+        unactionable row reads, in SQL, exactly like a follow-up that is coming.
+        """
+        subgraph, _ports = recruiter_graph(
+            checkpoint_scheduler=fakes.FakePendingCheckpointScheduler()
+        )
+
+        with pytest.raises(JobSearchContractError, match="nowhere to resume"):
+            await subgraph.create_follow_up_checkpoint(
+                {**APPLIED_STATE, "recruiter_responses": []}, {"configurable": {}}
+            )
+
+    async def test_no_scheduler_wired_means_no_durable_wait_and_no_failure(self):
+        """The durable half is optional, and switching it off changes nothing else."""
+        subgraph, ports = recruiter_graph()
+
+        update = await subgraph.create_follow_up_checkpoint(
+            {**APPLIED_STATE, "recruiter_responses": []}, THREAD_CONFIG
+        )
+
+        assert update["pending_checkpoints"] == []
+        assert len(update["follow_up_checkpoints"]) == 1
+        assert len(ports["application_store"].follow_ups) == 1
+
+
+class TestDraftFollowUp:
+    """The node a triggered durable wait lands on."""
+
+    async def test_a_fired_wait_becomes_a_proposed_message_and_nothing_else(self):
+        """It proposes. It does not send -- it holds no executor and has no edge to one.
+
+        Which matters more here than anywhere else in this graph: this run was
+        started by a monitor on a schedule, with no human anywhere near it.
+        """
+        subgraph, ports = recruiter_graph()
+        wait = _pending_wait()
+
+        update = await subgraph.draft_follow_up(
+            {**APPLIED_STATE, "fired_checkpoints": dumped(wait)}
+        )
+
+        assert set(update) == {
+            "pending_actions",
+            "approval_stage",
+            "emitted_events",
+            # Cleared, because it is an input channel and thread state outlives
+            # the run: a fired checkpoint left in state would route the next
+            # ordinary search on this thread into the follow-up path.
+            "fired_checkpoints",
+        }
+        assert update["fired_checkpoints"] == []
+        intent = ActionIntent.model_validate(update["pending_actions"][0])
+        assert intent.kind == ActionKind.SEND_RECRUITER_MESSAGE
+        assert intent.payload["checkpoint_id"] == str(wait.checkpoint_id)
+        assert intent.payload["unmet_condition"] == wait.condition.kind.value
+        # Routed back through the approval triple by stage, like every other
+        # outward-facing action this graph proposes.
+        assert update["approval_stage"] == STAGE_RECRUITER_OUTREACH
+        assert ports["action_executor"].executed == []
+
+    async def test_it_announces_the_trigger_so_a_fired_wait_is_distinguishable(self):
+        """`follow_up_triggered` is emitted only by the waits that actually came due.
+
+        Most scheduled follow-ups never reach this node: the recruiter replies
+        and the wait closes silently. That is why this is a separate event type
+        from `follow_up_scheduled` rather than a second copy of it.
+        """
+        subgraph, ports = recruiter_graph()
+        wait = _pending_wait()
+
+        update = await subgraph.draft_follow_up(
+            {**APPLIED_STATE, "fired_checkpoints": dumped(wait)}
+        )
+
+        event = EmittedEvent.model_validate(update["emitted_events"][-1])
+        assert event.type == JobSearchEventType.FOLLOW_UP_TRIGGERED
+        assert event.dedupe_key == f"follow_up_triggered:{wait.checkpoint_id}"
+        assert ports["event_emitter"].types() == [
+            JobSearchEventType.FOLLOW_UP_TRIGGERED.value
+        ]
+
+    async def test_a_wait_for_another_application_is_refused(self):
+        """The draft is written from this thread's state, so the two must agree.
+
+        A mismatch means a message about the wrong application, which is the
+        one outcome worse than no follow-up at all.
+        """
+        subgraph, _ports = recruiter_graph()
+        stranger = _pending_wait().model_copy(update={"application_id": uuid4()})
+
+        with pytest.raises(JobSearchContractError, match="but thread state holds"):
+            await subgraph.draft_follow_up(
+                {**APPLIED_STATE, "fired_checkpoints": dumped(stranger)}
+            )
+
+    async def test_it_requires_an_application_to_follow_up_on(self):
+        """Ordered like every other node that reads a value it did not compute."""
+        subgraph, _ports = recruiter_graph()
+
+        with pytest.raises(JobSearchContractError, match="no application in state"):
+            await subgraph.draft_follow_up({"fired_checkpoints": dumped(_pending_wait())})
 
 
 # --- Routers ------------------------------------------------------------------
@@ -1381,6 +1558,7 @@ NODE_TEST_CLASSES = {
     jsg.EMIT_APPLICATION_CREATED: TestEmitApplicationCreated,
     jsg.HANDLE_RECRUITER_RESPONSE: TestHandleRecruiterResponse,
     jsg.CREATE_FOLLOW_UP_CHECKPOINT: TestCreateFollowUpCheckpoint,
+    jsg.DRAFT_FOLLOW_UP: TestDraftFollowUp,
 }
 
 

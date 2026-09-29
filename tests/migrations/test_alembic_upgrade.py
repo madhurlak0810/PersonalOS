@@ -51,6 +51,7 @@ EXPECTED_TABLES = {
     "evidence_chunks",
     "job_posting_embeddings",
     "message_embeddings",
+    "pending_checkpoints",
 }
 
 
