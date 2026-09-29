@@ -1,29 +1,37 @@
-# PersonalOS Agent
+# PersonalOS
 
-Repository skeleton for the PersonalOS local-first agentic assistant.
-
-This repository currently contains structure only. Implementation will follow the architecture and engineering specification supplied for the project.
-
-## Planned Areas
-
-- `apps/`: API gateway and background worker entrypoints
-- `personalos/`: application packages grouped by workflow and ownership boundary
-- `mcp_servers/`: capability-specific MCP server packages
-- `tests/`: unit, graph scenario, adversarial, and fixture material
-- `evals/`: golden datasets and model benchmark material
-- `migrations/`: PostgreSQL schema migrations
-- `docs/`: architecture and design documentation
+Local-first, multi-agent personal assistant that automates job search, orchestrated with LangGraph. An LLM proposes actions; a deterministic policy engine authorizes and executes them, with durable state, human-approval gates, and full audit trails.
 
 ## Architecture
 
-Ownership boundaries between orchestration, policy, execution, persistence and
-tool adapters are defined in
-[docs/ARCHITECTURE_BOUNDARIES.md](docs/ARCHITECTURE_BOUNDARIES.md) and enforced
-in CI:
+Orchestration proposes intents, policy decides, executors run only approved intents, and adapters do the I/O. See `docs/ARCHITECTURE_BOUNDARIES.md` for the enforced layer boundaries (checked in CI via `scripts/check_boundaries.py`).
 
-```bash
-python scripts/check_boundaries.py
-pytest tests/architecture
+## What's implemented
+
+- FastAPI service (`apps/api`) with job-search endpoints (create, get, list)
+- Domain models and SQLAlchemy/PostgreSQL persistence with a repository layer
+- Event-driven pub/sub event bus
+- A Model Context Protocol (MCP) framework: base server, manager, Redis/in-memory caching
+- Jobs MCP server with 4 tools (search_jobs, scrape_job_details, filter_jobs, save_favorite_job)
+- LangGraph supervisor and job-search subgraph
+- Policy engine with default-deny allowlists and an approval gate on mutating actions
+- 15 passing unit tests (pytest + pytest-asyncio) covering the MCP server, executor, and domain models
+
+## Stack
+
+FastAPI · SQLAlchemy 2.0 · Pydantic 2 · LangChain/LangGraph · Celery · Redis · PostgreSQL · OpenTelemetry
+
+## Quick start
+
+```
+pip install -e ".[dev]"
+cp .env.example .env   # add your database URL and settings
+python -m personalos.cli db_init
+python -m personalos.cli api --reload
 ```
 
-No runtime code, dependencies, database configuration, or agent logic has been added yet.
+See `IMPLEMENTATION_GUIDE.md` for full architecture, data flow, and API details.
+
+## Status
+
+Actively in development — the `files/`/`google/` MCP servers, integration/adversarial test suites, and the retrieval/observability modules are still in progress.
