@@ -14,7 +14,8 @@ Two things keep this graph honest to that boundary:
   run `personalos.executor.job_search.JobSearchExecutor`.
 - Graph state is kept JSON-compatible (`dict`, not live `RouteDecision` /
   `TaskDAG` instances) so it round-trips cleanly through any
-  `BaseCheckpointSaver`, including a durable one added in a follow-up issue.
+  `BaseCheckpointSaver`, including the durable, database-backed one in
+  `personalos.persistence.checkpointer`.
 """
 
 import logging
@@ -135,9 +136,15 @@ class SupervisorGraph:
         the kind of implicit wiring the composition root exists to own instead.
 
         `checkpointer` / `store` default to in-memory implementations so the
-        graph compiles and is usable out of the box; a durable, Postgres-backed
-        checkpointer and store are wired in by the composition root once the
-        follow-up persistence issue lands, without this module changing.
+        graph compiles and is usable out of the box. In-memory checkpointing is
+        for tests only: it loses every thread when the process ends. A real
+        deployment is handed
+        `personalos.persistence.checkpointer.SqlAlchemyCheckpointSaver` by the
+        composition root (`personalos.bootstrap.build_durable_checkpointer`),
+        and this module does not change for it -- which is the point of taking
+        the port rather than constructing a saver here. The thread this graph
+        runs on must be registered first; see
+        `personalos.bootstrap.register_supervisor_thread`.
         """
         if classifier is None:
             raise ValueError("SupervisorGraph requires an IntentClassifier")

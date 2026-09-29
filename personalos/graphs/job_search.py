@@ -48,7 +48,7 @@ import logging
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any, Protocol, TypedDict, TypeVar
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
@@ -82,6 +82,7 @@ from personalos.domain.job_search import (
     ShortlistEntry,
 )
 from personalos.domain.models import ApplicationStatus, CommunicationEventClassification
+from personalos.domain.workflow import job_search_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -526,6 +527,11 @@ class JobSearchGraph:
         self.event_emitter = event_emitter
         self.recruiter_inbox = recruiter_inbox
         self.recruiter_classifier = recruiter_classifier
+        # In-memory checkpointing is for tests only -- it loses every thread when
+        # the process ends. A real deployment passes
+        # `personalos.persistence.checkpointer.SqlAlchemyCheckpointSaver`, built
+        # by `personalos.bootstrap.build_durable_checkpointer`, and nothing in
+        # this module changes for it.
         self.checkpointer = checkpointer or InMemorySaver()
 
     def build(self) -> CompiledStateGraph:
@@ -1229,6 +1235,15 @@ class JobSearchSubgraphRunner:
     The DAG itself is carried through for provenance rather than interpreted:
     this subgraph's step sequence is fixed by `build()`, and a planner cannot
     reorder or extend it.
+
+    `thread_id` is supplied, not minted here, and that is load-bearing. This
+    subgraph runs on its own thread -- the Supervisor's conversation and this
+    domain run are separately resumable units of work, so they do not share one
+    -- but a thread id invented per call would give every invocation a fresh
+    thread, and a fresh thread has no state to resume from no matter how durable
+    the checkpointer underneath it is. The composition root derives a stable id
+    (`personalos.domain.workflow.job_search_thread_id`) and registers it against
+    the workflow before the first run; see `personalos.bootstrap`.
     """
 
     def __init__(
@@ -1236,22 +1251,35 @@ class JobSearchSubgraphRunner:
         graph: CompiledStateGraph,
         *,
         user_id: UUID,
+        thread_id: str | None = None,
+        workflow_id: UUID | None = None,
         prepare_application: bool = False,
     ):
-        """Take the compiled subgraph and the candidate whose profile to run against."""
+        """Take the compiled subgraph, the candidate, and the thread to run on.
+
+        `thread_id` defaults to `job_search_thread_id(user_id)` -- the same
+        recipe `personalos.bootstrap.register_job_search_thread` registers under,
+        deliberately, so a runner built without an explicit id still lands on the
+        thread that was registered for it. A deployment running several
+        concurrent searches per candidate passes the id that says which one.
+        """
         self.graph = graph
         self.user_id = user_id
+        self.thread_id = thread_id or job_search_thread_id(user_id)
+        self.workflow_id = workflow_id
         self.prepare_application = prepare_application
 
     async def __call__(self, task_dag: dict[str, Any], state: Any) -> dict[str, Any]:
         """Run the subgraph for the Supervisor's planned DAG and return its final state."""
-        thread_id = f"job_search:{uuid4()}"
+        configurable: dict[str, Any] = {"thread_id": self.thread_id}
+        if self.workflow_id is not None:
+            configurable["workflow_id"] = str(self.workflow_id)
         initial: JobSearchState = {
             "user_id": str(self.user_id),
             "query": (state or {}).get("message", "") if hasattr(state, "get") else "",
             "prepare_application": self.prepare_application,
         }
-        final = await self.graph.ainvoke(initial, config={"configurable": {"thread_id": thread_id}})
+        final = await self.graph.ainvoke(initial, config={"configurable": configurable})
         return {
             "goal": task_dag.get("goal"),
             "shortlist": final.get("shortlist") or [],
