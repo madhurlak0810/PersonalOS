@@ -29,6 +29,10 @@ from personalos.persistence.checkpointer import (
 from personalos.persistence.database import SessionLocal
 from personalos.persistence.idempotency import OperationStore, SqlOperationStore
 from personalos.persistence.leases import DEFAULT_LEASE_TTL_SECONDS, WorkflowLeaseStore
+from personalos.persistence.pending_checkpoints import (
+    PendingCheckpointStore,
+    StorePendingCheckpointScheduler,
+)
 from personalos.persistence.repositories import JobRepository
 from personalos.policy import PolicyEngine, default_policy_engine
 from personalos.tools.gateway import PolicyEnforcingToolGateway, ToolGateway
@@ -153,6 +157,34 @@ def build_journaled_action_executor(
     return JournaledActionExecutor(inner, session_factory, workflow_id=workflow_id)
 
 
+def build_pending_checkpoint_store(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> PendingCheckpointStore:
+    """Build the store behind durable, conditional waits.
+
+    Shared by both halves of the feature on purpose: the graph writes waits
+    through it and `apps.worker.checkpoint_monitor` sweeps the same rows. They
+    are separate processes with no other connection -- a wait is scheduled by a
+    run that has long since ended by the time it comes due -- and this table is
+    the entirety of what passes between them.
+    """
+    return PendingCheckpointStore(session_factory)
+
+
+def build_pending_checkpoint_scheduler(
+    store: PendingCheckpointStore | None = None,
+    session_factory: Callable[[], object] = SessionLocal,
+) -> StorePendingCheckpointScheduler:
+    """Bind `JobSearchGraph`'s `PendingCheckpointScheduler` port to the store.
+
+    Pass the result as `checkpoint_scheduler=` when constructing the graph.
+    Leaving it unwired is a deployment choice, not an omission to be papered
+    over here: without a monitor process to sweep them, scheduled waits would
+    sit in the table reading as follow-ups that are coming and never come.
+    """
+    return StorePendingCheckpointScheduler(store or build_pending_checkpoint_store(session_factory))
+
+
 def register_job_search_thread(
     *,
     user_id: UUID,
@@ -240,6 +272,8 @@ __all__ = [
     "build_durable_checkpointer",
     "build_workflow_lease_store",
     "build_journaled_action_executor",
+    "build_pending_checkpoint_store",
+    "build_pending_checkpoint_scheduler",
     "register_job_search_thread",
     "register_supervisor_thread",
     "build_job_search_subgraph_runner",

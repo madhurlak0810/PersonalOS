@@ -875,6 +875,11 @@ class JobSearchEventType(str, Enum):
     APPLICATION_SUBMISSION_REJECTED = "application.submission_rejected"
     RECRUITER_RESPONSE_RECORDED = "application.recruiter_response_recorded"
     FOLLOW_UP_SCHEDULED = "application.follow_up_scheduled"
+    #: A scheduled follow-up's trigger came round with its condition still
+    #: unmet, so a draft was proposed. Distinct from FOLLOW_UP_SCHEDULED
+    #: because most scheduled follow-ups never become this one: the recruiter
+    #: replies, the wait resolves silently, and nothing is emitted at all.
+    FOLLOW_UP_TRIGGERED = "application.follow_up_triggered"
 
 
 class EmittedEvent(_Value):

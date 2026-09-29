@@ -592,6 +592,112 @@ class WorkflowLeaseModel(Base):
         }
 
 
+class PendingCheckpointModel(Base):
+    """ORM model for a durable, conditional wait -- one that no process holds open.
+
+    The row *is* the wait. Nothing is sleeping, no task is pending, no
+    connection is parked: a checkpoint is actionable because
+    `apps.worker.checkpoint_monitor` finds `status = 'pending'` and
+    `trigger_at <= now()` here, which is what makes "seven days after applying"
+    survive a deploy, a crash and a weekend. See
+    `personalos.domain.checkpoints` for why the condition is stored
+    declaratively (`condition_kind` / `condition_subject_id` /
+    `condition_since` / `condition_params`) rather than pre-evaluated: a
+    condition resolved at creation time answers a question about the wrong
+    moment.
+
+    `trigger_at` and `expires_at` are separate columns, not a duration and an
+    offset, because they answer different questions -- when may this act, and
+    after when must it never act. The second is what stops a monitor that was
+    down for a week from sending a week-late follow-up, and what stops a
+    checkpoint nobody ever swept from sitting `pending` forever.
+
+    `dedupe_key` is unique: re-running the branch that schedules a follow-up
+    must rejoin the existing wait rather than stack a second reminder on the
+    same application, exactly as `outbox_events.dedupe_key` stops a retried
+    enqueue becoming a second message.
+
+    `application_id` deliberately carries no foreign key. A checkpoint is
+    scheduled from graph state, which holds ids rather than rows, and the sweep
+    that reads it never joins to the application -- it hands the id to a
+    condition evaluator. A constraint here would only decide the order in which
+    two independently-written tables have to be populated.
+    """
+
+    __tablename__ = "pending_checkpoints"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    application_id = Column(GUID(), nullable=False)
+    #: `personalos.domain.job_search.FollowUpKind`.
+    kind = Column(String(50), nullable=False)
+    reason = Column(Text, nullable=False)
+    #: The thread whose graph path a fired checkpoint starts, and the workflow
+    #: whose lease that start is taken under. Stored, not held.
+    thread_id = Column(String(255), nullable=False)
+    workflow_id = Column(GUID(), ForeignKey("workflows.id"), nullable=True)
+    #: `personalos.domain.checkpoints.CheckpointCondition`, flattened. Flat
+    #: rather than a single JSON blob because `condition_kind` and
+    #: `condition_subject_id` are what an operator filters by when asking "what
+    #: is still waiting on this application?".
+    condition_kind = Column(String(50), nullable=False)
+    condition_subject_id = Column(GUID(), nullable=False)
+    condition_since = Column(DateTime, nullable=True)
+    condition_params = Column(JSON, nullable=False, default={})
+    trigger_at = Column(DateTime, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    status = Column(
+        Enum(
+            "pending",
+            "resolved",
+            "fired",
+            "expired",
+            "cancelled",
+            name="pending_checkpoint_status",
+        ),
+        nullable=False,
+        default="pending",
+    )
+    dedupe_key = Column(String(255), nullable=False)
+    closed_at = Column(DateTime, nullable=True)
+    closed_reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        # The sweep's index: "everything still waiting, soonest first". Leading
+        # with `status` keeps the scan off the closed rows, which are the ones
+        # that accumulate.
+        Index("ix_pending_checkpoints_status_trigger_at", "status", "trigger_at"),
+        Index("ix_pending_checkpoints_application_id", "application_id"),
+        UniqueConstraint("dedupe_key", name="uq_pending_checkpoints_dedupe_key"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "application_id": str(self.application_id),
+            "kind": self.kind,
+            "reason": self.reason,
+            "thread_id": self.thread_id,
+            "workflow_id": str(self.workflow_id) if self.workflow_id else None,
+            "condition_kind": self.condition_kind,
+            "condition_subject_id": str(self.condition_subject_id),
+            "condition_since": (
+                self.condition_since.isoformat() if self.condition_since else None
+            ),
+            "condition_params": self.condition_params,
+            "trigger_at": self.trigger_at.isoformat(),
+            "expires_at": self.expires_at.isoformat(),
+            "status": self.status,
+            "dedupe_key": self.dedupe_key,
+            "closed_at": self.closed_at.isoformat() if self.closed_at else None,
+            "closed_reason": self.closed_reason,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
 class ApprovalModel(Base):
     """ORM model for a human sign-off on one proposed action.
 

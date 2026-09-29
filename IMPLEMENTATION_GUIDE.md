@@ -524,6 +524,10 @@ approval sequence. Recruiter handling and follow-up checkpoints live here
 rather than in a Communications or Calendar subgraph: for a job-search-only
 build they are steps in the application's own lifecycle.
 
+There is a second way in. A run invoked with `fired_checkpoints` in its input
+is a durable wait coming due, and enters at `draft_follow_up_for_triggered_checkpoint`
+instead of at discovery — see [Pending checkpoints](#14-pending-checkpoints-durable-conditional-waits).
+
 **Approval interrupts before external writes.** Every point at which the graph
 is about to do something the outside world can see goes through those three
 nodes, and only through them:
@@ -647,6 +651,82 @@ lease.
 A kill is a real `SIGKILL` from a real child process, not an exception raised in
 a node: an exception unwinds, runs `finally` blocks and flushes buffers, which is
 the graceful path a crash does not take. Testing against it would prove nothing.
+
+### 14. Pending Checkpoints: Durable Conditional Waits
+
+The requirement in one sentence: *"seven days after applying, if no recruiter
+response exists, draft a follow-up."* Two things in it are easy to build wrongly.
+
+**"Seven days" is longer than any process.** So a wait is a **row**, not a
+timer: nothing sleeps, nothing is parked, nothing is awaited. `pending_checkpoints`
+(migration `202609290002`) holds the condition, the `trigger_at`, an explicit
+`expires_at`, and the `thread_id` to come back to — a *lookup key*, resolved when
+the wait comes due, never a live handle. A deploy takes every task and connection
+away; it does not take the row away.
+
+**"If no recruiter response exists" is about the moment the follow-up would be
+sent, not the moment the wait was set up.** So the condition is stored
+declaratively, as a `CheckpointCondition` value rather than a closure or a
+pre-computed flag, and re-asked at trigger time through the
+`CheckpointConditionEvaluator` port. A condition evaluated at creation time would
+be blind to exactly the thing the waiting is for: a condition that answers "no
+reply yet" when the wait is created will fire even if the recruiter replies the
+next day.
+
+Three pieces, in three layers:
+
+| Layer | Piece | Owns |
+| --- | --- | --- |
+| `domain` | [`checkpoints.py`](personalos/domain/checkpoints.py) | the shape of a wait and `decide_checkpoint`, the whole policy as a pure function of `(checkpoint, condition_met, now)` |
+| `persistence` | [`pending_checkpoints.py`](personalos/persistence/pending_checkpoints.py) | the row: idempotent `schedule` (on `dedupe_key`), the `due` query, and a guarded `close` |
+| `apps` | [`checkpoint_monitor.py`](apps/worker/checkpoint_monitor.py) | the sweep: re-ask the condition, apply the outcome, start the thread |
+
+**The policy, in order.** `decide_checkpoint` is pure and takes an explicit
+`now`, so every branch is testable without waiting for any of it:
+
+1. **Condition met → resolve, silently.** No event, no draft, no run. The reason
+   for the wait went away; a "your follow-up was cancelled" for a follow-up
+   nobody ever saw is noise. Applies whether or not the trigger has passed.
+2. **Past `expires_at` → expire.** Even when the trigger also passed — that is
+   the monitor-was-down-for-a-week case, and a week-late "just checking in" is
+   worse than nothing. This is why the expiry is stored as its own column rather
+   than derived: it is also what stops a checkpoint nobody swept from sitting
+   `pending` forever.
+3. **Due → fire.** The monitor starts the wait's thread with
+   `{"fired_checkpoints": [...]}`, which routes the run into
+   `draft_follow_up_for_triggered_checkpoint`. That node proposes an
+   `ActionIntent` and holds no executor, so a follow-up drafted at 3am by a
+   sweep with nobody watching still parks at the approval interrupt.
+
+`resolved` and `expired` are both silences and they mean opposite things, which
+is why the status is a five-value enum (`pending`, `resolved`, `fired`,
+`expired`, `cancelled`) and closed rows are kept: "why was no follow-up sent?"
+is answerable only if the checkpoint that decided not to send one is still there,
+with its `closed_reason`.
+
+**Exclusion.** `close` is `UPDATE ... WHERE id = ? AND status = 'pending'` and
+returns its affected-row count, so two monitors that both selected the same due
+checkpoint produce exactly one winner — and only the winner starts the graph
+path. The claim is taken *before* the invocation, because a claim taken after it
+would exclude nobody. A thread already parked on an unanswered approval is
+deferred rather than fired: stacking a second request on one a human has not
+answered helps nobody, and the wait's own expiry settles it if the answer never
+comes.
+
+**Tests:**
+
+- [`tests/graph_scenarios/test_pending_checkpoints.py`](tests/graph_scenarios/test_pending_checkpoints.py)
+  — the three acceptance criteria, end to end on a real durable checkpointer:
+  a wait whose condition resolves during the seven days is closed with no
+  follow-up event; a wait still unmet at its trigger fires, resumes the
+  follow-up path (not discovery) and parks at the approval checkpoint; and a
+  wait nobody swept in time is marked `expired` rather than left pending.
+- [`tests/unit/test_pending_checkpoints.py`](tests/unit/test_pending_checkpoints.py)
+  — the value's invariants, every branch of `decide_checkpoint`, and the store's
+  idempotent scheduling and guarded close.
+
+Time is moved rather than waited for: every decision takes an explicit `now`, so
+a seven-day wait is a seven-day test only in the fiction.
 
 ---
 

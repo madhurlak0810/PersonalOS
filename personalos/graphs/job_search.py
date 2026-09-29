@@ -14,6 +14,21 @@ with a recruiter-response branch hanging off the end (see
 `JobSearchGraph.handle_recruiter_response` and
 `JobSearchGraph.create_follow_up_checkpoint`).
 
+There is a second way in. A run invoked with `fired_checkpoints` in its input
+is a *durable wait coming due* -- `apps.worker.checkpoint_monitor` found a
+scheduled follow-up whose trigger had arrived and whose condition was still
+unmet, and started this thread to act on it. It enters at `draft_follow_up`
+rather than at discovery, on top of the state the thread already holds, and
+leaves through the same approval triple as everything else:
+
+    START -> draft_follow_up -> request_approval_for_external_write -> ...
+
+The waits themselves are scheduled by `create_follow_up_checkpoint` through the
+`PendingCheckpointScheduler` port. What makes them survivable is that they are
+rows, not timers: a wait carries its own condition, its trigger time and an
+explicit expiry, and nothing holds it open. See
+`personalos.domain.checkpoints`.
+
 Three properties hold across every node, and each one is a constraint on how
 this module may be extended:
 
@@ -69,6 +84,7 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol, TypedDict, TypeVar
 from uuid import UUID
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -76,6 +92,10 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 from pydantic import BaseModel
 
+from personalos.domain.checkpoints import (
+    DEFAULT_CHECKPOINT_GRACE,
+    PendingCheckpoint,
+)
 from personalos.domain.job_search import (
     MAX_POSTINGS_PER_RUN,
     ActionIntent,
@@ -133,6 +153,7 @@ PERSIST_APPLICATION = "persist_application"
 EMIT_APPLICATION_CREATED = "emit_application_created"
 HANDLE_RECRUITER_RESPONSE = "handle_recruiter_response"
 CREATE_FOLLOW_UP_CHECKPOINT = "create_follow_up_checkpoint"
+DRAFT_FOLLOW_UP = "draft_follow_up_for_triggered_checkpoint"
 
 #: Values of `JobSearchState["approval_stage"]`. The approval node is entered
 #: from two places (a submission, and a recruiter reply), and this is how its
@@ -300,6 +321,27 @@ class ApplicationStore(Protocol):
 
     async def record_follow_up(self, checkpoint: FollowUpCheckpoint) -> None:
         """Record a dated follow-up reminder for the application."""
+        ...
+
+
+class PendingCheckpointScheduler(Protocol):
+    """Stores a conditional wait that outlives this run, and this process.
+
+    The one port whose whole purpose is to be *unheld*. Everything else a node
+    calls happens now; this hands over a wait that becomes actionable days
+    later, when neither this graph, this thread nor this process still exists.
+    That is why the node cannot simply keep a timer: a timer is a thing a
+    process holds, and the thing being scheduled has to survive the process.
+
+    The implementation is
+    `personalos.persistence.pending_checkpoints.StorePendingCheckpointScheduler`;
+    it deduplicates on `PendingCheckpoint.dedupe_key` and returns whichever
+    wait now owns that key, so a node re-entering this branch on a resume gets
+    the original wait back rather than a second one dated from today.
+    """
+
+    async def schedule(self, checkpoint: PendingCheckpoint) -> PendingCheckpoint:
+        """Persist the wait and return the stored one."""
         ...
 
 
@@ -504,6 +546,15 @@ class JobSearchState(TypedDict, total=False):
     recruiter_messages: list[dict[str, Any]]
     recruiter_responses: list[dict[str, Any]]
     follow_up_checkpoints: list[dict[str, Any]]
+    #: The durable waits `create_follow_up_checkpoint` scheduled, in dumped
+    #: form. Carried for provenance: the authoritative copy is the row, which
+    #: is the only version that outlives this run.
+    pending_checkpoints: list[dict[str, Any]]
+    #: Durable waits whose trigger came round with their condition still unmet,
+    #: supplied as *input* by `apps.worker.checkpoint_monitor`. Their presence
+    #: is what routes a run into the follow-up path at START instead of into
+    #: discovery -- see `JobSearchGraph.route_from_start`.
+    fired_checkpoints: list[dict[str, Any]]
 
 
 def _dump(values: Sequence[BaseModel]) -> list[dict[str, Any]]:
@@ -548,8 +599,10 @@ class JobSearchGraph:
         normalizer: PostingNormalizer | None = None,
         recruiter_inbox: RecruiterInbox | None = None,
         recruiter_classifier: RecruiterMessageClassifier | None = None,
+        checkpoint_scheduler: PendingCheckpointScheduler | None = None,
         checkpointer: BaseCheckpointSaver | None = None,
         approval_ttl: timedelta | None = None,
+        checkpoint_grace: timedelta | None = None,
         clock: Callable[[], datetime] = datetime.utcnow,
     ):
         """Wire the ports this graph's nodes delegate to."""
@@ -587,6 +640,17 @@ class JobSearchGraph:
         self.event_emitter = event_emitter
         self.recruiter_inbox = recruiter_inbox
         self.recruiter_classifier = recruiter_classifier
+        # Optional for the same reason the recruiter inbox is: a deployment
+        # with no monitor process sweeping `pending_checkpoints` would schedule
+        # waits nothing ever picks up, and a wait nobody will act on is worse
+        # than no wait -- it reads, in SQL, as a follow-up that is coming.
+        # Without it the branch still records its `FollowUpCheckpoint`s in
+        # state and emits `follow_up_scheduled`; only the durable half is off.
+        self.checkpoint_scheduler = checkpoint_scheduler
+        # How long past its trigger a scheduled wait stays actionable. `None`
+        # means `DEFAULT_CHECKPOINT_GRACE`; a deployment that would rather drop
+        # a late follow-up than send one passes something shorter.
+        self.checkpoint_grace = checkpoint_grace or DEFAULT_CHECKPOINT_GRACE
         # `None` means each action kind's own `approval_ttl` applies; an
         # explicit value overrides all of them, which is what a deployment with
         # a stricter review window (or a test with a much shorter one) passes.
@@ -623,8 +687,24 @@ class JobSearchGraph:
         graph.add_node(EMIT_APPLICATION_CREATED, self.emit_application_created)
         graph.add_node(HANDLE_RECRUITER_RESPONSE, self.handle_recruiter_response)
         graph.add_node(CREATE_FOLLOW_UP_CHECKPOINT, self.create_follow_up_checkpoint)
+        graph.add_node(DRAFT_FOLLOW_UP, self.draft_follow_up)
 
-        graph.add_edge(START, LOAD_SEARCH_PROFILE)
+        # Two ways into this graph, decided at START from the input alone.
+        #
+        # A run handed `fired_checkpoints` is a durable wait coming due: some
+        # sweep found a checkpoint whose trigger had arrived and whose
+        # condition was *still* unmet, and started this thread to act on it.
+        # It must not re-enter discovery -- the application it is following up
+        # on was found weeks ago, and searching the boards again would rebuild
+        # a shortlist nobody asked for -- so it enters at the draft node, on
+        # top of the state this thread already holds.
+        #
+        # Everything else starts at the beginning.
+        graph.add_conditional_edges(
+            START,
+            self.route_from_start,
+            {DRAFT_FOLLOW_UP: DRAFT_FOLLOW_UP, LOAD_SEARCH_PROFILE: LOAD_SEARCH_PROFILE},
+        )
         graph.add_edge(LOAD_SEARCH_PROFILE, SEARCH_PROVIDERS)
         graph.add_edge(SEARCH_PROVIDERS, NORMALIZE_JOBS)
         graph.add_edge(NORMALIZE_JOBS, DEDUPLICATE)
@@ -677,6 +757,13 @@ class JobSearchGraph:
         graph.add_edge(HANDLE_RECRUITER_RESPONSE, CREATE_FOLLOW_UP_CHECKPOINT)
         graph.add_conditional_edges(
             CREATE_FOLLOW_UP_CHECKPOINT,
+            self.route_after_follow_up,
+            {REQUEST_APPROVAL: REQUEST_APPROVAL, END: END},
+        )
+        # A drafted follow-up is an outward-facing message like any other, so
+        # it leaves by the same door: the approval triple, never an executor.
+        graph.add_conditional_edges(
+            DRAFT_FOLLOW_UP,
             self.route_after_follow_up,
             {REQUEST_APPROVAL: REQUEST_APPROVAL, END: END},
         )
@@ -1224,22 +1311,55 @@ class JobSearchGraph:
             "approval_stage": STAGE_RECRUITER_OUTREACH,
         }
 
-    async def create_follow_up_checkpoint(self, state: JobSearchState) -> dict[str, Any]:
+    async def create_follow_up_checkpoint(
+        self, state: JobSearchState, config: RunnableConfig | None = None
+    ) -> dict[str, Any]:
         """Schedule the dated reminders this application's state calls for.
 
         Also a branch of this subgraph rather than a Calendar one, and for the
         same reason. A checkpoint is an internal record, so it needs no
         approval; the outbound message that a checkpoint might eventually
         prompt is a separate action that does.
+
+        Each reminder is written twice, into two things with different
+        lifetimes. The `FollowUpCheckpoint` goes into state, where it is part
+        of this run's story. The `PendingCheckpoint` goes through
+        `checkpoint_scheduler` into storage, and that copy is the one that
+        matters: a reminder due in seven days has to outlive this run, this
+        worker and this deploy, and state -- durable as it is -- is only ever
+        read by something that already decided to look at this thread. The row
+        is what makes something *come and look*.
+
+        Three things go into the durable copy that the state copy has no use
+        for:
+
+        - **the condition**, stored as a question rather than an answer, so it
+          is asked again at trigger time. The whole value of waiting a week is
+          that the recruiter might reply during it, and a condition evaluated
+          now would be blind to exactly that;
+        - **an explicit expiry**, `checkpoint_grace` past the trigger, so a
+          follow-up that nothing swept in time is written off rather than sent
+          weeks late or left pending forever;
+        - **the thread to resume**, read from the run's own config. That is why
+          this node takes `config`: `thread_id` is not state, it is the
+          identity of the thread state is stored under, and a wait that did not
+          record it would have nowhere to come back to.
         """
         application = _require_application(state)
         responses = _load(RecruiterResponse, state.get("recruiter_responses"))
-        now = datetime.utcnow()
+        now = self.clock()
 
         checkpoints = _follow_ups_for(application.application_id, responses, now)
         events: list[EmittedEvent] = []
+        scheduled: list[PendingCheckpoint] = []
         for checkpoint in checkpoints:
             await self.application_store.record_follow_up(checkpoint)
+            if self.checkpoint_scheduler is not None:
+                scheduled.append(
+                    await self.checkpoint_scheduler.schedule(
+                        self._durable_wait(checkpoint, now=now, config=config)
+                    )
+                )
             event = EmittedEvent(
                 type=JobSearchEventType.FOLLOW_UP_SCHEDULED,
                 aggregate_id=application.application_id,
@@ -1256,12 +1376,137 @@ class JobSearchGraph:
 
         return {
             "follow_up_checkpoints": _dump(checkpoints),
+            "pending_checkpoints": _dump(scheduled),
             "emitted_events": [*(state.get("emitted_events") or []), *_dump(events)],
         }
+
+    async def draft_follow_up(self, state: JobSearchState) -> dict[str, Any]:
+        """Propose the follow-up a triggered checkpoint asked for. Never sends it.
+
+        Where a durable wait lands when it comes due with its condition still
+        unmet. The monitor has already done the only thing it is allowed to do
+        on its own -- re-ask the condition and find it still false -- and this
+        node turns that into an `ActionIntent`, exactly like every other node
+        that wants to touch the outside world. It holds no executor and has no
+        edge to one; the message leaves only through the approval triple, which
+        means a follow-up drafted while nobody was watching still waits for a
+        human.
+
+        The application comes from the thread's stored state rather than from
+        the monitor's input. That is deliberate: the run was started on the
+        thread the checkpoint named, so the application here is the one that
+        thread has been about all along, and a monitor that passed its own copy
+        could follow up on an application that had since moved on.
+        """
+        application = _require_application(state)
+        fired = _load(PendingCheckpoint, state.get("fired_checkpoints"))
+        now = self.clock()
+
+        intents: list[ActionIntent] = []
+        events: list[EmittedEvent] = []
+        for checkpoint in fired:
+            if checkpoint.application_id != application.application_id:
+                # A checkpoint for a different application reached this thread.
+                # Refused rather than followed up on: the thread's state is
+                # about one application, so drafting from it would write a
+                # message about the wrong one.
+                raise JobSearchContractError(
+                    f"checkpoint {checkpoint.checkpoint_id} is for application "
+                    f"{checkpoint.application_id}, but thread state holds "
+                    f"{application.application_id}"
+                )
+            intents.append(
+                ActionIntent(
+                    kind=ActionKind.SEND_RECRUITER_MESSAGE,
+                    target=f"recruiter thread for {application.dedupe_key}",
+                    summary=(
+                        f"Follow up on {application.dedupe_key}: {checkpoint.reason} "
+                        f"(due {checkpoint.trigger_at.date().isoformat()})"
+                    ),
+                    payload={
+                        "application_id": str(application.application_id),
+                        "checkpoint_id": str(checkpoint.checkpoint_id),
+                        "kind": checkpoint.kind.value,
+                        "unmet_condition": checkpoint.condition.kind.value,
+                    },
+                    idempotency_key=f"follow-up-{checkpoint.checkpoint_id}"[:255],
+                    requested_by=f"graph:job_search#{DRAFT_FOLLOW_UP}",
+                    created_at=now,
+                )
+            )
+            event = EmittedEvent(
+                type=JobSearchEventType.FOLLOW_UP_TRIGGERED,
+                aggregate_id=application.application_id,
+                payload={
+                    "application_id": str(application.application_id),
+                    "checkpoint_id": str(checkpoint.checkpoint_id),
+                    "kind": checkpoint.kind.value,
+                    "trigger_at": checkpoint.trigger_at.isoformat(),
+                    "unmet_condition": checkpoint.condition.kind.value,
+                },
+                dedupe_key=f"follow_up_triggered:{checkpoint.checkpoint_id}",
+                occurred_at=now,
+            )
+            await self.event_emitter.emit(event)
+            events.append(event)
+
+        return {
+            "pending_actions": _dump(intents),
+            "approval_stage": STAGE_RECRUITER_OUTREACH,
+            "emitted_events": [*(state.get("emitted_events") or []), *_dump(events)],
+            # Consumed, so it is cleared. `fired_checkpoints` is an *input*
+            # channel that decides which way a run enters the graph, and thread
+            # state persists between runs: left in place, the next ordinary job
+            # search on this thread would be routed into the follow-up path by
+            # a checkpoint that fired a month ago.
+            "fired_checkpoints": [],
+        }
+
+    def _durable_wait(
+        self,
+        checkpoint: FollowUpCheckpoint,
+        *,
+        now: datetime,
+        config: RunnableConfig | None,
+    ) -> PendingCheckpoint:
+        """Build the storable wait behind one in-run follow-up checkpoint."""
+        configurable = (config or {}).get("configurable") or {}
+        thread_id = configurable.get("thread_id")
+        if not thread_id:
+            raise JobSearchContractError(
+                "cannot schedule a durable follow-up on a run with no thread_id; the "
+                "wait would have nowhere to resume. Invoke the graph with a config "
+                "naming its thread (see personalos.domain.workflow.WorkflowThread)"
+            )
+        raw_workflow_id = configurable.get("workflow_id")
+        return PendingCheckpoint.for_follow_up(
+            application_id=checkpoint.application_id,
+            kind=checkpoint.kind,
+            due_at=checkpoint.due_at,
+            reason=checkpoint.reason,
+            thread_id=str(thread_id),
+            workflow_id=UUID(str(raw_workflow_id)) if raw_workflow_id else None,
+            created_at=now,
+            grace=self.checkpoint_grace,
+        )
 
     # ------------------------------------------------------------------
     # Routers
     # ------------------------------------------------------------------
+
+    def route_from_start(self, state: JobSearchState) -> str:
+        """Enter at the follow-up draft when a durable wait fired, else at discovery.
+
+        The only routing decision made from the graph's input rather than from
+        work it has done, because it answers a question the run cannot answer
+        for itself: *why* was this thread invoked? A monitor acting on a
+        triggered checkpoint and a caller starting a fresh search hand the same
+        graph the same thread, and only the `fired_checkpoints` in the input
+        tells the two apart.
+        """
+        if state.get("fired_checkpoints"):
+            return DRAFT_FOLLOW_UP
+        return LOAD_SEARCH_PROFILE
 
     def route_after_shortlist(self, state: JobSearchState) -> str:
         """Prepare a packet only when asked to, and only with something to apply to."""
@@ -1298,11 +1543,13 @@ class JobSearchGraph:
         return HANDLE_RECRUITER_RESPONSE
 
     def route_after_follow_up(self, state: JobSearchState) -> str:
-        """Send an owed reply back through the approval checkpoint, or finish.
+        """Send a proposed message back through the approval checkpoint, or finish.
 
-        This is the edge that makes the invariant structural: the recruiter
-        branch cannot reach an executor except by going back through the
-        approval node.
+        This is the edge that makes the invariant structural: neither the
+        recruiter branch nor the triggered-checkpoint branch can reach an
+        executor except by going back through the approval node. Shared by both
+        for exactly that reason -- a second router would be a second place the
+        rule could be written differently.
         """
         if state.get("pending_actions"):
             return REQUEST_APPROVAL
@@ -1575,6 +1822,7 @@ __all__ = [
     "EventEmitter",
     "RecruiterInbox",
     "RecruiterMessageClassifier",
+    "PendingCheckpointScheduler",
     # Node names
     "LOAD_SEARCH_PROFILE",
     "SEARCH_PROVIDERS",
@@ -1593,6 +1841,7 @@ __all__ = [
     "EMIT_APPLICATION_CREATED",
     "HANDLE_RECRUITER_RESPONSE",
     "CREATE_FOLLOW_UP_CHECKPOINT",
+    "DRAFT_FOLLOW_UP",
     "STAGE_SUBMISSION",
     "STAGE_RECRUITER_OUTREACH",
 ]
