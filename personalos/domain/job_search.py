@@ -27,8 +27,10 @@ Three properties are load-bearing:
 
 import hashlib
 import json
-from datetime import datetime
+from collections.abc import Mapping
+from datetime import datetime, timedelta
 from enum import Enum
+from types import MappingProxyType
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -361,6 +363,96 @@ class ActionKind(str, Enum):
     SEND_RECRUITER_MESSAGE = "send_recruiter_message"
 
 
+class RiskLevel(str, Enum):
+    """How much an action costs to get wrong, from the reviewer's point of view.
+
+    Not a probability and not a severity score -- a reviewer's triage label.
+    The question it answers is "how carefully do I have to read this before
+    saying yes", and the ordering is by how recoverable the action is: a
+    message can be followed by a correction, an application cannot be
+    unsubmitted.
+    """
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class ActionRiskProfile(_Value):
+    """The review terms attached to one `ActionKind`.
+
+    A table rather than a judgement made per call: what an application
+    submission risks, and which capabilities it needs, is a property of the
+    kind of action, and deriving it per intent would let a node quietly
+    request a cheaper review for the same side effect.
+
+    `scopes` names the capabilities the action consumes, in the same
+    `resource:verb` vocabulary `policy_decisions.requested_scopes` records, so
+    an approval can be checked against what the approver is actually willing
+    to delegate rather than against a free-text summary.
+    """
+
+    kind: ActionKind
+    risk: RiskLevel
+    scopes: tuple[str, ...]
+    #: How long an approval for this kind stays good for. Bounded because an
+    #: approval is a statement about the world as the reviewer saw it, and the
+    #: world moves: a posting closes, a recruiter thread goes cold.
+    approval_ttl: timedelta
+
+    @field_validator("scopes")
+    @classmethod
+    def _scopes_present(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            raise JobSearchContractError(
+                "an outward-facing action must name the scopes it consumes; a request "
+                "for no scopes is a request a reviewer cannot evaluate"
+            )
+        return value
+
+
+#: The review terms for every kind of outward-facing action, keyed by kind.
+#: Read through `risk_profile_for`, which fails loudly on a kind that was added
+#: to `ActionKind` without deciding what reviewing it costs.
+ACTION_RISK_PROFILES: Mapping[ActionKind, ActionRiskProfile] = MappingProxyType(
+    {
+        ActionKind.SUBMIT_APPLICATION: ActionRiskProfile(
+            kind=ActionKind.SUBMIT_APPLICATION,
+            # Unrecoverable: an application cannot be withdrawn from the
+            # company's side of the transaction once it has landed.
+            risk=RiskLevel.HIGH,
+            scopes=("applications:submit", "artifacts:read"),
+            approval_ttl=timedelta(days=7),
+        ),
+        ActionKind.SEND_RECRUITER_MESSAGE: ActionRiskProfile(
+            kind=ActionKind.SEND_RECRUITER_MESSAGE,
+            # Embarrassing rather than unrecoverable: a wrong message can be
+            # followed by a correction to the same thread.
+            risk=RiskLevel.MEDIUM,
+            scopes=("communications:send",),
+            approval_ttl=timedelta(days=3),
+        ),
+    }
+)
+
+
+def risk_profile_for(kind: ActionKind) -> ActionRiskProfile:
+    """Return the review terms for an action kind.
+
+    Raises rather than defaulting: a new `ActionKind` with no entry in
+    `ACTION_RISK_PROFILES` is a side effect nobody has decided how to review,
+    and a permissive default would let it reach a reviewer labelled as cheap.
+    """
+    try:
+        return ACTION_RISK_PROFILES[kind]
+    except KeyError as exc:
+        raise JobSearchContractError(
+            f"no risk profile registered for action kind "
+            f"'{getattr(kind, 'value', kind)}'; every outward-facing action must "
+            f"declare its risk and scopes"
+        ) from exc
+
+
 class ActionIntent(_Value):
     """A proposed outward-facing action. Never executed by the node that made it.
 
@@ -374,6 +466,12 @@ class ActionIntent(_Value):
 
     action_id: UUID = Field(default_factory=uuid4)
     kind: ActionKind
+    #: Who or what receives the write, as a reviewer would name it -- the
+    #: posting's URL, the recruiter thread. Separate from `summary` because a
+    #: reviewer checks the destination and the description independently: the
+    #: whole failure this guards against is a plausible-sounding summary
+    #: pointing somewhere else.
+    target: str
     summary: str
     payload: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str
@@ -385,19 +483,115 @@ class ActionIntent(_Value):
     def _check_idempotency_key(cls, value: str) -> str:
         return validate_idempotency_key(value)
 
-    @field_validator("summary")
+    @field_validator("summary", "target")
     @classmethod
     def _summary_not_blank(cls, value: str) -> str:
         if not value.strip():
             raise JobSearchContractError(
-                "an action intent must carry a human-readable summary; it is what a "
-                "reviewer approves"
+                "an action intent must carry a human-readable summary and target; they "
+                "are what a reviewer approves"
             )
         return value
 
     def fingerprint(self) -> str:
-        """Stable hash of the side effect this intent describes."""
-        return _canonical_hash({"kind": self.kind.value, "payload": self.payload})
+        """Stable hash of the side effect this intent describes.
+
+        Covers the kind, the target and the payload: everything that decides
+        *what happens outside this system*. It deliberately excludes
+        `action_id`, `created_at` and `requested_by`, so re-proposing the same
+        submission hashes the same -- and equally deliberately includes
+        `target`, so redirecting an otherwise identical action at a different
+        recipient produces a different hash and invalidates any approval held
+        against the old one.
+        """
+        return _canonical_hash(
+            {"kind": self.kind.value, "target": self.target, "payload": self.payload}
+        )
+
+    def risk_profile(self) -> "ActionRiskProfile":
+        """The review terms this action is subject to."""
+        return risk_profile_for(self.kind)
+
+
+class ApprovalRequest(_Value):
+    """What a reviewer is shown, and what an approval is later checked against.
+
+    Minted by the node that parks the run and written to state *before* the
+    graph interrupts, so it is part of the checkpoint the reviewer's answer
+    eventually resumes. That ordering is the whole mechanism: `action_hash` is
+    the hash of the action as it stood when the request went out, and it is the
+    fixed point an executor compares a freshly recomputed hash against hours or
+    days later. Recomputing the request instead of storing it would compare the
+    mutated action against itself and always agree.
+
+    Bounded by `expires_at` for the same reason `ApprovalGrant` is bound to a
+    fingerprint: an approval is a statement about a specific action at a
+    specific time, and neither the action nor the moment may drift out from
+    under it.
+    """
+
+    request_id: UUID = Field(default_factory=uuid4)
+    action_id: UUID
+    #: `ActionIntent.fingerprint()` as of the moment the request was raised.
+    action_hash: str
+    kind: ActionKind
+    target: str
+    summary: str
+    risk: RiskLevel
+    requested_scopes: tuple[str, ...] = ()
+    idempotency_key: str
+    requested_by: str = "graph:job_search"
+    requested_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: datetime
+
+    @field_validator("expires_at")
+    @classmethod
+    def _expiry_after_request(cls, value: datetime, info) -> datetime:
+        requested_at = info.data.get("requested_at")
+        if requested_at is not None and value <= requested_at:
+            raise JobSearchContractError(
+                f"an approval request must expire after it was raised "
+                f"(expires_at={value}, requested_at={requested_at})"
+            )
+        return value
+
+    @classmethod
+    def for_intent(
+        cls,
+        intent: ActionIntent,
+        *,
+        now: datetime | None = None,
+        ttl: timedelta | None = None,
+    ) -> "ApprovalRequest":
+        """Raise the request a reviewer answers for this intent.
+
+        `ttl` overrides the kind's own `approval_ttl`, which is what a
+        deployment with a stricter (or, in a test, much shorter) review window
+        passes. The hash is taken here, once, from the intent as it stands.
+        """
+        profile = intent.risk_profile()
+        raised_at = now or datetime.utcnow()
+        return cls(
+            action_id=intent.action_id,
+            action_hash=intent.fingerprint(),
+            kind=intent.kind,
+            target=intent.target,
+            summary=intent.summary,
+            risk=profile.risk,
+            requested_scopes=profile.scopes,
+            idempotency_key=intent.idempotency_key,
+            requested_by=intent.requested_by,
+            requested_at=raised_at,
+            expires_at=raised_at + (ttl or profile.approval_ttl),
+        )
+
+    def is_expired(self, now: datetime) -> bool:
+        """True once this request may no longer be answered."""
+        return now >= self.expires_at
+
+    def describes(self, intent: ActionIntent) -> bool:
+        """True when this request was raised for that intent, whatever it now says."""
+        return self.action_id == intent.action_id
 
 
 class ApprovalVerdict(str, Enum):
@@ -425,6 +619,10 @@ class ApprovalDecision(_Value):
     decided_by: str
     decided_at: datetime = Field(default_factory=datetime.utcnow)
     note: str | None = None
+    #: The `ApprovalRequest` this answers, when the decision came back through
+    #: one. Optional so a standing approval resolved without ever raising a
+    #: request is still expressible; when it is set, it is checked.
+    request_id: UUID | None = None
 
     def authorizes(self, intent: ActionIntent) -> bool:
         """True only for an approval issued for exactly this intent."""
@@ -432,6 +630,12 @@ class ApprovalDecision(_Value):
             self.verdict == ApprovalVerdict.APPROVED
             and self.action_id == intent.action_id
             and self.action_fingerprint == intent.fingerprint()
+        )
+
+    def answers(self, request: ApprovalRequest) -> bool:
+        """True when this decision was issued for exactly that request."""
+        return self.action_id == request.action_id and (
+            self.request_id is None or self.request_id == request.request_id
         )
 
 
@@ -448,6 +652,193 @@ class ActionReceipt(_Value):
     ok: bool
     external_reference: str | None = None
     detail: str | None = None
+
+
+class RefusalReason(str, Enum):
+    """Why an approved-looking action was not executed after all.
+
+    A closed set so a refusal is classifiable rather than a string an operator
+    has to read: `HASH_MISMATCH` and `EXPIRED` mean something went wrong
+    between the request and the resume and want investigating, while
+    `NOT_APPROVED` is the ordinary outcome of a reviewer saying no.
+    """
+
+    #: The run reached the executor with no request on file for this action.
+    NO_REQUEST = "no_approval_request"
+    #: No decision came back for this action, or it was not an approval.
+    NOT_APPROVED = "not_approved"
+    #: A decision that belongs to some other action or some other request.
+    MISDIRECTED_DECISION = "misdirected_decision"
+    #: The reviewer approved a hash the action no longer has.
+    HASH_MISMATCH = "action_hash_mismatch"
+    #: The approval window closed before the run got back to the executor.
+    EXPIRED = "approval_expired"
+
+
+class ApprovalRefusal(_Value):
+    """A refusal to execute, recorded rather than raised.
+
+    Recorded because a refusal is an outcome the run has to carry forward: a
+    submission refused at the executor still leaves a real application packet
+    that should be persisted as prepared-but-unsent, and the reason it was
+    refused is what an operator needs to decide whether to re-request approval
+    or to investigate why the action changed.
+    """
+
+    action_id: UUID
+    request_id: UUID | None
+    reason: RefusalReason
+    detail: str
+    approved_hash: str | None = None
+    recomputed_hash: str | None = None
+
+    @property
+    def suspicious(self) -> bool:
+        """True for the reasons that mean something tampered with the action."""
+        return self.reason in (RefusalReason.HASH_MISMATCH, RefusalReason.MISDIRECTED_DECISION)
+
+    def to_receipt(self) -> ActionReceipt:
+        """The not-ok receipt this refusal settles the action with."""
+        return ActionReceipt(action_id=self.action_id, ok=False, detail=self.detail)
+
+
+def authorize_execution(
+    *,
+    intent: ActionIntent,
+    request: ApprovalRequest | None,
+    decision: ApprovalDecision | None,
+    now: datetime,
+) -> ApprovalRefusal | None:
+    """Decide whether an approved action may still be executed. `None` means yes.
+
+    The last gate before a side effect, and the only one that runs *after* the
+    checkpoint the approval was granted against. Everything it checks is a way
+    the action and its approval can have drifted apart while the run was parked:
+
+    - the request is the one raised for this action, and the decision answers
+      that request (not a different action's, and not a different request for
+      the same action);
+    - the decision is an approval, of the hash the request went out with;
+    - **the intent still hashes to what the request went out with.** This is the
+      check the whole interrupt design exists for: between raising the request
+      and resuming, the pending action lives in graph state, where a later node
+      -- or a model driving one -- could rewrite it. Recomputing the hash here
+      and comparing it to the stored `action_hash` is what makes a rewritten
+      action fail closed instead of executing under someone else's approval;
+    - the approval has not expired.
+
+    Pure, and takes `now` rather than reading a clock, so every branch is
+    testable without waiting and a caller cannot get a different answer than
+    the one it will record.
+    """
+    if request is None:
+        return ApprovalRefusal(
+            action_id=intent.action_id,
+            request_id=None,
+            reason=RefusalReason.NO_REQUEST,
+            detail=(
+                f"no approval request on file for action {intent.action_id} "
+                f"({intent.kind.value}); it was never put to a reviewer"
+            ),
+            recomputed_hash=intent.fingerprint(),
+        )
+
+    if not request.describes(intent):
+        return ApprovalRefusal(
+            action_id=intent.action_id,
+            request_id=request.request_id,
+            reason=RefusalReason.MISDIRECTED_DECISION,
+            detail=(
+                f"approval request {request.request_id} was raised for action "
+                f"{request.action_id}, not {intent.action_id}"
+            ),
+            approved_hash=request.action_hash,
+            recomputed_hash=intent.fingerprint(),
+        )
+
+    if decision is None:
+        return ApprovalRefusal(
+            action_id=intent.action_id,
+            request_id=request.request_id,
+            reason=RefusalReason.NOT_APPROVED,
+            detail=(
+                f"no decision recorded for action {intent.action_id} "
+                f"({intent.kind.value}); the request is still unanswered"
+            ),
+            approved_hash=request.action_hash,
+            recomputed_hash=intent.fingerprint(),
+        )
+
+    if not decision.answers(request):
+        return ApprovalRefusal(
+            action_id=intent.action_id,
+            request_id=request.request_id,
+            reason=RefusalReason.MISDIRECTED_DECISION,
+            detail=(
+                f"decision for action {decision.action_id} / request "
+                f"{decision.request_id} does not answer request {request.request_id} "
+                f"for action {request.action_id}"
+            ),
+            approved_hash=request.action_hash,
+            recomputed_hash=intent.fingerprint(),
+        )
+
+    if decision.verdict != ApprovalVerdict.APPROVED:
+        return ApprovalRefusal(
+            action_id=intent.action_id,
+            request_id=request.request_id,
+            reason=RefusalReason.NOT_APPROVED,
+            detail=(
+                f"action {intent.action_id} ({intent.kind.value}) was not approved: "
+                f"verdict={decision.verdict.value}"
+            ),
+            approved_hash=request.action_hash,
+            recomputed_hash=intent.fingerprint(),
+        )
+
+    if decision.action_fingerprint != request.action_hash:
+        return ApprovalRefusal(
+            action_id=intent.action_id,
+            request_id=request.request_id,
+            reason=RefusalReason.HASH_MISMATCH,
+            detail=(
+                f"the approval for action {intent.action_id} is bound to hash "
+                f"{decision.action_fingerprint}, which is not the hash the request "
+                f"was raised with"
+            ),
+            approved_hash=request.action_hash,
+            recomputed_hash=intent.fingerprint(),
+        )
+
+    recomputed = intent.fingerprint()
+    if recomputed != request.action_hash:
+        return ApprovalRefusal(
+            action_id=intent.action_id,
+            request_id=request.request_id,
+            reason=RefusalReason.HASH_MISMATCH,
+            detail=(
+                f"action {intent.action_id} ({intent.kind.value}) changed after it was "
+                f"approved: approved hash {request.action_hash}, now {recomputed}. "
+                f"Refusing to execute under an approval given for a different action"
+            ),
+            approved_hash=request.action_hash,
+            recomputed_hash=recomputed,
+        )
+
+    if request.is_expired(now):
+        return ApprovalRefusal(
+            action_id=intent.action_id,
+            request_id=request.request_id,
+            reason=RefusalReason.EXPIRED,
+            detail=(
+                f"the approval for action {intent.action_id} expired at "
+                f"{request.expires_at.isoformat()}; it must be requested again"
+            ),
+            approved_hash=request.action_hash,
+            recomputed_hash=recomputed,
+        )
+
+    return None
 
 
 # --- Persistence outcome and events -----------------------------------------
@@ -588,10 +979,18 @@ __all__ = [
     "ArtifactDraft",
     "ApplicationPacket",
     "ActionKind",
+    "RiskLevel",
+    "ActionRiskProfile",
+    "ACTION_RISK_PROFILES",
+    "risk_profile_for",
     "ActionIntent",
+    "ApprovalRequest",
     "ApprovalVerdict",
     "ApprovalDecision",
     "ActionReceipt",
+    "RefusalReason",
+    "ApprovalRefusal",
+    "authorize_execution",
     "PersistedApplication",
     "JobSearchEventType",
     "EmittedEvent",
