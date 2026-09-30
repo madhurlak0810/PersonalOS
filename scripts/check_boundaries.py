@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Standalone architecture boundary check.
 
-Same rules as ``tests/architecture/test_boundaries.py``, runnable with nothing
+Same rules as ``tests/architecture/test_boundaries.py`` and
+``tests/architecture/test_intent_boundary.py``, runnable with nothing
 installed: it parses source with ``ast`` rather than importing the package, so
 CI can fail a bad dependency before spending time on a dependency install.
 
@@ -22,6 +23,10 @@ from tests.architecture.boundaries import (  # noqa: E402
     scan_imports,
     violations,
 )
+from tests.architecture.intent_boundary import (  # noqa: E402
+    collect_facts,
+    intent_boundary_violations,
+)
 
 
 def main() -> int:
@@ -39,6 +44,7 @@ def main() -> int:
         f"tests/architecture/boundaries.py"
         for module in orphans
     )
+    problems.extend(intent_boundary_violations(collect_facts()))
 
     print(
         f"checked {len(scan.files)} files, {len(scan.edges)} internal imports, "
@@ -52,7 +58,7 @@ def main() -> int:
         print("\nSee docs/ARCHITECTURE_BOUNDARIES.md for the rules and how to change them.")
         return 1
 
-    print("architecture boundaries OK")
+    print("architecture boundaries OK (layers and intent-only boundary)")
     return 0
 
 
