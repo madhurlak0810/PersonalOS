@@ -166,6 +166,81 @@ instead of to discovery, and that node proposes an `ActionIntent` like every
 other node that wants to act. It holds no executor, so a follow-up drafted at
 3am by a sweep with no human anywhere near it still parks at the interrupt.
 
+### The intent-only boundary
+
+The layer graph above polices imports between *our* packages. It cannot see a
+graph node doing `from googleapiclient.discovery import build`, opening a
+`sqlalchemy` session, or calling `Path.write_text` — none of those is an
+internal import. So there is a second, complementary check,
+[tests/architecture/intent_boundary.py](../tests/architecture/intent_boundary.py),
+enforced by [test_intent_boundary.py](../tests/architecture/test_intent_boundary.py)
+and by `scripts/check_boundaries.py` in CI.
+
+> The only thing an LLM-backed node may produce is a typed intent. Only the
+> executor performs the side effect:
+> `ActionIntent → PolicyEngine / approval → executor`.
+
+It applies to the **reasoning layers** — `graphs`, `models`, `domain`,
+`policy`, `events` — and refuses, by AST:
+
+| Category | Examples | Why |
+| --- | --- | --- |
+| `provider-sdk` | `googleapiclient`, `google.oauth2`, `gcsa`, `caldav`, `msal`, `jobspy`, `linkedin_api`, `mcp` | a provider client performs writes policy never saw |
+| `database` | `sqlalchemy`, `psycopg2`, `sqlite3`, `redis`, `celery`, `langgraph.checkpoint.postgres` | a raw DB/broker write is a transition nothing journals |
+| `network` | `httpx`, `requests`, `aiohttp`, `urllib.request`, `smtplib` | a bare HTTP or mail client is a hand-rolled provider SDK |
+| `process` | `subprocess`, `os.system`, `os.exec*` | anything can happen, none of it as an intent |
+| `filesystem` | `shutil`, `tempfile`, `open(p, "w")`, `Path.write_text`/`mkdir`/`unlink`, `os.remove`/`makedirs`/`replace` | mutation belongs to an executor |
+| `llm-sdk` | `anthropic`, `langchain_anthropic`, `openai` | model clients live in `models` behind a port (exempt there) |
+| `dynamic-import` | `importlib.import_module`, `__import__` | cannot be checked, so refused |
+
+Imports count wherever they appear, including inside a function body; `from
+os import remove as rm; rm(p)` resolves through the alias. Reading a file
+(`open(p)`, `open(p, "rb")`, `Path.read_text`) is not a side effect and is not
+flagged; `open(p, mode)` with a non-literal mode is, because the check cannot
+show it is read-only.
+
+The check is also **transitive**. A reasoning module may not reach an effect
+layer (`persistence`, `tools`, `mcp`, `mcp_servers`, composition), or a
+non-reasoning module that breaks the rules above, through any chain of
+internal imports — except through `executor`, which is the sanctioned door
+because everything it does is dispatched through a `ToolGateway`. That closes
+routes the layer graph allows one hop at a time: `graphs → state` and `state →
+persistence` are each legal, but a graph reaching a DB session that way is not.
+
+`langgraph.checkpoint.base`, `langgraph.checkpoint.memory` and `interrupt()`
+are fine: a checkpointer is a port the composition root binds, and the
+durable one lives in `persistence`.
+
+#### Required node shape
+
+Every node in a reasoning layer has the same five steps, and side effects
+appear in none of them:
+
+    NodeInput -> validate -> reason/compute -> emit typed decision -> state update
+
+1. **NodeInput** — read the narrow slice of graph state the node needs.
+2. **validate** — rebuild the typed domain values from that slice (state is
+   JSON, see `graphs/job_search.py`) and fail or short-circuit on bad input.
+3. **reason/compute** — pure computation, or calls to *injected ports*
+   (`Protocol`s declared in the graph module, bound by the composition root).
+   A model call goes through a `models` port such as `IntentClassifier`, never
+   a raw SDK.
+4. **emit typed decision** — the result is a typed value: a `RouteDecision`,
+   a ranked shortlist, or, for anything outward-facing, an `ActionIntent` with
+   target, summary, payload and idempotency key.
+5. **state update** — return a partial state dict. An intent goes into
+   `pending_actions`; the node has no executor and no edge to one.
+
+Side effects are isolated to executor nodes. In the job-search graph that is
+`execute_approved_actions`, the one node holding an `ActionExecutor` port, and
+it runs only after `request_approval` → `approval_checkpoint`. It lives in
+`graphs` but satisfies the rule, because the port is all it holds; the adapter
+that does the I/O is bound in `bootstrap` and lives in an effect layer.
+
+To add a node that needs something new from the outside world, declare a port
+for it, and if it *writes*, make it propose an `ActionIntent` instead. Do not
+add an exemption to `SIDE_EFFECT_RULES` for one node.
+
 ### `persistence` — `personalos/persistence/`
 
 Storage and retrieval: ORM models, sessions, repositories, the idempotency guard
@@ -470,3 +545,14 @@ From [test_boundaries.py](../tests/architecture/test_boundaries.py):
 - Nothing outside `personalos/policy/` references the approval-minting
   internals.
 - This document exists, describes every declared layer, and points at the spec.
+
+From [test_intent_boundary.py](../tests/architecture/test_intent_boundary.py):
+
+- No module in a reasoning layer imports a provider SDK, DB driver, network,
+  process or filesystem module, or mutates the filesystem through a call; and
+  none reaches an effect layer except through `executor`.
+- Deliberately non-compliant graph nodes are planted, one per category
+  (Gmail/Calendar/job-board SDKs, `sqlalchemy`, `httpx`, `open(p, "w")`,
+  `Path.write_text`, `os.remove`, a two-hop `graphs → state → persistence`
+  reach, …), and each is caught. A node with the documented shape, one that
+  reads files, and the executor itself are not flagged.
