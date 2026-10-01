@@ -16,7 +16,12 @@ from personalos.persistence.models import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # `disable_existing_loggers` defaults to True, which silences every logger
+    # that already exists -- i.e. every `personalos.*` module logger -- for the
+    # rest of the process. Harmless for the `alembic` CLI, which exits; not for
+    # a process that runs migrations and then keeps working (app startup, the
+    # test suite).
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 config.set_main_option("sqlalchemy.url", settings.database_url)
 
