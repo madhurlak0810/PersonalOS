@@ -123,6 +123,9 @@ DEFAULT_TOOL_PERMISSIONS: Mapping[str, ToolPermission] = MappingProxyType(
         "google.calendar_create_tentative_block": _permission(
             PermissionClass.WRITE_REVERSIBLE, {"calendar:draft"}
         ),
+        # Hash-guarded: it can create a file or replace the exact version the
+        # caller read, never one it has not seen.
+        "files.write_file": _permission(PermissionClass.WRITE_REVERSIBLE, {"artifacts:write"}),
         # WRITE_EXTERNAL
         "google.gmail_send_message": _permission(
             PermissionClass.WRITE_EXTERNAL, {"communications:send"}

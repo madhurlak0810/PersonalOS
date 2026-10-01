@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     mcp_google_enabled: bool = False
     mcp_jobs_enabled: bool = True
 
+    # File tools. The only directories the files MCP server may read or write,
+    # as absolute paths; the first is the one relative paths resolve against.
+    # Empty means the file tools reject every path. Set from the environment
+    # as a JSON list: FILES_ALLOWED_ROOTS=["/home/me/job-search"]
+    files_allowed_roots: list[str] = []
+
     # Google Integration
     google_api_key: str = ""
     google_search_engine_id: str = ""

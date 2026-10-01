@@ -196,16 +196,26 @@ JOB_SEARCH_TOOL_ARGUMENTS = {
 }
 
 
+#: Tools exposed by the files MCP server. Which paths they may touch is not a
+#: policy question: the server confines them to its allowed roots itself.
+FILE_TOOL_ARGUMENTS = {
+    "files.read_file": {"path"},
+    # Mutating: reachable, but MutatingToolRule holds it for approval.
+    "files.write_file": {"path", "content", "encoding", "expected_sha256"},
+}
+
+
 def default_rules() -> list[PolicyRule]:
     """The rule chain the application boots with.
 
-    Read-only job search tools are allowlisted; nothing else can run until it
+    Job search and file tools are allowlisted; nothing else can run until it
     is added here deliberately.
     """
+    tool_arguments = {**JOB_SEARCH_TOOL_ARGUMENTS, **FILE_TOOL_ARGUMENTS}
     return [
         RequireProvenanceRule(),
-        ToolAllowlistRule(JOB_SEARCH_TOOL_ARGUMENTS.keys()),
-        ArgumentAllowlistRule(JOB_SEARCH_TOOL_ARGUMENTS),
+        ToolAllowlistRule(tool_arguments.keys()),
+        ArgumentAllowlistRule(tool_arguments),
         MutatingToolRule(),
         UntrustedOriginRule(),
     ]
@@ -219,6 +229,7 @@ __all__ = [
     "MutatingToolRule",
     "UntrustedOriginRule",
     "JOB_SEARCH_TOOL_ARGUMENTS",
+    "FILE_TOOL_ARGUMENTS",
     "default_rules",
     "IDEMPOTENCY_KEY_ARG",
 ]

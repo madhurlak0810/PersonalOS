@@ -9,7 +9,7 @@ See ``docs/ARCHITECTURE_BOUNDARIES.md``.
 """
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from uuid import UUID
 
 from personalos.config import settings
@@ -23,6 +23,7 @@ from personalos.executor.credentials import CredentialBroker
 from personalos.executor.job_search import JobSearchExecutor
 from personalos.graphs.job_search import JobSearchSubgraphRunner
 from personalos.mcp.adapter import MCPToolInvoker
+from personalos.mcp.base import MCPServer
 from personalos.mcp.manager import MCPServerManager, get_mcp_manager
 from personalos.persistence.action_journal import ActionExecutorPort, JournaledActionExecutor
 from personalos.persistence.checkpointer import (
@@ -76,8 +77,27 @@ def register_mcp_servers(
 
     manager = manager or get_mcp_manager()
     manager.register_server(JobsMCPServer(operation_store=operation_store))
+    if settings.mcp_files_enabled:
+        manager.register_server(build_files_mcp_server(operation_store=operation_store))
     logger.info("Registered MCP servers: %s", manager.list_servers())
     return manager
+
+
+def build_files_mcp_server(
+    allowed_roots: Iterable[str] | None = None,
+    operation_store: OperationStore | None = None,
+) -> MCPServer:
+    """Build the files server, confined to the configured allowed roots.
+
+    The roots come from `FILES_ALLOWED_ROOTS` and from nowhere else: they are
+    never an intent argument, so nothing a model emits can widen them. With
+    none configured the server still registers and rejects every path.
+    """
+    from mcp_servers.files.sandbox import PathSandbox
+    from mcp_servers.files.server import FilesMCPServer
+
+    roots = settings.files_allowed_roots if allowed_roots is None else allowed_roots
+    return FilesMCPServer(PathSandbox(roots), operation_store=operation_store)
 
 
 def build_policy_engine(
@@ -343,6 +363,7 @@ __all__ = [
     "SUPERVISOR_WORKFLOW",
     "build_operation_store",
     "register_mcp_servers",
+    "build_files_mcp_server",
     "build_policy_engine",
     "build_tool_gateway",
     "build_job_search_executor",
