@@ -138,6 +138,7 @@ PersonalOS-agent/
 │   ├── policy/                # Policy enforcement
 │   │   ├── intents.py         # ToolIntent / ApprovedIntent
 │   │   ├── rules.py           # Allowlists, mutating + origin rules
+│   │   ├── permissions.py     # Permission classes + default outcomes
 │   │   ├── engine.py          # PolicyEngine (default deny)
 │   │   └── errors.py          # PolicyDenied / ApprovalRequired
 │   │

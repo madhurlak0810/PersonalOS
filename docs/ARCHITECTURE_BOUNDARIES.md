@@ -38,7 +38,8 @@ idempotency-key validation.
 ### `policy` — `personalos/policy/`
 
 The only component that answers *may this run?* Owns `ToolIntent` (a proposal),
-`PolicyRule`, `PolicyEngine`, and `ApprovedIntent` (a cleared proposal).
+`PolicyRule`, `PermissionClass`, `PolicyEngine`, and `ApprovedIntent` (a cleared
+proposal).
 
 - **May import:** `domain`.
 - **Must not:** perform I/O, read storage, call tools, or import an adapter.
@@ -58,6 +59,39 @@ Two properties are load-bearing:
 
 Resolution order inside the engine is deny → require-approval → allow → default
 deny, so adding a rule can only ever tighten behaviour.
+
+**Permission classes.** Every tool is assigned one class in
+[`permissions.py`](../personalos/policy/permissions.py), and the class sets the
+default outcome:
+
+| Class | Examples | Default |
+| --- | --- | --- |
+| `READ_LOCAL` | filter jobs, read a local file | allow |
+| `READ_EXTERNAL` | job search, read Gmail, list calendar | allow |
+| `WRITE_REVERSIBLE` | create a draft, tentative calendar block | allow |
+| `WRITE_EXTERNAL` | send email, create/update event, submit application | require approval |
+| `DESTRUCTIVE` | delete a file, overwrite an important document | require approval |
+| `SENSITIVE` | credential or permission changes | deny |
+
+`PolicyEngine.evaluate(principal, workflow_id, tool, args_hash,
+requested_scopes, provenance)` returns the class verdict. A tool with no class,
+an action with no provenance, or a request for a scope the tool does not declare
+is denied. A write proposed by a model (`origin=LLM`) needs approval even where
+the class would allow it, and `SENSITIVE` is denied to a model regardless of
+configuration. `authorize(intent)` applies the same verdict on top of the rule
+chain; the stricter of the two wins.
+
+**Every verdict is recorded first.** The engine writes each decision to a
+`PolicyDecisionLog` before returning it. That port is defined in `policy` and
+implemented by `persistence.policy_log.SqlPolicyDecisionLog` (one committed
+`policy_decisions` row per call), wired in `bootstrap.build_policy_engine` — the
+policy layer still imports no storage. If the write fails the exception
+propagates and no outcome is returned, so a tool never runs ahead of its
+decision row.
+
+**Verdicts are terminal for retries.** `executor.retry.dispatch_with_retry`
+retries transient failures only; any `PolicyError` (`PolicyDenied`,
+`ApprovalRequired`) propagates on the first attempt.
 
 ### `tools` — `personalos/tools/`
 
@@ -507,8 +541,11 @@ stacking a second request on it.
 
 **A new tool.** Implement it on an MCP server, then add its `server.tool` ref
 and argument surface to `JOB_SEARCH_TOOL_ARGUMENTS` (or a new allowlist) in
-[`policy/rules.py`](../personalos/policy/rules.py). Until you do, the engine
-denies it — the boundary tests will not tell you, but the first call will.
+[`policy/rules.py`](../personalos/policy/rules.py), and give it a
+`PermissionClass` and scopes in `DEFAULT_TOOL_PERMISSIONS` in
+[`policy/permissions.py`](../personalos/policy/permissions.py). Until you do
+both, the engine denies it — the boundary tests will not tell you, but the first
+call will.
 
 **A mutating tool.** Mark the `ToolSchema` `mutating=True` (which adds
 `idempotency_key` to its advertised contract), allowlist it, and decide whether

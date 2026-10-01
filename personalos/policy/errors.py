@@ -16,7 +16,16 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 class PolicyError(PersonalOSError):
-    """Base class for all policy failures."""
+    """Base class for all policy failures.
+
+    Terminal for automatic retries: re-submitting the same action gets the
+    same verdict, so a retry loop that swallowed one of these would only be
+    hiding a decision from whoever has to act on it. Retry logic checks for
+    this type rather than trusting `retryable` alone (see
+    `personalos.executor.retry`).
+    """
+
+    retryable = False
 
 
 class PolicyDenied(PolicyError):

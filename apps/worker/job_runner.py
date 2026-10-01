@@ -13,7 +13,11 @@ import asyncio
 import logging
 from uuid import UUID
 
-from personalos.bootstrap import build_job_search_executor, register_mcp_servers
+from personalos.bootstrap import (
+    build_job_search_executor,
+    build_policy_engine,
+    register_mcp_servers,
+)
 from personalos.domain.models import Job
 from personalos.persistence.database import SessionLocal
 from personalos.persistence.repositories import JobRepository
@@ -36,7 +40,7 @@ async def run_job_search(job_id: UUID) -> Job:
         if job is None:
             raise ValueError(f"Job {job_id} not found")
 
-        executor = build_job_search_executor(repo)
+        executor = build_job_search_executor(repo, policy=build_policy_engine())
         return await executor.run_job_search(job)
     finally:
         session.close()

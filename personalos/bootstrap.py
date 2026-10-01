@@ -33,6 +33,7 @@ from personalos.persistence.pending_checkpoints import (
     PendingCheckpointStore,
     StorePendingCheckpointScheduler,
 )
+from personalos.persistence.policy_log import SqlPolicyDecisionLog
 from personalos.persistence.repositories import JobRepository
 from personalos.policy import PolicyEngine, default_policy_engine
 from personalos.tools.gateway import PolicyEnforcingToolGateway, ToolGateway
@@ -68,6 +69,19 @@ def register_mcp_servers(
     manager.register_server(JobsMCPServer(operation_store=operation_store))
     logger.info("Registered MCP servers: %s", manager.list_servers())
     return manager
+
+
+def build_policy_engine(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> PolicyEngine:
+    """Build the default policy engine backed by the `policy_decisions` table.
+
+    This is the engine a real deployment runs: every verdict is committed
+    before the engine returns it, so no tool executes ahead of its decision
+    row. `default_policy_engine()` on its own records nothing durable and is
+    for tests and callers that have no database.
+    """
+    return default_policy_engine(decision_log=SqlPolicyDecisionLog(session_factory))
 
 
 def build_tool_gateway(
@@ -265,6 +279,7 @@ __all__ = [
     "SUPERVISOR_WORKFLOW",
     "build_operation_store",
     "register_mcp_servers",
+    "build_policy_engine",
     "build_tool_gateway",
     "build_job_search_executor",
     "initialize_mcp_servers",
