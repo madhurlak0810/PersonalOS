@@ -342,6 +342,26 @@ Concrete tool implementations, one package per provider.
 - **Must not:** import `executor`, `graphs`, `policy`, or `tools`. A server
   implements tools; it does not decide who may call them.
 
+**File tools are confined by the server, not by the caller.**
+[`mcp_servers/files`](../mcp_servers/files/server.py) exposes `read_file` and
+`write_file`, and every path either receives goes through
+[`PathSandbox.resolve`](../mcp_servers/files/sandbox.py) before anything is
+opened. A path is model-authored text, so the decision is made on the
+canonical path — `..` collapsed, every symlink followed — and never on how the
+string looks:
+
+- A relative path is anchored on the primary allowed root, not on the
+  process's working directory.
+- The canonical path must sit inside an allowed root (`FILES_ALLOWED_ROOTS`,
+  bound in `bootstrap.build_files_mcp_server`). The roots are configuration,
+  never an intent argument. With none configured, every path is rejected.
+- Hidden and credential/config directories (`.ssh`, `.aws`, browser profiles,
+  …) are denied even inside a root, on both the path as written and what it
+  resolves to.
+- `write_file` is compare-and-swap on content: replacing a file requires the
+  `sha256` of the version the caller read, and a mismatch is a `StaleWrite`
+  rather than a lost update. Without a hash it can only create.
+
 ### Support layers
 
 | Layer | Owns | May import |
