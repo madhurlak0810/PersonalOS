@@ -52,7 +52,7 @@ def grant_for(intent: ToolIntent, approved_by: str = "operator") -> ApprovalGran
 
 def test_engine_with_no_rules_denies_everything():
     """An unconfigured engine is closed, not open."""
-    decision = PolicyEngine().evaluate(make_intent())
+    decision = PolicyEngine().evaluate_intent(make_intent())
     assert decision.decision == Decision.DENY
     assert decision.rule == "default"
 
@@ -240,14 +240,14 @@ class _AlwaysEscalate(PolicyRule):
 def test_deny_beats_allow_regardless_of_order():
     """Adding a rule can only tighten behaviour."""
     for rules in ([_AlwaysAllow(), _AlwaysDeny()], [_AlwaysDeny(), _AlwaysAllow()]):
-        decision = PolicyEngine(rules).evaluate(make_intent())
+        decision = PolicyEngine(rules).evaluate_intent(make_intent())
         assert decision.decision == Decision.DENY, rules
 
 
 def test_escalation_beats_allow_regardless_of_order():
     """An approval demand is never overridden by a permissive rule."""
     for rules in ([_AlwaysAllow(), _AlwaysEscalate()], [_AlwaysEscalate(), _AlwaysAllow()]):
-        decision = PolicyEngine(rules).evaluate(make_intent())
+        decision = PolicyEngine(rules).evaluate_intent(make_intent())
         assert decision.decision == Decision.REQUIRE_APPROVAL, rules
 
 
@@ -255,7 +255,7 @@ def test_decision_sink_sees_every_decision():
     """Decisions are auditable without policy depending on the event bus."""
     seen = []
     engine = default_policy_engine(decision_sink=lambda i, d: seen.append((i, d)))
-    engine.evaluate(make_intent())
+    engine.evaluate_intent(make_intent())
     with pytest.raises(PolicyDenied):
         engine.authorize(make_intent(tool="nope"))
     assert len(seen) == 2
@@ -270,7 +270,7 @@ def test_decision_sink_sees_every_decision():
 def test_approved_intent_cannot_be_constructed_directly():
     """The type itself refuses to be manufactured outside the policy layer."""
     intent = make_intent()
-    decision = default_policy_engine().evaluate(intent)
+    decision = default_policy_engine().evaluate_intent(intent)
     with pytest.raises(PolicyViolation):
         ApprovedIntent(intent, decision)
 
@@ -285,7 +285,7 @@ def test_approved_intent_is_immutable():
 def test_a_denied_decision_cannot_be_minted_into_an_approval():
     """Even inside the policy layer, a denial cannot become an approval."""
     intent = make_intent(tool="not_allowlisted")
-    decision = default_policy_engine().evaluate(intent)
+    decision = default_policy_engine().evaluate_intent(intent)
     assert decision.decision == Decision.DENY
     with pytest.raises(PolicyViolation):
         mint_approved_intent(intent, decision)

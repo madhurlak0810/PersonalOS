@@ -6,7 +6,7 @@ it by turning an untrusted :class:`ToolIntent` into an
 no tool adapters, no execution. See ``docs/ARCHITECTURE_BOUNDARIES.md``.
 """
 
-from .engine import DecisionSink, PolicyEngine, default_policy_engine
+from .engine import DecisionSink, PolicyDecisionLog, PolicyEngine, default_policy_engine
 from .errors import (
     ApprovalRequired,
     InvalidApproval,
@@ -23,6 +23,13 @@ from .intents import (
     ToolIntent,
     fingerprint_intent,
 )
+from .permissions import (
+    DEFAULT_CLASS_OUTCOMES,
+    DEFAULT_TOOL_PERMISSIONS,
+    PermissionClass,
+    Provenance,
+    ToolPermission,
+)
 from .rules import (
     ArgumentAllowlistRule,
     MutatingToolRule,
@@ -37,7 +44,14 @@ __all__ = [
     # Engine
     "PolicyEngine",
     "DecisionSink",
+    "PolicyDecisionLog",
     "default_policy_engine",
+    # Permission classes
+    "PermissionClass",
+    "ToolPermission",
+    "Provenance",
+    "DEFAULT_CLASS_OUTCOMES",
+    "DEFAULT_TOOL_PERMISSIONS",
     # Intents
     "ToolIntent",
     "ApprovedIntent",

@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 from personalos.domain.errors import InternalError, PersonalOSError
 from personalos.domain.models import AgentState, Event, EventType, Job, JobStatus
 from personalos.events import EventBus, get_event_bus
+from personalos.executor.retry import dispatch_with_retry
 from personalos.persistence.repositories import JobRepository
 from personalos.policy import IntentOrigin, ToolIntent
 from personalos.tools.gateway import ToolGateway, ToolResult
@@ -232,6 +233,9 @@ class JobSearchExecutor:
         Intents built here are ``SYSTEM`` origin: their shape is fixed by this
         module, not by model output. Anything a model proposes must be built as
         an ``LLM``-origin intent so policy can treat it as untrusted.
+
+        Transient failures are retried; a policy verdict (deny or approval
+        required) is not, and propagates on the first attempt.
         """
         intent = ToolIntent(
             server=JOBS_SERVER,
@@ -244,7 +248,7 @@ class JobSearchExecutor:
             agent_id=state.agent_id,
             context=job.context,
         )
-        return await self.gateway.dispatch(intent)
+        return await dispatch_with_retry(self.gateway, intent)
 
     async def _publish(
         self,
