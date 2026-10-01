@@ -103,6 +103,13 @@ def _planted(source_module: str, target_module: str) -> Scan:
         ("personalos.tools.gateway", "personalos.mcp.manager"),
         ("personalos.mcp.manager", "mcp_servers.jobs.server"),
         ("personalos.executor.job_search", "personalos.bootstrap"),
+        # Only the executor's broker may reach the secret store.
+        ("personalos.graphs.job_search", "personalos.secrets.store"),
+        ("personalos.models.routing", "personalos.secrets.store"),
+        ("personalos.persistence.repositories", "personalos.secrets.store"),
+        ("personalos.mcp.base", "personalos.secrets.store"),
+        ("mcp_servers.jobs.server", "personalos.secrets.store"),
+        ("personalos.policy.engine", "personalos.secrets.exchange"),
     ],
 )
 def test_checker_rejects_planted_violation(source_module: str, target_module: str):
@@ -122,6 +129,8 @@ def test_checker_rejects_planted_violation(source_module: str, target_module: st
         ("personalos.mcp.adapter", "personalos.policy"),
         ("personalos.bootstrap", "mcp_servers.jobs.server"),
         ("apps.api.routes.jobs", "personalos.bootstrap"),
+        ("personalos.executor.credentials", "personalos.secrets.store"),
+        ("personalos.bootstrap", "personalos.secrets.store"),
     ],
 )
 def test_checker_permits_intended_dependency(source_module: str, target_module: str):

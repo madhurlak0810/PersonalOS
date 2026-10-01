@@ -33,6 +33,7 @@ from personalos.domain.errors import (
     ToolFailure,
     ValidationFailed,
 )
+from personalos.domain.redaction import redact, redact_text
 from personalos.policy import (
     ApprovalGrant,
     ApprovedIntent,
@@ -77,13 +78,19 @@ class ToolResult(BaseModel):
     def from_adapter_payload(
         cls, approved: ApprovedIntent, payload: dict[str, Any]
     ) -> "ToolResult":
-        """Normalize the ``{success, result, error, error_code}`` dict adapters return."""
+        """Normalize the ``{success, result, error, error_code}`` dict adapters return.
+
+        Result and error are redacted here, at the one point every adapter's
+        output passes on its way back to an executor: whatever a tool returns
+        can end up in graph state, and from there in a prompt.
+        """
+        error = payload.get("error")
         return cls(
             intent_id=approved.intent.intent_id,
             tool_ref=approved.intent.tool_ref,
             success=bool(payload.get("success")),
-            result=payload.get("result"),
-            error=payload.get("error"),
+            result=redact(payload.get("result")),
+            error=redact_text(error) if isinstance(error, str) else error,
             error_code=payload.get("error_code"),
             replayed=bool(payload.get("replayed", False)),
             rule=approved.decision.rule,

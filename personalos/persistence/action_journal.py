@@ -52,6 +52,7 @@ from sqlalchemy.orm import Session
 
 from personalos.domain.job_search import ActionIntent, ActionReceipt, ApprovalDecision
 from personalos.domain.models import ToolExecutionStatus
+from personalos.domain.redaction import redact
 from personalos.persistence.repositories import ToolExecutionRepository
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,10 @@ class JournaledActionExecutor:
             self._fail(key, str(exc))
             raise
 
+        # Redacted once, here, so the journalled receipt and the returned one
+        # are the same value: a replay must hand back exactly what the first
+        # attempt did.
+        receipt = redact(receipt)
         self._complete(key, receipt)
         return receipt
 

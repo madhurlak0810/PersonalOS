@@ -52,6 +52,7 @@ EXPECTED_TABLES = {
     "job_posting_embeddings",
     "message_embeddings",
     "pending_checkpoints",
+    "credentials",
 }
 
 

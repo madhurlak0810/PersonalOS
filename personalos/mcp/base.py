@@ -21,6 +21,7 @@ from personalos.domain.models import (
     ToolCallRequest,
     ToolCallResult,
 )
+from personalos.domain.redaction import redact_text
 from personalos.persistence.idempotency import (
     IdempotencyError,
     IdempotencyGuard,
@@ -177,12 +178,17 @@ class MCPServer(ABC):
                 result = await result
             return ToolCallResult.succeeded(request.target, result)
         except Exception as e:
+            # A provider client's exception text is where request headers get
+            # quoted back. It is redacted here because this string is about to
+            # go two places at once: the log, and the result the caller (and
+            # eventually a model) reads.
+            error = redact_text(str(e))
             logger.error(
-                f"Error executing '{tool_name}': {str(e)} ({request.context.as_log_str()})",
+                f"Error executing '{tool_name}': {error} ({request.context.as_log_str()})",
                 exc_info=True,
             )
             return ToolCallResult.failed(
-                request.target, ToolCallErrorCode.EXECUTION_ERROR, str(e)
+                request.target, ToolCallErrorCode.EXECUTION_ERROR, error
             )
 
     async def _execute_mutating(
@@ -230,11 +236,12 @@ class MCPServer(ABC):
             )
             return ToolCallResult.failed(target, ToolCallErrorCode.IDEMPOTENCY_CONFLICT, str(e))
         except Exception as e:
+            error = redact_text(str(e))
             logger.error(
-                f"Error executing '{target.tool}': {str(e)} ({context.as_log_str()})",
+                f"Error executing '{target.tool}': {error} ({context.as_log_str()})",
                 exc_info=True,
             )
-            return ToolCallResult.failed(target, ToolCallErrorCode.EXECUTION_ERROR, str(e))
+            return ToolCallResult.failed(target, ToolCallErrorCode.EXECUTION_ERROR, error)
 
         try:
             return ToolCallResult.succeeded(
