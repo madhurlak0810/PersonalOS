@@ -125,6 +125,7 @@ from personalos.domain.job_search import (
     authorize_execution,
 )
 from personalos.domain.models import ApplicationStatus, CommunicationEventClassification
+from personalos.domain.redaction import redact
 from personalos.domain.workflow import job_search_thread_id
 
 logger = logging.getLogger(__name__)
@@ -1151,7 +1152,13 @@ class JobSearchGraph:
                 refusals.append(refusal)
                 continue
 
-            receipts.append(await self.action_executor.execute(intent, decisions[intent.action_id]))
+            receipt = await self.action_executor.execute(intent, decisions[intent.action_id])
+            # The one point where what an executor did re-enters reasoning
+            # state. A receipt's `detail` is provider-authored text, and from
+            # here it is read by later nodes and may be shown to a model, so it
+            # is redacted before it becomes state rather than only on its way
+            # into a checkpoint.
+            receipts.append(redact(receipt))
 
         return {
             "action_receipts": [*(state.get("action_receipts") or []), *_dump(receipts)],

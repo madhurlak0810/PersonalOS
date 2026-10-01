@@ -120,7 +120,7 @@ handling. Every step is expressed as a `ToolIntent` and submitted to the
 gateway.
 
 - **May import:** `domain`, `policy`, `persistence`, `tools`, `events`, `state`,
-  `config`.
+  `config`, `secrets`.
 - **Must not:** import `personalos.mcp`, `mcp_servers`, or
   `personalos.tools.registry`. Must not construct its own gateway or reach for
   a global tool manager — the gateway is a required constructor argument.
@@ -222,6 +222,7 @@ It applies to the **reasoning layers** — `graphs`, `models`, `domain`,
 | `provider-sdk` | `googleapiclient`, `google.oauth2`, `gcsa`, `caldav`, `msal`, `jobspy`, `linkedin_api`, `mcp` | a provider client performs writes policy never saw |
 | `database` | `sqlalchemy`, `psycopg2`, `sqlite3`, `redis`, `celery`, `langgraph.checkpoint.postgres` | a raw DB/broker write is a transition nothing journals |
 | `network` | `httpx`, `requests`, `aiohttp`, `urllib.request`, `smtplib` | a bare HTTP or mail client is a hand-rolled provider SDK |
+| `secret-store` | `keyring`, `secretstorage`, `hvac` | a node that can read the keychain can put a refresh token in state |
 | `process` | `subprocess`, `os.system`, `os.exec*` | anything can happen, none of it as an intent |
 | `filesystem` | `shutil`, `tempfile`, `open(p, "w")`, `Path.write_text`/`mkdir`/`unlink`, `os.remove`/`makedirs`/`replace` | mutation belongs to an executor |
 | `llm-sdk` | `anthropic`, `langchain_anthropic`, `openai` | model clients live in `models` behind a port (exempt there) |
@@ -234,7 +235,7 @@ flagged; `open(p, mode)` with a non-literal mode is, because the check cannot
 show it is read-only.
 
 The check is also **transitive**. A reasoning module may not reach an effect
-layer (`persistence`, `tools`, `mcp`, `mcp_servers`, composition), or a
+layer (`persistence`, `tools`, `mcp`, `mcp_servers`, `secrets`, composition), or a
 non-reasoning module that breaks the rules above, through any chain of
 internal imports — except through `executor`, which is the sanctioned door
 because everything it does is dispatched through a `ToolGateway`. That closes
@@ -306,6 +307,18 @@ Durability lives here rather than in `graphs` because `graphs` may not import
   caller's contract does not change. The graph's own invariant is untouched:
   `execute_approved_actions` still decides *whether* to act, and the journal
   only decides whether the act has already happened.
+
+### `secrets` — `personalos/secrets/`
+
+Where long-lived credentials are at rest, and how they are traded for
+short-lived ones: `SecretStore` (the OS keychain, via `KeyringSecretStore`) and
+one `TokenExchanger` per provider.
+
+- **May import:** `domain`, `config`.
+- **Must not:** be imported by anything except `executor` and the composition
+  root. It is an effect layer for the intent-only boundary, so a graph or model
+  module reaching it — directly or through any chain of imports — fails the
+  check. See **Credentials and redaction** below.
 
 ### `mcp` — `personalos/mcp/`
 
@@ -537,6 +550,57 @@ exactly one of two racing monitors wins) and starts the graph path only if it
 won. It defers a thread already parked on an unanswered approval rather than
 stacking a second request on it.
 
+## Credentials and redaction
+
+Raw long-lived credentials — Gmail/Calendar OAuth refresh tokens, job-provider
+API keys, the OAuth client secret — must never reach model context, a LangGraph
+checkpoint, the pgvector store or an audit row. Two mechanisms, and the first
+is the one that matters:
+
+**1. Structure: a secret has no route into state.**
+
+| Thing | Lives in | Holds |
+| --- | --- | --- |
+| `CredentialRef` (`cred://google/alice@example.com`) | `domain`; `credentials` table; graph state if needed | a name. Safe everywhere |
+| the refresh token / API key | the OS keychain, via [`secrets/store.py`](../personalos/secrets/store.py) | the secret |
+| `AccessToken` | memory, inside the code making the provider call | a short-lived token |
+
+The `credentials` table has no column a token could go in, and
+`CredentialRepository.create` takes a `CredentialRef`, not a string.
+[`CredentialBroker`](../personalos/executor/credentials.py) is the only
+component that reads the secret store: it exchanges a reference for an
+`AccessToken` when asked, caches nothing, and caps the lifetime it reports. A
+tool implementation depends on the `AccessTokenProvider` port in `domain` and
+is handed the broker by `bootstrap`; it calls `exchange` (or `async with
+broker.lease(...)`) immediately before the provider call. A token is never an
+intent argument — arguments are fingerprinted, logged and checkpointed.
+
+`SecretValue` and `AccessToken` refuse to be pickled or copied and no
+serializer here can encode them, so one that strays into graph state fails the
+checkpoint write instead of being stored.
+
+**2. Redaction: for the routes structure cannot close.** A provider SDK that
+quotes its request headers in an exception produces an ordinary string, and
+ordinary strings go everywhere. So every sink redacts
+([`domain/redaction.py`](../personalos/domain/redaction.py)) before it writes:
+
+| Sink | Where |
+| --- | --- |
+| logs | `observability.log_redaction`, installed when `personalos` is imported |
+| traces | `observability.trace_redaction.RedactingSpanExporter`, wrapped around the exporter |
+| checkpoints | `SqlAlchemyCheckpointSaver.put` / `put_writes`, before serialization |
+| `audit_events`, `tool_executions`, `operations`, `event_log`, `outbox_events` | their repositories |
+| pgvector (`evidence_chunks.chunk_text`) | `EvidenceChunkRepository.create` |
+| tool results and errors on their way back to an executor | `MCPServer.execute`, `ToolResult.from_adapter_payload` |
+
+It removes `Authorization` and `Cookie` headers, OAuth codes, `key=value`
+secrets, well-known token shapes, and — the only rule that cannot miss — the
+exact value of every secret the broker has read or minted, which it registers
+with the redactor before using.
+
+Redaction is a backstop, not the boundary. Do not add a code path that relies
+on it; if a new sink persists free-form data, pass it through `redact` as well.
+
 ## Adding things
 
 **A new tool.** Implement it on an MCP server, then add its `server.tool` ref
@@ -563,6 +627,13 @@ preference: invert it with a port (define the interface in the lower layer, wire
 the implementation in `bootstrap`); move the code to the layer that owns the
 concern; or change the declared boundary here and in the spec, saying why. Do
 not add an exception for one import.
+
+**A tool that needs a credential.** Give its server an `AccessTokenProvider`
+constructor argument, bound in `bootstrap` to `build_credential_broker()`, and
+call `exchange(ref, scopes)` inside the handler. Store the reference with
+`CredentialRepository`; put the secret in the keychain with
+`build_secret_store().put(ref, SecretValue(...))`. Never accept a token as a
+tool argument.
 
 ## What the tests actually assert
 

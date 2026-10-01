@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     google_search_engine_id: str = ""
 
+    # Credentials. These name *where* secrets are, never the secrets: refresh
+    # tokens, API keys and the OAuth client secret live in the OS keychain
+    # under `secret_store_service`, filed by credential reference.
+    secret_store_service: str = "personalos"
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret_ref: str = "cred://google-oauth-client/default"
+
     # Application
     app_name: str = "PersonalOS"
     app_env: str = "development"

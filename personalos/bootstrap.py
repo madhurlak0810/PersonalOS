@@ -9,14 +9,17 @@ See ``docs/ARCHITECTURE_BOUNDARIES.md``.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from uuid import UUID
 
+from personalos.config import settings
+from personalos.domain.credentials import CredentialExchangeFailed, CredentialRef
 from personalos.domain.workflow import (
     WorkflowThread,
     job_search_thread_id,
     supervisor_thread_id,
 )
+from personalos.executor.credentials import CredentialBroker
 from personalos.executor.job_search import JobSearchExecutor
 from personalos.graphs.job_search import JobSearchSubgraphRunner
 from personalos.mcp.adapter import MCPToolInvoker
@@ -36,6 +39,12 @@ from personalos.persistence.pending_checkpoints import (
 from personalos.persistence.policy_log import SqlPolicyDecisionLog
 from personalos.persistence.repositories import JobRepository
 from personalos.policy import PolicyEngine, default_policy_engine
+from personalos.secrets.exchange import (
+    ApiKeyExchanger,
+    GoogleOAuthTokenExchanger,
+    TokenExchanger,
+)
+from personalos.secrets.store import KeyringSecretStore, SecretStore
 from personalos.tools.gateway import PolicyEnforcingToolGateway, ToolGateway
 
 logger = logging.getLogger(__name__)
@@ -106,6 +115,61 @@ def build_job_search_executor(
 ) -> JobSearchExecutor:
     """Build the job search executor with its policy-enforcing gateway."""
     return JobSearchExecutor(repo, gateway or build_tool_gateway(policy=policy))
+
+
+# --- Credentials --------------------------------------------------------------
+#
+# Long-lived secrets are in the OS keychain; the database holds references to
+# them. These builders are the only place the two are joined, and the broker
+# they produce is handed to things that *act* -- an MCP server's tool handler,
+# an action executor -- never to a graph or a model client.
+
+#: Provider name of the Google OAuth exchanger, as it appears in a
+#: `cred://google/<account>` reference. Gmail and Calendar share it.
+GOOGLE_PROVIDER = "google"
+
+#: Providers whose credential is a static API key rather than an OAuth grant.
+API_KEY_PROVIDERS: tuple[str, ...] = ("greenhouse", "lever", "jobs")
+
+
+def build_secret_store() -> SecretStore:
+    """Build the OS-keychain secret store.
+
+    Raises `SecretStoreUnavailable` when there is no protected backend. There
+    is no fallback to an in-memory or file store here, on purpose: a
+    deployment that cannot protect its refresh tokens should fail to start,
+    not start with them somewhere else.
+    """
+    return KeyringSecretStore(settings.secret_store_service)
+
+
+def build_credential_broker(
+    store: SecretStore | None = None,
+    exchangers: Mapping[str, TokenExchanger] | None = None,
+) -> CredentialBroker:
+    """Build the broker that exchanges credential references for access tokens.
+
+    With no `exchangers` given, wires an API-key lease for each job provider
+    and, when a Google OAuth client is configured, the Google exchanger. The
+    OAuth client secret is itself read from the secret store, by reference.
+    """
+    store = store or build_secret_store()
+    if exchangers is None:
+        wired: dict[str, TokenExchanger] = {
+            provider: ApiKeyExchanger() for provider in API_KEY_PROVIDERS
+        }
+        if settings.google_oauth_client_id:
+            client_ref = CredentialRef.parse(settings.google_oauth_client_secret_ref)
+            client_secret = store.get(client_ref)
+            if client_secret is None:
+                raise CredentialExchangeFailed(
+                    f"GOOGLE_OAUTH_CLIENT_ID is set but no client secret is stored at {client_ref}"
+                )
+            wired[GOOGLE_PROVIDER] = GoogleOAuthTokenExchanger(
+                settings.google_oauth_client_id, client_secret
+            )
+        exchangers = wired
+    return CredentialBroker(store, exchangers)
 
 
 def initialize_mcp_servers() -> MCPServerManager:
@@ -282,6 +346,10 @@ __all__ = [
     "build_policy_engine",
     "build_tool_gateway",
     "build_job_search_executor",
+    "GOOGLE_PROVIDER",
+    "API_KEY_PROVIDERS",
+    "build_secret_store",
+    "build_credential_broker",
     "initialize_mcp_servers",
     "build_workflow_thread_registry",
     "build_durable_checkpointer",

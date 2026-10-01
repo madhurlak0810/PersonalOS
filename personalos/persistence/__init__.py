@@ -27,6 +27,7 @@ from .models import (
     ApprovalModel,
     CheckpointModel,
     CheckpointWriteModel,
+    CredentialModel,
     EventModel,
     JobModel,
     OperationModel,
@@ -38,6 +39,7 @@ from .models import (
 )
 from .repositories import (
     CheckpointRepository,
+    CredentialRepository,
     JobRepository,
     OperationRepository,
     WorkflowRepository,
@@ -59,6 +61,7 @@ __all__ = [
     "WorkflowStepModel",
     "CheckpointModel",
     "CheckpointWriteModel",
+    "CredentialModel",
     "WorkflowLeaseModel",
     "ApprovalModel",
     "JobRepository",
@@ -66,6 +69,7 @@ __all__ = [
     "WorkflowRepository",
     "WorkflowRunRepository",
     "CheckpointRepository",
+    "CredentialRepository",
     "IdempotencyGuard",
     "IdempotencyError",
     "IdempotencyKeyReused",

@@ -69,6 +69,15 @@ LAYERS: tuple[Layer, ...] = (
         responsibility="stores and retrieves state; makes no decisions",
     ),
     Layer(
+        name="secrets",
+        modules=("personalos.secrets",),
+        allows=("domain", "config"),
+        responsibility=(
+            "holds long-lived credentials in the OS secret store and exchanges them for "
+            "short-lived tokens; reachable only from the executor's credential broker"
+        ),
+    ),
+    Layer(
         name="events",
         modules=("personalos.events",),
         allows=("domain",),
@@ -125,7 +134,16 @@ LAYERS: tuple[Layer, ...] = (
     Layer(
         name="executor",
         modules=("personalos.executor",),
-        allows=("domain", "policy", "persistence", "tools", "events", "state", "config"),
+        allows=(
+            "domain",
+            "policy",
+            "persistence",
+            "tools",
+            "events",
+            "state",
+            "config",
+            "secrets",
+        ),
         responsibility=(
             "runs approved intents step by step; cannot reach a tool adapter directly"
         ),

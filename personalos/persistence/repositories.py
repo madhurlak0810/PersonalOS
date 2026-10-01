@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from personalos.domain.context import ExecutionContext
+from personalos.domain.credentials import CredentialKind, CredentialRef
 from personalos.domain.models import (
     ApplicationStatus,
     Job,
@@ -20,6 +21,7 @@ from personalos.domain.models import (
     validate_application_status_transition,
     validate_evidence_links,
 )
+from personalos.domain.redaction import redact, redact_text
 from personalos.persistence.models import (
     ApplicationModel,
     ApplicationStatusViewModel,
@@ -28,6 +30,7 @@ from personalos.persistence.models import (
     CandidateProfileModel,
     CheckpointModel,
     CommunicationEventModel,
+    CredentialModel,
     EventLogModel,
     EvidenceChunkModel,
     JobModel,
@@ -256,7 +259,7 @@ class OperationRepository:
         db_op = self._require_row(idempotency_key)
         now = datetime.utcnow()
         db_op.status = OperationStatus.COMPLETED.value
-        db_op.result = result
+        db_op.result = redact(result)
         db_op.error = None
         db_op.updated_at = now
         db_op.completed_at = now
@@ -267,7 +270,7 @@ class OperationRepository:
         """Record a failed outcome, leaving the key available for retry."""
         db_op = self._require_row(idempotency_key)
         db_op.status = OperationStatus.FAILED.value
-        db_op.error = error
+        db_op.error = redact_text(error) if error else error
         db_op.updated_at = datetime.utcnow()
         self.session.commit()
         return self._to_domain(db_op)
@@ -728,7 +731,7 @@ class ToolExecutionRepository:
         db_execution = self._require_row(idempotency_key)
         now = datetime.utcnow()
         db_execution.status = ToolExecutionStatus.COMPLETED.value
-        db_execution.receipt_json = receipt
+        db_execution.receipt_json = redact(receipt)
         db_execution.error = None
         db_execution.updated_at = now
         db_execution.completed_at = now
@@ -739,7 +742,7 @@ class ToolExecutionRepository:
         """Record a failed outcome."""
         db_execution = self._require_row(idempotency_key)
         db_execution.status = ToolExecutionStatus.FAILED.value
-        db_execution.error = error
+        db_execution.error = redact_text(error) if error else error
         db_execution.updated_at = datetime.utcnow()
         self.session.commit()
         return db_execution
@@ -827,12 +830,16 @@ class AuditEventRepository:
         workflow_id: UUID | None = None,
         policy_decision: str | None = None,
     ) -> AuditEventModel:
-        """Append an audit event."""
+        """Append an audit event.
+
+        The free-text fields are redacted first. The trail is append-only, so
+        a credential written here could never be taken back out.
+        """
         db_event = AuditEventModel(
-            actor=actor,
+            actor=redact_text(actor),
             workflow_id=workflow_id,
-            action=action,
-            target_ref=target_ref,
+            action=redact_text(action),
+            target_ref=redact_text(target_ref),
             policy_decision=policy_decision,
             result=result,
         )
@@ -848,6 +855,87 @@ class AuditEventRepository:
             .order_by(AuditEventModel.timestamp)
             .all()
         )
+
+
+class CredentialRepository:
+    """Repository for credential *references*.
+
+    A row here says that a credential exists, whose it is and what it may be
+    used for. It cannot say what the credential is: `create` takes a
+    `CredentialRef`, not a string, and the table has no column a token could
+    be put in. The secret is in the OS secret store, filed under the reference
+    (see `personalos.secrets.store`).
+    """
+
+    def __init__(self, session: Session):
+        """Initialize with database session."""
+        self.session = session
+
+    def create(
+        self,
+        *,
+        ref: CredentialRef,
+        kind: CredentialKind,
+        user_id: UUID | None = None,
+        scopes: list[str] | None = None,
+    ) -> CredentialModel:
+        """Record that a credential exists. Raises `IntegrityError` on a duplicate ref."""
+        if not isinstance(ref, CredentialRef):
+            # Not coerced from a string on purpose: a caller holding a raw
+            # token and a caller holding a reference look identical as `str`.
+            raise TypeError("CredentialRepository.create requires a CredentialRef")
+        db_credential = CredentialModel(
+            user_id=user_id,
+            provider=ref.provider,
+            kind=CredentialKind(kind).value,
+            credential_ref=str(ref),
+            scopes=list(scopes or []),
+        )
+        self.session.add(db_credential)
+        self.session.commit()
+        return db_credential
+
+    def get_by_ref(self, ref: CredentialRef) -> CredentialModel | None:
+        """Get the row for a reference, if one was recorded."""
+        return (
+            self.session.query(CredentialModel)
+            .filter(CredentialModel.credential_ref == str(ref))
+            .first()
+        )
+
+    def list_for_user(
+        self, user_id: UUID, *, provider: str | None = None, active_only: bool = True
+    ) -> list[CredentialModel]:
+        """Every credential a user has connected, oldest first."""
+        query = self.session.query(CredentialModel).filter(CredentialModel.user_id == user_id)
+        if provider is not None:
+            query = query.filter(CredentialModel.provider == provider)
+        if active_only:
+            query = query.filter(CredentialModel.status == "active")
+        return query.order_by(CredentialModel.created_at, CredentialModel.credential_ref).all()
+
+    def mark_exchanged(self, ref: CredentialRef) -> CredentialModel:
+        """Record that a credential was just exchanged for an access token."""
+        db_credential = self._require_row(ref)
+        now = datetime.utcnow()
+        db_credential.last_exchanged_at = now
+        db_credential.updated_at = now
+        self.session.commit()
+        return db_credential
+
+    def revoke(self, ref: CredentialRef) -> CredentialModel:
+        """Mark a credential unusable. The caller deletes the secret itself."""
+        db_credential = self._require_row(ref)
+        db_credential.status = "revoked"
+        db_credential.updated_at = datetime.utcnow()
+        self.session.commit()
+        return db_credential
+
+    def _require_row(self, ref: CredentialRef) -> CredentialModel:
+        db_credential = self.get_by_ref(ref)
+        if not db_credential:
+            raise ValueError(f"Credential '{ref}' not found")
+        return db_credential
 
 
 class OutboxEventRepository:
@@ -881,7 +969,7 @@ class OutboxEventRepository:
         """Stage an outbox row. Raises `IntegrityError` on a duplicate `dedupe_key`."""
         db_event = OutboxEventModel(
             type=type,
-            payload_json=payload,
+            payload_json=redact(payload),
             dedupe_key=dedupe_key,
             status=OutboxEventStatus.PENDING.value,
         )
@@ -990,7 +1078,7 @@ class EventLogRepository:
             aggregate_type=aggregate_type,
             aggregate_id=aggregate_id,
             event_type=event_type,
-            payload_json=payload,
+            payload_json=redact(payload),
             occurred_at=occurred_at or datetime.utcnow(),
         )
         self.session.add(db_event)
@@ -1097,7 +1185,9 @@ class EvidenceChunkRepository:
             user_id=user_id,
             source_type=source_type,
             source_ref=source_ref,
-            chunk_text=chunk_text,
+            # Redacted before it reaches the vector store: retrieved chunks are
+            # pasted into model context verbatim.
+            chunk_text=redact_text(chunk_text),
             chunk_index=chunk_index,
             embedding=embedding,
             embedding_model=embedding_model,

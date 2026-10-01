@@ -20,7 +20,8 @@ and checks every file in those layers by AST:
    ``os.remove``, ``os.system`` and friends. Dynamic imports are refused too,
    because they cannot be checked.
 3. **Reach.** A reasoning module may not *transitively* reach an effect layer
-   (``persistence``, ``tools``, ``mcp``, ``mcp_servers``, composition) or a
+   (``persistence``, ``tools``, ``mcp``, ``mcp_servers``, ``secrets``,
+   composition) or a
    module that breaks rules 1-2, except through the executor layer, which is
    the sanctioned door. This closes routes the layer graph permits one hop at
    a time -- ``graphs -> state -> persistence``, for instance.
@@ -53,7 +54,14 @@ REASONING_LAYERS: tuple[str, ...] = ("graphs", "models", "domain", "policy", "ev
 
 #: Layers that hold real I/O. A reasoning module reaching one of these, other
 #: than through ``EXECUTION_LAYERS``, holds a side effect nobody approved.
-EFFECT_LAYERS: tuple[str, ...] = ("persistence", "tools", "mcp", "mcp_servers", "composition")
+EFFECT_LAYERS: tuple[str, ...] = (
+    "persistence",
+    "tools",
+    "mcp",
+    "mcp_servers",
+    "secrets",
+    "composition",
+)
 
 #: The sanctioned door. Reach analysis does not expand past it: an executor
 #: holds a ``ToolGateway``, which authorizes every intent before it runs.
@@ -149,6 +157,14 @@ SIDE_EFFECT_RULES: tuple[SideEffectRule, ...] = (
             "websockets",
         ),
         reason="a bare HTTP or mail client is a hand-rolled provider SDK",
+    ),
+    SideEffectRule(
+        category="secret-store",
+        modules=("keyring", "keyrings", "secretstorage", "jeepney", "hvac"),
+        reason=(
+            "a node that can read the keychain can put a refresh token in graph "
+            "state, and from there in a checkpoint or a prompt"
+        ),
     ),
     SideEffectRule(
         category="process",

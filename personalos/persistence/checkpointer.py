@@ -54,6 +54,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from personalos.domain.errors import NotFound, ValidationFailed
+from personalos.domain.redaction import Redactor, default_redactor
 from personalos.domain.workflow import WorkflowThread
 from personalos.persistence.models import (
     CheckpointModel,
@@ -330,6 +331,11 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):
     matter: state outlives the process, and a thread has to be registered
     (`WorkflowThreadRegistry.register`) before it may be written.
 
+    Everything written -- checkpoint, metadata and task writes -- goes through
+    a `Redactor` first. Credentials have no legitimate reason to be in graph
+    state (a node holds a `CredentialRef` at most), so this is a backstop for
+    the accidental route: a tool error that quoted its own request headers.
+
     The async methods run their synchronous bodies inline rather than handing
     them to a worker thread, which is a deliberate and slightly surprising
     choice. LangGraph submits each checkpoint write as a background task chained
@@ -348,11 +354,13 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):
         registry: WorkflowThreadRegistry | None = None,
         *,
         serde: Any = None,
+        redactor: Redactor | None = None,
     ):
         """Initialize with a session factory and the registry that resolves threads."""
         super().__init__(serde=serde)
         self.session_factory = session_factory
         self.registry = registry or WorkflowThreadRegistry(session_factory)
+        self.redactor = redactor or default_redactor()
 
     # ------------------------------------------------------------------
     # Reads
@@ -444,8 +452,13 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):
         parent_checkpoint_id = configurable.get("checkpoint_id")
         thread = self.registry.require(thread_id)
 
-        payload = _encode(self.serde, checkpoint)
-        stored_metadata = _jsonable_metadata(get_checkpoint_metadata(config, metadata))
+        # Redacted before it is serialized, not after: the serialized form is
+        # length-prefixed bytes, and a secret cannot be cut out of those
+        # without corrupting the checkpoint.
+        payload = _encode(self.serde, self.redactor.redact(checkpoint))
+        stored_metadata = self.redactor.redact(
+            _jsonable_metadata(get_checkpoint_metadata(config, metadata))
+        )
 
         session = self.session_factory()
         try:
@@ -511,6 +524,9 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):
         try:
             for position, (channel, value) in enumerate(writes):
                 idx = WRITES_IDX_MAP.get(channel, position)
+                # `__error__` writes are where a provider's exception text
+                # lands, which is the likeliest place for an echoed header.
+                value = self.redactor.redact(value)
                 existing = (
                     session.query(CheckpointWriteModel)
                     .filter(

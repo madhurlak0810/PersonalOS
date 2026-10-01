@@ -1156,6 +1156,68 @@ class AuditEventModel(Base):
         }
 
 
+# --- Credential references ---------------------------------------------------
+#
+# What the database knows about a credential: that it exists, whose it is,
+# which provider it is for and what it may be used for. It does not know the
+# credential. The refresh token or API key is in the OS secret store, filed
+# under `credential_ref`, and only the executor's credential broker reads it.
+
+
+class CredentialModel(Base):
+    """ORM model for a reference to a credential held in the OS secret store.
+
+    There is deliberately no column here that could hold a token. The
+    `credential_ref` check constraint is a tripwire rather than a guarantee --
+    the guarantee is `CredentialRepository.create` accepting only a
+    `CredentialRef` -- but it means a row written around the repository still
+    cannot put an arbitrary string where the reference goes.
+    """
+
+    __tablename__ = "credentials"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=True)
+    provider = Column(String(63), nullable=False)
+    kind = Column(
+        Enum("oauth_refresh_token", "api_key", "oauth_client_secret", name="credential_kind"),
+        nullable=False,
+    )
+    credential_ref = Column(String(300), nullable=False)
+    scopes = Column(JSON, nullable=False, default=list)
+    status = Column(
+        Enum("active", "revoked", name="credential_status"),
+        nullable=False,
+        default="active",
+    )
+    last_exchanged_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("credential_ref", name="uq_credentials_credential_ref"),
+        CheckConstraint("substr(credential_ref, 1, 7) = 'cred://'", name="ck_credentials_ref_is_reference"),
+        Index("ix_credentials_user_id", "user_id"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "user_id": str(self.user_id) if self.user_id else None,
+            "provider": self.provider,
+            "kind": self.kind,
+            "credential_ref": self.credential_ref,
+            "scopes": self.scopes,
+            "status": self.status,
+            "last_exchanged_at": (
+                self.last_exchanged_at.isoformat() if self.last_exchanged_at else None
+            ),
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
 # --- Transactional outbox, event log, and projections ------------------------
 #
 # `outbox_events` backs the transactional-outbox pattern: a row is written in
