@@ -612,8 +612,14 @@ checkpoint nobody resuming that workflow will find.
 | `checkpoint_writes` | Tasks that finished inside the in-flight step are recorded, so a resume replays only what never landed. |
 | [`action_journal.py`](personalos/persistence/action_journal.py) | Commits a claim on the action's `idempotency_key` immediately before the external call and the receipt immediately after. A resume that finds the receipt replays it; one that finds a claim with no receipt returns a not-ok receipt and does **not** call out again. |
 
+A deployment binds [`ToolExecutor`](personalos/executor/tool_executor.py)
+(`bootstrap.build_tool_executor`), which applies that rule and additionally
+records each action against the `policy_decisions` row that authorized it, in
+both `tool_executions` and `audit_events`, and can reconcile an unrecorded
+outcome against the provider before deciding whether to execute again.
+
 That last rule is the one with a cost: an action whose outcome is genuinely
-unknown needs a human rather than a retry. It is the only rule consistent with
+unknown needs a human rather than a retry, unless a reconciler can settle it. It is the only rule consistent with
 "a crash between those two points cannot produce a duplicate write on resume" —
 a duplicate application cannot be withdrawn, while a missed one can be
 resubmitted deliberately.

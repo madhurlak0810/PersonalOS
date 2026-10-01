@@ -99,6 +99,9 @@ class PolicyDecision(BaseModel):
     rule: str
     reason: str
     decided_at: datetime = Field(default_factory=datetime.utcnow)
+    #: Id of the decision-log row (``policy_decisions.id``) this verdict was
+    #: recorded as. ``None`` when the engine has no durable log wired.
+    record_id: UUID | None = None
 
     @property
     def allowed(self) -> bool:

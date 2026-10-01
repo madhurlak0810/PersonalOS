@@ -307,6 +307,10 @@ Durability lives here rather than in `graphs` because `graphs` may not import
   caller's contract does not change. The graph's own invariant is untouched:
   `execute_approved_actions` still decides *whether* to act, and the journal
   only decides whether the act has already happened.
+- **`ExecutionLedger`** groups the writes that describe one mutating action
+  into transactions: the claim on its own before the call, then the receipt,
+  the `audit_events` row and the outbox event together after it. It records and
+  decides nothing; `executor.tool_executor.ToolExecutor` drives it.
 
 ### `secrets` — `personalos/secrets/`
 
@@ -504,6 +508,35 @@ duplicate on resume. Two mechanisms, at two granularities:
    finds a claim with no receipt returns a not-ok receipt and does **not** call
    out again, because a duplicate application cannot be withdrawn while a missed
    one can be resubmitted deliberately.
+
+### The executor every mutating action goes through
+
+[`ToolExecutor`](../personalos/executor/tool_executor.py) is what a deployment
+binds as the graph's `ActionExecutor` (`bootstrap.build_tool_executor`). It
+applies the same at-most-once rule as the journal and adds the two things the
+journal cannot, because `persistence` may not import `policy`:
+
+1. **Policy first.** `PolicyEngine.evaluate_action` classifies the action and
+   commits its `policy_decisions` row. A denial raises `PolicyDenied`; a verdict
+   that needs approval raises `ApprovalRequired` unless the `ApprovalDecision`
+   authorizes exactly this intent.
+2. **Claim.** The `idempotency_key` is claimed in `tool_executions`
+   (`in_progress`), carrying the decision id, the approval reference and the
+   action's fingerprint, and committed.
+3. **Execute** against the provider.
+4. **Record.** Receipt and `completed`, the `audit_events` row, and an
+   `action.succeeded` outbox event, in one transaction.
+
+On a retry, a `completed` row returns its stored receipt and nothing is called.
+A row with no outcome becomes `unknown` and is put to a `ProviderReconciler`:
+found at the provider, its receipt is recorded; provably absent, it is executed
+again; undeterminable (or no reconciler wired), it comes back not-ok for a human.
+A key reused for a different action raises `IdempotencyConflict`.
+
+Every `audit_events` row written here carries `actor`, `workflow_id`, `action`,
+`target_ref`, `result`, `timestamp`, and `policy_decision_id` -- the verdict row
+the call was made under -- alongside the `operation_id` of its execution and
+the `approval_ref` it was redeemed with.
 
 `SqlAlchemyCheckpointSaver`'s async methods run inline rather than on a worker
 thread, and that is part of the guarantee rather than an oversight — see the

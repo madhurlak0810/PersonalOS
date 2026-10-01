@@ -40,8 +40,8 @@ class SqlPolicyDecisionLog:
         args_hash: str,
         decision: str,
         requested_scopes: list[str],
-    ) -> None:
-        """Insert and commit one decision row."""
+    ) -> UUID:
+        """Insert and commit one decision row, returning its id."""
         session = self.session_factory()
         try:
             # `policy_decisions.workflow_id` references `workflows`. A run that
@@ -55,13 +55,17 @@ class SqlPolicyDecisionLog:
                     "workflow %s is not registered; recording decision unlinked", workflow_id
                 )
                 workflow_id = None
-            PolicyDecisionRepository(session).create(
-                principal=principal,
-                workflow_id=workflow_id,
-                tool=tool,
-                args_hash=args_hash,
-                decision=decision,
-                requested_scopes=requested_scopes,
+            return (
+                PolicyDecisionRepository(session)
+                .create(
+                    principal=principal,
+                    workflow_id=workflow_id,
+                    tool=tool,
+                    args_hash=args_hash,
+                    decision=decision,
+                    requested_scopes=requested_scopes,
+                )
+                .id
             )
         finally:
             session.close()

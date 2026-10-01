@@ -21,6 +21,7 @@ from personalos.domain.workflow import (
 )
 from personalos.executor.credentials import CredentialBroker
 from personalos.executor.job_search import JobSearchExecutor
+from personalos.executor.tool_executor import ProviderReconciler, ToolExecutor
 from personalos.graphs.job_search import JobSearchSubgraphRunner
 from personalos.mcp.adapter import MCPToolInvoker
 from personalos.mcp.base import MCPServer
@@ -31,6 +32,7 @@ from personalos.persistence.checkpointer import (
     WorkflowThreadRegistry,
 )
 from personalos.persistence.database import SessionLocal
+from personalos.persistence.execution_ledger import ExecutionLedger
 from personalos.persistence.idempotency import OperationStore, SqlOperationStore
 from personalos.persistence.leases import DEFAULT_LEASE_TTL_SECONDS, WorkflowLeaseStore
 from personalos.persistence.pending_checkpoints import (
@@ -247,12 +249,41 @@ def build_journaled_action_executor(
 ) -> JournaledActionExecutor:
     """Wrap an `ActionExecutor` so a crash mid-action cannot double-submit.
 
-    Every `action_executor` handed to a `JobSearchGraph` in a real deployment
-    goes through this. The graph's approval node decides *whether* to act; this
-    decides whether the act has already happened -- see
-    `personalos.persistence.action_journal` for why the two are separate.
+    The graph's approval node decides *whether* to act; this decides whether
+    the act has already happened -- see `personalos.persistence.action_journal`
+    for why the two are separate. It journals and nothing more: a deployment
+    binds `build_tool_executor` instead, which adds the policy decision, the
+    audit trail and reconciliation on top of the same at-most-once rule.
     """
     return JournaledActionExecutor(inner, session_factory, workflow_id=workflow_id)
+
+
+def build_tool_executor(
+    inner: ActionExecutorPort,
+    session_factory: Callable[[], object] = SessionLocal,
+    *,
+    workflow_id: UUID | None = None,
+    policy: PolicyEngine | None = None,
+    reconciler: ProviderReconciler | None = None,
+) -> ToolExecutor:
+    """Wrap a provider adapter in the executor every mutating action goes through.
+
+    This is the `action_executor` a real deployment hands a `JobSearchGraph`.
+    Each action is authorized by the policy engine, claimed under its
+    idempotency key, executed at most once, and recorded in `tool_executions`
+    and `audit_events` against the `policy_decisions` row that cleared it.
+
+    `policy` defaults to the engine backed by `policy_decisions` on the same
+    database, so the decision an audit row cites is a row that exists. Pass a
+    `reconciler` for a provider that can be asked whether an action landed;
+    without one, an action whose outcome was never recorded is never retried.
+    """
+    return ToolExecutor(
+        inner,
+        policy or build_policy_engine(session_factory),
+        ExecutionLedger(session_factory, workflow_id=workflow_id),
+        reconciler=reconciler,
+    )
 
 
 def build_pending_checkpoint_store(
@@ -376,6 +407,7 @@ __all__ = [
     "build_durable_checkpointer",
     "build_workflow_lease_store",
     "build_journaled_action_executor",
+    "build_tool_executor",
     "build_pending_checkpoint_store",
     "build_pending_checkpoint_scheduler",
     "register_job_search_thread",

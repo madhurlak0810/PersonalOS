@@ -1041,6 +1041,12 @@ class ToolExecutionModel(Base):
     on `idempotency_key` is the dedup primitive a retried call relies on to
     get back the stored `receipt_json` instead of re-executing -- but scoped
     to a specific tool and workflow run rather than the generic operation log.
+
+    `policy_decision_id`, `approval_ref` and `approved_by` tie the execution
+    back to what authorized it: the verdict row the policy engine wrote before
+    the call, and the human approval that verdict was redeemed with, if any.
+    `request_fingerprint` is the hash of the side effect the key was claimed
+    for, so a key reused for a different action is rejected, not replayed.
     """
 
     __tablename__ = "tool_executions"
@@ -1050,10 +1056,15 @@ class ToolExecutionModel(Base):
     tool_name = Column(String(255), nullable=False)
     idempotency_key = Column(String(255), nullable=False, unique=True)
     status = Column(
-        Enum("in_progress", "completed", "failed", name="tool_execution_status"),
+        Enum("in_progress", "completed", "failed", "unknown", name="tool_execution_status"),
         nullable=False,
         default="in_progress",
     )
+    request_fingerprint = Column(String(64), nullable=True)
+    policy_decision_id = Column(GUID(), ForeignKey("policy_decisions.id"), nullable=True)
+    approval_ref = Column(String(255), nullable=True)
+    approved_by = Column(String(255), nullable=True)
+    attempts = Column(Integer, nullable=False, default=1, server_default="1")
     receipt_json = Column(JSON, nullable=True)
     error = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -1070,6 +1081,13 @@ class ToolExecutionModel(Base):
             "tool_name": self.tool_name,
             "idempotency_key": self.idempotency_key,
             "status": self.status,
+            "request_fingerprint": self.request_fingerprint,
+            "policy_decision_id": str(self.policy_decision_id)
+            if self.policy_decision_id
+            else None,
+            "approval_ref": self.approval_ref,
+            "approved_by": self.approved_by,
+            "attempts": self.attempts,
             "receipt_json": self.receipt_json,
             "error": self.error,
             "created_at": self.created_at.isoformat(),
@@ -1137,10 +1155,18 @@ class AuditEventModel(Base):
     # shared enum type, so this row stays a stable historical record even if
     # `policy_decisions` or its vocabulary changes later.
     policy_decision = Column(String(32), nullable=True)
+    # The verdict row itself, and the execution it authorized. The snapshot
+    # above says what was decided; these say which decision and which call.
+    policy_decision_id = Column(GUID(), ForeignKey("policy_decisions.id"), nullable=True)
+    operation_id = Column(GUID(), ForeignKey("tool_executions.operation_id"), nullable=True)
+    approval_ref = Column(String(255), nullable=True)
     result = Column(Enum("success", "failure", name="audit_event_result"), nullable=False)
     timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
 
-    __table_args__ = (Index("ix_audit_events_workflow_id", "workflow_id"),)
+    __table_args__ = (
+        Index("ix_audit_events_workflow_id", "workflow_id"),
+        Index("ix_audit_events_operation_id", "operation_id"),
+    )
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -1151,6 +1177,11 @@ class AuditEventModel(Base):
             "action": self.action,
             "target_ref": self.target_ref,
             "policy_decision": self.policy_decision,
+            "policy_decision_id": str(self.policy_decision_id)
+            if self.policy_decision_id
+            else None,
+            "operation_id": str(self.operation_id) if self.operation_id else None,
+            "approval_ref": self.approval_ref,
             "result": self.result,
             "timestamp": self.timestamp.isoformat(),
         }

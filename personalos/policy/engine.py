@@ -12,7 +12,7 @@ outcome the record of it already exists.
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from personalos.policy.errors import ApprovalRequired, PolicyDenied
 from personalos.policy.intents import (
@@ -53,6 +53,10 @@ class PolicyDecisionLog(Protocol):
     ``record`` must not return until the row is durable. The engine calls it
     before handing back an outcome, and lets its exceptions propagate: an
     action whose decision could not be recorded does not get an outcome at all.
+
+    It returns the id of the row it wrote, which the engine puts on the
+    decision as ``record_id`` so whatever executes the action can cite the
+    exact verdict that authorized it.
     """
 
     def record(
@@ -64,8 +68,8 @@ class PolicyDecisionLog(Protocol):
         args_hash: str,
         decision: str,
         requested_scopes: list[str],
-    ) -> None:
-        """Persist one verdict."""
+    ) -> UUID | None:
+        """Persist one verdict and return the id it was stored under."""
         ...
 
 
@@ -74,9 +78,11 @@ class PolicyEngine:
 
     Two entry points share one verdict and one decision log:
 
-    ``evaluate``
-        Classifies an action from its identity alone -- principal, tool,
+    ``evaluate`` / ``evaluate_action``
+        Classify an action from its identity alone -- principal, tool,
         scopes, provenance -- using the tool's :class:`PermissionClass`.
+        ``evaluate_action`` returns the full recorded decision rather than
+        just its outcome.
 
     ``evaluate_intent`` / ``authorize``
         Additionally run the rule chain over a full :class:`ToolIntent`. The
@@ -128,8 +134,32 @@ class PolicyEngine:
         ``tool`` is the fully-qualified ``server.tool`` reference. The verdict
         is written to the decision log before it is returned, whatever it is.
         """
+        return self.evaluate_action(
+            principal, workflow_id, tool, args_hash, requested_scopes, provenance
+        ).decision
+
+    def evaluate_action(
+        self,
+        principal: str,
+        workflow_id: UUID | None,
+        tool: str,
+        args_hash: str,
+        requested_scopes: Sequence[str],
+        provenance: Provenance,
+        *,
+        action_id: UUID | None = None,
+    ) -> PolicyDecision:
+        """Like ``evaluate``, but return the recorded decision itself.
+
+        For callers that go on to act on the verdict and have to cite it: the
+        returned decision carries the ``record_id`` of its decision-log row.
+        ``action_id`` identifies the proposed action the way ``intent_id``
+        does for a :class:`ToolIntent`.
+        """
         decision, rule, reason = self._classify(tool, requested_scopes, provenance)
-        self._persist(principal, workflow_id, tool, args_hash, decision, requested_scopes)
+        record_id = self._persist(
+            principal, workflow_id, tool, args_hash, decision, requested_scopes
+        )
         logger.info(
             "policy %s %s (rule=%s, origin=%s, requested_by=%s, principal=%s, "
             "workflow_id=%s): %s",
@@ -142,7 +172,14 @@ class PolicyEngine:
             workflow_id,
             reason,
         )
-        return decision
+        return PolicyDecision(
+            intent_id=action_id or uuid4(),
+            tool_ref=tool,
+            decision=decision,
+            rule=rule,
+            reason=reason,
+            record_id=record_id,
+        )
 
     def evaluate_intent(self, intent: ToolIntent) -> PolicyDecision:
         """Reach a verdict on an intent without acting on it."""
@@ -275,11 +312,11 @@ class PolicyEngine:
         args_hash: str,
         decision: Decision,
         requested_scopes: Sequence[str],
-    ) -> None:
+    ) -> UUID | None:
         """Write the verdict to the decision log. Failures propagate."""
         if self.decision_log is None:
-            return
-        self.decision_log.record(
+            return None
+        return self.decision_log.record(
             principal=principal,
             workflow_id=workflow_id,
             tool=tool,
@@ -290,7 +327,7 @@ class PolicyEngine:
 
     def _record(self, intent: ToolIntent, decision: PolicyDecision) -> PolicyDecision:
         """Persist the decision, log it, and hand it to the audit sink."""
-        self._persist(
+        record_id = self._persist(
             intent.context.actor_id,
             intent.context.workflow_id,
             intent.tool_ref,
@@ -298,6 +335,7 @@ class PolicyEngine:
             decision.decision,
             self._declared_scopes(intent.tool_ref),
         )
+        decision = decision.model_copy(update={"record_id": record_id})
         logger.info(
             "policy %s %s (rule=%s, origin=%s, requested_by=%s, %s): %s",
             decision.decision.value,
