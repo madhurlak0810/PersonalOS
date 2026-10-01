@@ -696,6 +696,11 @@ class ToolExecutionRepository:
         idempotency_key: str,
         tool_name: str,
         workflow_id: UUID | None = None,
+        *,
+        request_fingerprint: str | None = None,
+        policy_decision_id: UUID | None = None,
+        approval_ref: str | None = None,
+        approved_by: str | None = None,
     ) -> tuple[ToolExecutionModel, bool]:
         """Claim an idempotency key for a tool call.
 
@@ -703,6 +708,10 @@ class ToolExecutionRepository:
         execution and must call `complete` or `fail`. When False, a record for
         this key already exists -- if completed, its `receipt_json` should be
         replayed instead of running the tool again.
+
+        The keyword arguments record what authorized the call. They are
+        written only by the attempt that wins the claim: an existing row keeps
+        the decision it was originally executed under.
         """
         existing = self._row_for_key(idempotency_key)
         if existing is not None:
@@ -713,6 +722,10 @@ class ToolExecutionRepository:
             tool_name=tool_name,
             idempotency_key=idempotency_key,
             status=ToolExecutionStatus.IN_PROGRESS.value,
+            request_fingerprint=request_fingerprint,
+            policy_decision_id=policy_decision_id,
+            approval_ref=redact_text(approval_ref) if approval_ref else approval_ref,
+            approved_by=redact_text(approved_by) if approved_by else approved_by,
         )
         self.session.add(db_execution)
         try:
@@ -726,8 +739,14 @@ class ToolExecutionRepository:
             return winner, False
         return db_execution, True
 
-    def complete(self, idempotency_key: str, receipt: dict[str, Any]) -> ToolExecutionModel:
-        """Record a successful outcome so a retried call replays `receipt`."""
+    def complete(
+        self, idempotency_key: str, receipt: dict[str, Any], *, commit: bool = True
+    ) -> ToolExecutionModel:
+        """Record a successful outcome so a retried call replays `receipt`.
+
+        `commit=False` stages the change so the caller can commit it together
+        with the audit row and outbox event describing the same outcome.
+        """
         db_execution = self._require_row(idempotency_key)
         now = datetime.utcnow()
         db_execution.status = ToolExecutionStatus.COMPLETED.value
@@ -735,21 +754,93 @@ class ToolExecutionRepository:
         db_execution.error = None
         db_execution.updated_at = now
         db_execution.completed_at = now
-        self.session.commit()
+        self._finish(commit)
         return db_execution
 
-    def fail(self, idempotency_key: str, error: str) -> ToolExecutionModel:
+    def fail(
+        self, idempotency_key: str, error: str, *, commit: bool = True
+    ) -> ToolExecutionModel:
         """Record a failed outcome."""
         db_execution = self._require_row(idempotency_key)
         db_execution.status = ToolExecutionStatus.FAILED.value
         db_execution.error = redact_text(error) if error else error
         db_execution.updated_at = datetime.utcnow()
-        self.session.commit()
+        self._finish(commit)
         return db_execution
+
+    def mark_unknown(self, idempotency_key: str) -> bool:
+        """Flag an execution with no recorded outcome as in doubt.
+
+        True when the row is now `unknown` (including when it already was).
+        A completed row is never touched: its outcome is known.
+        """
+        self.session.query(ToolExecutionModel).filter(
+            ToolExecutionModel.idempotency_key == idempotency_key,
+            ToolExecutionModel.status.in_(
+                [ToolExecutionStatus.IN_PROGRESS.value, ToolExecutionStatus.FAILED.value]
+            ),
+        ).update(
+            {
+                ToolExecutionModel.status: ToolExecutionStatus.UNKNOWN.value,
+                ToolExecutionModel.updated_at: datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
+        self.session.commit()
+        row = self._row_for_key(idempotency_key)
+        return row is not None and row.status == ToolExecutionStatus.UNKNOWN.value
+
+    def reclaim(
+        self,
+        idempotency_key: str,
+        *,
+        policy_decision_id: UUID | None = None,
+        approval_ref: str | None = None,
+        approved_by: str | None = None,
+    ) -> bool:
+        """Take an `unknown` execution back for another attempt.
+
+        Only for a row the provider has confirmed never took effect. The
+        update is conditional on the row still being `unknown`, so of two
+        callers that both reconciled it, one re-executes and the other does
+        not. The authorizing decision is replaced with the one this attempt
+        runs under, since that is the decision the new call is made on.
+        """
+        updated = (
+            self.session.query(ToolExecutionModel)
+            .filter(
+                ToolExecutionModel.idempotency_key == idempotency_key,
+                ToolExecutionModel.status == ToolExecutionStatus.UNKNOWN.value,
+            )
+            .update(
+                {
+                    ToolExecutionModel.status: ToolExecutionStatus.IN_PROGRESS.value,
+                    ToolExecutionModel.attempts: ToolExecutionModel.attempts + 1,
+                    ToolExecutionModel.error: None,
+                    ToolExecutionModel.policy_decision_id: policy_decision_id,
+                    ToolExecutionModel.approval_ref: (
+                        redact_text(approval_ref) if approval_ref else approval_ref
+                    ),
+                    ToolExecutionModel.approved_by: (
+                        redact_text(approved_by) if approved_by else approved_by
+                    ),
+                    ToolExecutionModel.updated_at: datetime.utcnow(),
+                },
+                synchronize_session=False,
+            )
+        )
+        self.session.commit()
+        return updated == 1
 
     def get_by_key(self, idempotency_key: str) -> ToolExecutionModel | None:
         """Get the tool execution recorded under an idempotency key, if any."""
         return self._row_for_key(idempotency_key)
+
+    def _finish(self, commit: bool) -> None:
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
 
     def _row_for_key(self, idempotency_key: str) -> ToolExecutionModel | None:
         return (
@@ -799,6 +890,14 @@ class PolicyDecisionRepository:
         self.session.commit()
         return db_decision
 
+    def get_by_id(self, decision_id: UUID) -> PolicyDecisionModel | None:
+        """Get one recorded policy decision, if it exists."""
+        return (
+            self.session.query(PolicyDecisionModel)
+            .filter(PolicyDecisionModel.id == decision_id)
+            .first()
+        )
+
     def get_by_workflow_id(self, workflow_id: UUID) -> list[PolicyDecisionModel]:
         """Get every policy decision recorded for a workflow run."""
         return (
@@ -829,11 +928,18 @@ class AuditEventRepository:
         result: str,
         workflow_id: UUID | None = None,
         policy_decision: str | None = None,
+        policy_decision_id: UUID | None = None,
+        operation_id: UUID | None = None,
+        approval_ref: str | None = None,
+        commit: bool = True,
     ) -> AuditEventModel:
         """Append an audit event.
 
         The free-text fields are redacted first. The trail is append-only, so
         a credential written here could never be taken back out.
+
+        `commit=False` stages the row so it lands in the same transaction as
+        the outcome it describes.
         """
         db_event = AuditEventModel(
             actor=redact_text(actor),
@@ -841,11 +947,26 @@ class AuditEventRepository:
             action=redact_text(action),
             target_ref=redact_text(target_ref),
             policy_decision=policy_decision,
+            policy_decision_id=policy_decision_id,
+            operation_id=operation_id,
+            approval_ref=redact_text(approval_ref) if approval_ref else approval_ref,
             result=result,
         )
         self.session.add(db_event)
-        self.session.commit()
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
         return db_event
+
+    def get_by_operation_id(self, operation_id: UUID) -> list[AuditEventModel]:
+        """Get every audit event recorded for one tool execution, oldest first."""
+        return (
+            self.session.query(AuditEventModel)
+            .filter(AuditEventModel.operation_id == operation_id)
+            .order_by(AuditEventModel.timestamp)
+            .all()
+        )
 
     def get_by_workflow_id(self, workflow_id: UUID) -> list[AuditEventModel]:
         """Get every audit event recorded for a workflow run, oldest first."""

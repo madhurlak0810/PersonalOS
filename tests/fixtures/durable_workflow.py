@@ -270,6 +270,7 @@ def build_graph(
     checkpoint_scheduler: Any = None,
     recruiter_inbox: Any = None,
     recruiter_classifier: Any = None,
+    wrap_executor: Callable[[Any], Any] | None = None,
 ):
     """Compile the Job Search subgraph on a durable checkpointer, with logging ports.
 
@@ -285,12 +286,18 @@ def build_graph(
     `checkpoint_scheduler` and the recruiter pair are left unwired unless a test
     passes them: the pending-checkpoint tests need the recruiter branch to run
     (it is what schedules a durable wait), and the crash tests need it not to.
+
+    `wrap_executor` replaces the journal with whatever the test wraps the
+    recording provider in -- a `ToolExecutor`, for the tests about the full
+    policy/audit flow.
     """
     from personalos.graphs.job_search import JobSearchGraph
 
     registry = registry or WorkflowThreadRegistry(factory)
     executor: Any = RecordingActionExecutor(log, die_after=(kill_at == KILL_AT_AFTER_SUBMISSION))
-    if journal:
+    if wrap_executor is not None:
+        executor = wrap_executor(executor)
+    elif journal:
         executor = JournaledActionExecutor(executor, factory, workflow_id=workflow_id)
 
     gate: Any = (

@@ -488,6 +488,10 @@ class ToolExecutionStatus(str, Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    #: A previous attempt claimed the key and left no outcome, so the action
+    #: may or may not have taken effect. Not retryable on its own: it has to
+    #: be reconciled against the provider first.
+    UNKNOWN = "unknown"
 
 
 class PolicyDecisionOutcome(str, Enum):
