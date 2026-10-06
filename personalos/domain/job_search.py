@@ -29,20 +29,21 @@ import hashlib
 import json
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime, timedelta
 from enum import Enum
 from types import MappingProxyType
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from personalos.domain.errors import ValidationFailed
 from personalos.domain.models import (
     ApplicationStatus,
     ArtifactType,
     CommunicationEventClassification,
+    EvidenceSourceType,
     validate_evidence_links,
     validate_idempotency_key,
 )
@@ -138,6 +139,36 @@ def canonical_company(name: str) -> str:
 # --- Search profile ----------------------------------------------------------
 
 
+class SeniorityLevel(str, Enum):
+    """Career level of a role, in ascending order.
+
+    Ordered so "how far is this posting from what the candidate wants" is a
+    subtraction (see `rank`) rather than a table of pairs.
+    """
+
+    INTERN = "intern"
+    JUNIOR = "junior"
+    MID = "mid"
+    SENIOR = "senior"
+    STAFF = "staff"
+    PRINCIPAL = "principal"
+
+    @property
+    def rank(self) -> int:
+        """Position in the ladder, lowest first."""
+        return list(SeniorityLevel).index(self)
+
+
+class EmploymentType(str, Enum):
+    """The kind of engagement a posting offers."""
+
+    FULL_TIME = "full_time"
+    PART_TIME = "part_time"
+    CONTRACT = "contract"
+    INTERNSHIP = "internship"
+    TEMPORARY = "temporary"
+
+
 class SearchProfile(_Value):
     """What the candidate is looking for, as `load_search_profile` resolved it.
 
@@ -154,6 +185,10 @@ class SearchProfile(_Value):
     keywords: tuple[str, ...] = ()
     must_have_skills: tuple[str, ...] = ()
     excluded_companies: tuple[str, ...] = ()
+    #: Levels and engagement types the candidate will accept. Empty means no
+    #: preference was stated, which is not the same as accepting none.
+    seniority_levels: tuple[SeniorityLevel, ...] = ()
+    employment_types: tuple[EmploymentType, ...] = ()
     salary_min: int | None = None
     salary_max: int | None = None
     remote_only: bool = False
@@ -292,6 +327,306 @@ class FilterRejection(_Value):
     reason: str
 
 
+# --- Match assessment and gap analysis ---------------------------------------
+
+
+class EvidenceRecord(_Value):
+    """One citable piece of the candidate's own record: a resume or project chunk.
+
+    `evidence_id` is the only handle a match may cite. Everything that says
+    "the candidate has done X" downstream resolves to one of these or is
+    dropped (see `ground_assessment`).
+    """
+
+    evidence_id: str
+    source_type: EvidenceSourceType
+    source_ref: str | None = None
+    text: str
+
+    @field_validator("evidence_id", "text")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise JobSearchContractError("an evidence record needs a non-blank id and text")
+        return value
+
+
+class Recommendation(str, Enum):
+    """What the run advises doing with one posting."""
+
+    APPLY = "APPLY"
+    MAYBE = "MAYBE"
+    SKIP = "SKIP"
+
+
+class MatchStrength(str, Enum):
+    """How well a cited piece of evidence supports a requirement."""
+
+    STRONG = "strong"
+    PARTIAL = "partial"
+    WEAK = "weak"
+
+
+class GapSeverity(str, Enum):
+    """How much a missing requirement costs the application."""
+
+    BLOCKING = "blocking"
+    MAJOR = "major"
+    MINOR = "minor"
+
+
+class MatchedRequirement(_Value):
+    """A posting requirement the candidate meets, and the record that proves it.
+
+    `evidence_id` is required and non-blank: a match that cites nothing is a
+    claim about the candidate with no source, which is exactly what gap
+    analysis must not produce.
+    """
+
+    requirement: str
+    evidence_id: str
+    evidence_type: EvidenceSourceType
+    strength: MatchStrength
+    rationale: str | None = None
+
+    @field_validator("requirement", "evidence_id")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise JobSearchContractError(
+                "a matched requirement must name the requirement and cite an evidence_id"
+            )
+        return value
+
+
+class MissingRequirement(_Value):
+    """A posting requirement nothing in the candidate's record supports."""
+
+    requirement: str
+    severity: GapSeverity
+    note: str | None = None
+
+    @field_validator("requirement")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise JobSearchContractError("a missing requirement must name the requirement")
+        return value
+
+
+class TailoringSuggestion(_Value):
+    """One way to present the candidate's existing record for this posting.
+
+    `evidence_id` is optional because some advice is about a gap ("address the
+    missing Go experience up front") rather than about a record. When it is
+    set it must resolve, like any other citation.
+    """
+
+    suggestion: str
+    evidence_id: str | None = None
+
+
+class ClaimedMatch(_Value):
+    """A match as a model asserted it, before anything has checked the citation.
+
+    The untrusted counterpart of `MatchedRequirement`: `evidence_id` is
+    optional here so a model that cites nothing still produces a parseable
+    assessment, which `ground_assessment` then demotes instead of the whole
+    posting failing to score.
+    """
+
+    requirement: str
+    evidence_id: str | None = None
+    strength: MatchStrength = MatchStrength.PARTIAL
+    rationale: str | None = None
+
+
+class SemanticAssessment(_Value):
+    """A model's structured read of one posting against the candidate's record.
+
+    Model output, and therefore a set of claims rather than facts. Nothing
+    reads it directly: it becomes a `GroundedAssessment` first.
+    """
+
+    matched_requirements: tuple[ClaimedMatch, ...] = ()
+    missing_requirements: tuple[MissingRequirement, ...] = ()
+    risks: tuple[str, ...] = ()
+    tailoring_suggestions: tuple[TailoringSuggestion, ...] = ()
+
+
+class GroundedAssessment(_Value):
+    """A `SemanticAssessment` with every citation resolved against real records."""
+
+    matched_requirements: tuple[MatchedRequirement, ...] = ()
+    missing_requirements: tuple[MissingRequirement, ...] = ()
+    risks: tuple[str, ...] = ()
+    tailoring_suggestions: tuple[TailoringSuggestion, ...] = ()
+    #: Requirements the model claimed as met without citing a real record.
+    ungrounded_claims: tuple[str, ...] = ()
+
+
+#: Severity given to a claimed match whose citation did not resolve. Not
+#: BLOCKING, because the candidate may well have the experience -- it is only
+#: unproven -- and not MINOR, because an unproven claim must cost something.
+UNGROUNDED_CLAIM_SEVERITY = GapSeverity.MAJOR
+
+
+def ground_assessment(
+    assessment: SemanticAssessment, evidence: Sequence[EvidenceRecord]
+) -> GroundedAssessment:
+    """Keep only the claims that cite a record the candidate actually has.
+
+    The one place model output turns into statements about the candidate. A
+    claimed match with no `evidence_id`, or one naming an id that is not in
+    `evidence`, is moved to `missing_requirements` and listed in
+    `ungrounded_claims`; a tailoring suggestion citing an unknown id is
+    dropped. The evidence type is read from the record, never from the model.
+    """
+    records = {record.evidence_id: record for record in evidence}
+
+    matched: list[MatchedRequirement] = []
+    missing = [gap for gap in assessment.missing_requirements if gap.requirement.strip()]
+    ungrounded: list[str] = []
+    for claim in assessment.matched_requirements:
+        if not claim.requirement.strip():
+            continue
+        record = records.get(claim.evidence_id) if claim.evidence_id else None
+        if record is None:
+            ungrounded.append(claim.requirement)
+            missing.append(
+                MissingRequirement(
+                    requirement=claim.requirement,
+                    severity=UNGROUNDED_CLAIM_SEVERITY,
+                    note="claimed as met, but no resume or project record supports it",
+                )
+            )
+            continue
+        matched.append(
+            MatchedRequirement(
+                requirement=claim.requirement,
+                evidence_id=record.evidence_id,
+                evidence_type=record.source_type,
+                strength=claim.strength,
+                rationale=claim.rationale,
+            )
+        )
+
+    suggestions = tuple(
+        item
+        for item in assessment.tailoring_suggestions
+        if item.suggestion.strip() and (item.evidence_id is None or item.evidence_id in records)
+    )
+    return GroundedAssessment(
+        matched_requirements=tuple(matched),
+        missing_requirements=tuple(missing),
+        risks=tuple(risk for risk in assessment.risks if risk.strip()),
+        tailoring_suggestions=suggestions,
+        ungrounded_claims=tuple(ungrounded),
+    )
+
+
+class ConstraintStatus(str, Enum):
+    """Whether a posting satisfies one of the candidate's hard constraints."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    #: The posting does not say. Never treated as a failure.
+    UNKNOWN = "unknown"
+
+
+class ConstraintEffect(str, Enum):
+    """What a failed hard constraint does to the posting's score."""
+
+    NONE = "none"
+    #: The score may not exceed `ConstraintResult.cap`.
+    CAP = "cap"
+    #: The score is zero and the recommendation is SKIP.
+    REJECT = "reject"
+
+
+class ConstraintResult(_Value):
+    """The outcome of one hard-constraint check, with the effect it carries."""
+
+    name: str
+    status: ConstraintStatus
+    effect: ConstraintEffect = ConstraintEffect.NONE
+    cap: float | None = Field(default=None, ge=0.0, le=1.0)
+    detail: str
+
+    @model_validator(mode="after")
+    def _effect_is_consistent(self) -> "ConstraintResult":
+        if self.effect != ConstraintEffect.NONE and self.status != ConstraintStatus.FAILED:
+            raise JobSearchContractError(
+                f"constraint '{self.name}' carries effect '{self.effect.value}' without failing"
+            )
+        if (self.effect == ConstraintEffect.CAP) != (self.cap is not None):
+            raise JobSearchContractError(
+                f"constraint '{self.name}': a cap is set exactly when the effect is 'cap'"
+            )
+        return self
+
+
+class JobMatch(_Value):
+    """The scored, explained verdict on one posting for one candidate.
+
+    `components` and `weights` are the arithmetic behind `weighted_score`;
+    `constraints` is what may then have lowered it to `score`. The validator
+    holds the two together, so a match that claims a high score past a failed
+    hard constraint cannot be constructed at all.
+    """
+
+    dedupe_key: str
+    score: float = Field(ge=0.0, le=1.0)
+    recommendation: Recommendation
+    matched_requirements: tuple[MatchedRequirement, ...] = ()
+    missing_requirements: tuple[MissingRequirement, ...] = ()
+    risks: tuple[str, ...] = ()
+    tailoring_suggestions: tuple[TailoringSuggestion, ...] = ()
+    #: The weighted sum of `components`, before any constraint was applied.
+    weighted_score: float = Field(ge=0.0, le=1.0)
+    components: dict[str, float] = Field(default_factory=dict)
+    weights: dict[str, float] = Field(default_factory=dict)
+    constraints: tuple[ConstraintResult, ...] = ()
+    ungrounded_claims: tuple[str, ...] = ()
+    reasons: tuple[str, ...] = ()
+
+    @property
+    def rejected(self) -> bool:
+        """True when a failed hard constraint rejects this posting outright."""
+        return any(item.effect == ConstraintEffect.REJECT for item in self.constraints)
+
+    @property
+    def cap(self) -> float | None:
+        """The lowest score ceiling any failed constraint imposes, if any."""
+        caps = [item.cap for item in self.constraints if item.cap is not None]
+        return min(caps) if caps else None
+
+    @model_validator(mode="after")
+    def _constraints_bind_the_score(self) -> "JobMatch":
+        if self.rejected and (self.score != 0.0 or self.recommendation != Recommendation.SKIP):
+            raise JobSearchContractError(
+                "a posting rejected by a hard constraint must score 0.0 and be SKIP"
+            )
+        cap = self.cap
+        if cap is not None and self.score > cap:
+            raise JobSearchContractError(
+                f"score {self.score} exceeds the cap {cap} a failed hard constraint imposes"
+            )
+        if self.score > self.weighted_score:
+            raise JobSearchContractError("constraints may lower a score, never raise it")
+        return self
+
+    def ensure_grounded_in(self, evidence_ids: Collection[str]) -> None:
+        """Raise unless every citation names a record in `evidence_ids`."""
+        cited = [item.evidence_id for item in self.matched_requirements]
+        cited += [item.evidence_id for item in self.tailoring_suggestions if item.evidence_id]
+        unknown = sorted({ref for ref in cited if ref not in evidence_ids})
+        if unknown:
+            raise JobSearchContractError(
+                f"job match cites evidence that is not on record: {', '.join(unknown)}"
+            )
+
+
 class ScoredPosting(_Value):
     """A posting with its match score and the components behind it.
 
@@ -304,6 +639,9 @@ class ScoredPosting(_Value):
     score: float = Field(ge=0.0, le=1.0)
     components: dict[str, float] = Field(default_factory=dict)
     reasons: tuple[str, ...] = ()
+    #: The full verdict, when the scorer produces one. Optional so a scorer
+    #: that only ranks is still expressible.
+    match: JobMatch | None = None
 
     @field_validator("components")
     @classmethod
@@ -313,6 +651,16 @@ class ScoredPosting(_Value):
                 "a scored posting must carry at least one scoring component"
             )
         return value
+
+    @model_validator(mode="after")
+    def _match_describes_this_posting(self) -> "ScoredPosting":
+        if self.match is not None and (
+            self.match.dedupe_key != self.posting.dedupe_key or self.match.score != self.score
+        ):
+            raise JobSearchContractError(
+                "a scored posting's match must be for the same posting and carry the same score"
+            )
+        return self
 
 
 class EvidenceRef(_Value):
@@ -1037,6 +1385,8 @@ __all__ = [
     "MAX_POSTINGS_PER_RUN",
     "DEFAULT_MIN_SCORE",
     "JobSearchContractError",
+    "SeniorityLevel",
+    "EmploymentType",
     "SearchProfile",
     "RawPosting",
     "ProviderFailure",
@@ -1046,6 +1396,22 @@ __all__ = [
     "canonical_text",
     "canonical_company",
     "FilterRejection",
+    "EvidenceRecord",
+    "Recommendation",
+    "MatchStrength",
+    "GapSeverity",
+    "MatchedRequirement",
+    "MissingRequirement",
+    "TailoringSuggestion",
+    "ClaimedMatch",
+    "SemanticAssessment",
+    "GroundedAssessment",
+    "UNGROUNDED_CLAIM_SEVERITY",
+    "ground_assessment",
+    "ConstraintStatus",
+    "ConstraintEffect",
+    "ConstraintResult",
+    "JobMatch",
     "ScoredPosting",
     "EvidenceRef",
     "EvidenceCheck",

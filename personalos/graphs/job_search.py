@@ -127,6 +127,7 @@ from personalos.domain.job_search import (
     PersistedPosting,
     ProviderFailure,
     RawPosting,
+    Recommendation,
     RecruiterMessage,
     RecruiterResponse,
     ScoredPosting,
@@ -972,6 +973,10 @@ class JobSearchGraph:
             if len(entries) >= profile.max_shortlist:
                 break
             if item.score < profile.min_score:
+                continue
+            # A SKIP verdict stands whatever the floor is set to: a profile
+            # with `min_score=0` must not shortlist a rejected posting.
+            if item.match is not None and item.match.recommendation == Recommendation.SKIP:
                 continue
             check = checks.get(item.posting.dedupe_key)
             if check is None or not check.grounded:
