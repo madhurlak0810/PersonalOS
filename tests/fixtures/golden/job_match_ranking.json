@@ -1,0 +1,46 @@
+{
+  "ranked": [
+    {
+      "company": "Northwind",
+      "score": 0.95,
+      "recommendation": "APPLY"
+    },
+    {
+      "company": "Globex",
+      "score": 0.7154,
+      "recommendation": "APPLY"
+    },
+    {
+      "company": "Stark",
+      "score": 0.6687,
+      "recommendation": "MAYBE"
+    },
+    {
+      "company": "Umbrella",
+      "score": 0.5,
+      "recommendation": "MAYBE"
+    },
+    {
+      "company": "Initech",
+      "score": 0.4635,
+      "recommendation": "MAYBE"
+    },
+    {
+      "company": "Hooli",
+      "score": 0.0,
+      "recommendation": "SKIP"
+    },
+    {
+      "company": "Vandelay",
+      "score": 0.0,
+      "recommendation": "SKIP"
+    }
+  ],
+  "shortlist": [
+    "Northwind",
+    "Globex",
+    "Stark",
+    "Umbrella",
+    "Initech"
+  ]
+}

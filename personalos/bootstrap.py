@@ -33,6 +33,7 @@ from personalos.persistence.checkpointer import (
     WorkflowThreadRegistry,
 )
 from personalos.persistence.database import SessionLocal
+from personalos.persistence.evidence import SqlEvidenceSource
 from personalos.persistence.execution_ledger import ExecutionLedger
 from personalos.persistence.idempotency import OperationStore, SqlOperationStore
 from personalos.persistence.job_postings import SqlPostingCatalog
@@ -50,6 +51,7 @@ from personalos.providers import (
     JobProvider,
     JobProviderInvoker,
 )
+from personalos.retrieval.job_matching import HybridJobMatcher, ScoringConfig, SemanticAssessor
 from personalos.secrets.exchange import (
     ApiKeyExchanger,
     GoogleOAuthTokenExchanger,
@@ -175,6 +177,22 @@ def build_job_providers(
 def build_posting_catalog(session_factory=SessionLocal) -> SqlPostingCatalog:
     """Bind `JobSearchGraph`'s `PostingCatalog` port to the `job_postings` table."""
     return SqlPostingCatalog(session_factory)
+
+
+def build_job_matcher(
+    assessor: SemanticAssessor,
+    session_factory=SessionLocal,
+    config: ScoringConfig | None = None,
+) -> HybridJobMatcher:
+    """Build the matcher a `JobSearchGraph` takes as both `scorer` and `evidence_checker`.
+
+    `assessor` is required rather than defaulted so that which model reads
+    posting text is chosen where the graph is assembled; pass
+    `personalos.models.job_matching.anthropic_semantic_assessor()` for Claude.
+    """
+    return HybridJobMatcher(
+        evidence_source=SqlEvidenceSource(session_factory), assessor=assessor, config=config
+    )
 
 
 def build_job_search_executor(
@@ -447,6 +465,7 @@ __all__ = [
     "configured_job_providers",
     "build_job_providers",
     "build_posting_catalog",
+    "build_job_matcher",
     "build_job_search_executor",
     "GOOGLE_PROVIDER",
     "API_KEY_PROVIDERS",

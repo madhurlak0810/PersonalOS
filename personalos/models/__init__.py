@@ -1,5 +1,6 @@
 """Models package."""
 
+from .job_matching import StructuredLLMSemanticAssessor, anthropic_semantic_assessor
 from .routing import (
     DEFAULT_CLASSIFIER_MODEL,
     IntentClassifier,
@@ -16,4 +17,6 @@ __all__ = [
     "StructuredLLMIntentClassifier",
     "DEFAULT_CLASSIFIER_MODEL",
     "anthropic_intent_classifier",
+    "StructuredLLMSemanticAssessor",
+    "anthropic_semantic_assessor",
 ]
