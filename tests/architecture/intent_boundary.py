@@ -20,7 +20,7 @@ and checks every file in those layers by AST:
    ``os.remove``, ``os.system`` and friends. Dynamic imports are refused too,
    because they cannot be checked.
 3. **Reach.** A reasoning module may not *transitively* reach an effect layer
-   (``persistence``, ``tools``, ``mcp``, ``mcp_servers``, ``secrets``,
+   (``persistence``, ``tools``, ``mcp``, ``mcp_servers``, ``providers``, ``secrets``,
    composition) or a
    module that breaks rules 1-2, except through the executor layer, which is
    the sanctioned door. This closes routes the layer graph permits one hop at
@@ -59,6 +59,7 @@ EFFECT_LAYERS: tuple[str, ...] = (
     "tools",
     "mcp",
     "mcp_servers",
+    "providers",
     "secrets",
     "composition",
 )

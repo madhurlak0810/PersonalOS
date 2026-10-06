@@ -316,6 +316,44 @@ class TestDeduplicate:
         assert update["duplicate_dedupe_keys"] == []
 
 
+# --- persist_postings ---------------------------------------------------------
+
+
+class TestPersistPostings:
+    async def test_records_each_distinct_posting_and_returns_its_row(self):
+        catalog = fakes.FakePostingCatalog()
+        subgraph, _ports = graph(posting_catalog=catalog)
+        first = fakes.posting(title="Backend Engineer")
+        second = fakes.posting(title="Frontend Engineer")
+
+        update = await subgraph.persist_postings({"deduplicated_postings": dumped(first, second)})
+
+        assert set(update) == {"persisted_postings"}
+        assert catalog.calls == [[first, second]]
+        assert [row["dedupe_key"] for row in update["persisted_postings"]] == [
+            first.dedupe_key,
+            second.dedupe_key,
+        ]
+        assert all(row["created"] for row in update["persisted_postings"])
+
+    async def test_a_posting_already_in_the_catalog_resolves_to_its_existing_row(self):
+        catalog = fakes.FakePostingCatalog()
+        subgraph, _ports = graph(posting_catalog=catalog)
+        state = {"deduplicated_postings": dumped(fakes.posting())}
+
+        first = await subgraph.persist_postings(state)
+        again = await subgraph.persist_postings(state)
+
+        assert again["persisted_postings"] == [{**first["persisted_postings"][0], "created": False}]
+
+    async def test_without_a_catalog_nothing_is_recorded(self):
+        subgraph, _ports = graph()
+
+        update = await subgraph.persist_postings({"deduplicated_postings": dumped(fakes.posting())})
+
+        assert update == {"persisted_postings": []}
+
+
 # --- hard_filter --------------------------------------------------------------
 
 
@@ -1545,6 +1583,7 @@ NODE_TEST_CLASSES = {
     jsg.SEARCH_PROVIDERS: TestSearchProviders,
     jsg.NORMALIZE_JOBS: TestNormalizeJobs,
     jsg.DEDUPLICATE: TestDeduplicate,
+    jsg.PERSIST_POSTINGS: TestPersistPostings,
     jsg.HARD_FILTER: TestHardFilter,
     jsg.SCORE_CANDIDATES: TestScoreCandidates,
     jsg.EVIDENCE_CHECK: TestEvidenceCheck,

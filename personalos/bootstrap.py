@@ -20,6 +20,7 @@ from personalos.domain.workflow import (
     supervisor_thread_id,
 )
 from personalos.executor.credentials import CredentialBroker
+from personalos.executor.job_discovery import GatewayJobProvider
 from personalos.executor.job_search import JobSearchExecutor
 from personalos.executor.tool_executor import ProviderReconciler, ToolExecutor
 from personalos.graphs.job_search import JobSearchSubgraphRunner
@@ -34,6 +35,7 @@ from personalos.persistence.checkpointer import (
 from personalos.persistence.database import SessionLocal
 from personalos.persistence.execution_ledger import ExecutionLedger
 from personalos.persistence.idempotency import OperationStore, SqlOperationStore
+from personalos.persistence.job_postings import SqlPostingCatalog
 from personalos.persistence.leases import DEFAULT_LEASE_TTL_SECONDS, WorkflowLeaseStore
 from personalos.persistence.pending_checkpoints import (
     PendingCheckpointStore,
@@ -42,13 +44,24 @@ from personalos.persistence.pending_checkpoints import (
 from personalos.persistence.policy_log import SqlPolicyDecisionLog
 from personalos.persistence.repositories import JobRepository
 from personalos.policy import PolicyEngine, default_policy_engine
+from personalos.providers import (
+    JOB_PROVIDERS_SERVER,
+    GreenhouseProvider,
+    JobProvider,
+    JobProviderInvoker,
+)
 from personalos.secrets.exchange import (
     ApiKeyExchanger,
     GoogleOAuthTokenExchanger,
     TokenExchanger,
 )
 from personalos.secrets.store import KeyringSecretStore, SecretStore
-from personalos.tools.gateway import PolicyEnforcingToolGateway, ToolGateway
+from personalos.tools.gateway import (
+    PolicyEnforcingToolGateway,
+    RoutingToolInvoker,
+    ToolGateway,
+    ToolInvoker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,16 +131,50 @@ def build_policy_engine(
 def build_tool_gateway(
     manager: MCPServerManager | None = None,
     policy: PolicyEngine | None = None,
+    job_providers: Iterable[JobProvider] = (),
 ) -> ToolGateway:
     """Build the gateway every executor is handed.
 
     Defaults to the default-deny policy engine, so a caller that forgets to
-    pass one gets the restrictive engine rather than an open door.
+    pass one gets the restrictive engine rather than an open door. Job
+    providers, when given, are reachable as `job_providers.*` behind the same
+    engine as every MCP tool.
     """
-    return PolicyEnforcingToolGateway(
-        policy=policy or default_policy_engine(),
-        invoker=MCPToolInvoker(manager or get_mcp_manager()),
-    )
+    invoker: ToolInvoker = MCPToolInvoker(manager or get_mcp_manager())
+    providers = list(job_providers)
+    if providers:
+        invoker = RoutingToolInvoker(
+            {JOB_PROVIDERS_SERVER: JobProviderInvoker(providers)}, default=invoker
+        )
+    return PolicyEnforcingToolGateway(policy=policy or default_policy_engine(), invoker=invoker)
+
+
+def configured_job_providers() -> list[JobProvider]:
+    """The real provider adapters this deployment has configured."""
+    providers: list[JobProvider] = []
+    if settings.greenhouse_boards:
+        providers.append(GreenhouseProvider(settings.greenhouse_boards))
+    return providers
+
+
+def build_job_providers(
+    providers: Iterable[JobProvider] | None = None,
+    policy: PolicyEngine | None = None,
+) -> list[GatewayJobProvider]:
+    """Build the `providers` a `JobSearchGraph` is handed.
+
+    Each is a gateway-backed stand-in for one adapter, so the graph holds no
+    HTTP client and every provider call is a recorded `READ_EXTERNAL` decision.
+    Pass `build_policy_engine()` to make those decisions durable.
+    """
+    adapters = configured_job_providers() if providers is None else list(providers)
+    gateway = build_tool_gateway(policy=policy, job_providers=adapters)
+    return [GatewayJobProvider(adapter.name, gateway) for adapter in adapters]
+
+
+def build_posting_catalog(session_factory=SessionLocal) -> SqlPostingCatalog:
+    """Bind `JobSearchGraph`'s `PostingCatalog` port to the `job_postings` table."""
+    return SqlPostingCatalog(session_factory)
 
 
 def build_job_search_executor(
@@ -397,6 +444,9 @@ __all__ = [
     "build_files_mcp_server",
     "build_policy_engine",
     "build_tool_gateway",
+    "configured_job_providers",
+    "build_job_providers",
+    "build_posting_catalog",
     "build_job_search_executor",
     "GOOGLE_PROVIDER",
     "API_KEY_PROVIDERS",
