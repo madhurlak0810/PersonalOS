@@ -91,6 +91,10 @@ def graph(**overrides) -> tuple[JobSearchGraph, dict]:
         "action_executor": fakes.FakeActionExecutor(),
         "application_store": fakes.FakeApplicationStore(),
         "event_emitter": fakes.FakeEventEmitter(),
+        # Pinned to the instant the fixtures are dated at. Requests built by
+        # `fakes.approval_request` are raised at `fakes.NOW`, so a node reading
+        # the wall clock would see them expire once the calendar caught up.
+        "clock": lambda: fakes.NOW,
     }
     ports.update(overrides)
     return JobSearchGraph(**ports), ports
