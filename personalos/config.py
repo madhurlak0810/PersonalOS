@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     # as a JSON list: FILES_ALLOWED_ROOTS=["/home/me/job-search"]
     files_allowed_roots: list[str] = []
 
+    # Job providers. Greenhouse boards to watch, as board token -> employer
+    # name; a board belongs to one company, so there is no global search.
+    # Set as JSON: GREENHOUSE_BOARDS={"acme": "Acme"}
+    greenhouse_boards: dict[str, str] = {}
+
     # Google Integration
     google_api_key: str = ""
     google_search_engine_id: str = ""

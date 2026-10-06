@@ -19,6 +19,7 @@ Two ports are defined here:
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
@@ -221,6 +222,28 @@ class ToolRegistryInvoker:
         return await self.registry.execute(approved.tool, **approved.arguments)
 
 
+class RoutingToolInvoker:
+    """Picks the adapter for an approved intent by its `server`.
+
+    Lets one gateway front adapters that are not MCP servers (job providers)
+    without each executor needing a gateway of its own -- and therefore
+    without a second policy engine that could disagree with the first.
+    """
+
+    def __init__(self, routes: Mapping[str, ToolInvoker], default: ToolInvoker):
+        """Map server names to adapters; anything unlisted goes to `default`."""
+        self.routes = dict(routes)
+        self.default = default
+
+    async def invoke(self, approved: ApprovedIntent) -> dict[str, Any]:
+        """Hand the approved intent to the adapter that owns its server."""
+        if not isinstance(approved, ApprovedIntent):
+            raise PolicyViolation(
+                f"RoutingToolInvoker requires an ApprovedIntent, got {type(approved).__name__}"
+            )
+        return await self.routes.get(approved.server, self.default).invoke(approved)
+
+
 __all__ = [
     "ToolResult",
     "ToolExecutionError",
@@ -228,4 +251,5 @@ __all__ = [
     "ToolGateway",
     "PolicyEnforcingToolGateway",
     "ToolRegistryInvoker",
+    "RoutingToolInvoker",
 ]

@@ -27,6 +27,8 @@ Three properties are load-bearing:
 
 import hashlib
 import json
+import re
+import unicodedata
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 from enum import Enum
@@ -88,6 +90,49 @@ def _canonical_hash(payload: Any) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, default=repr).encode("utf-8")
     ).hexdigest()
+
+
+#: Characters removed from provider text before it is stored: C0/C1 controls
+#: other than tab and newline, plus the zero-width and bidirectional-override
+#: code points. None of them carry meaning in a job posting, and all of them
+#: are ways to make stored text read differently to a human than to a model.
+_UNSAFE_CHARS = re.compile(
+    "[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]"
+)
+
+#: Legal-form suffixes dropped when comparing company names, so "Acme, Inc."
+#: on one board and "Acme" on another are the same employer.
+_COMPANY_SUFFIXES = frozenset(
+    {"inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation", "co", "gmbh", "plc"}
+)
+
+#: Room left for the readable part of a dedupe key: `job_postings.dedupe_key`
+#: is varchar(150), and the trailing separator plus SHA-256 digest take 65.
+_DEDUPE_PREFIX_LENGTH = 85
+
+
+def strip_unsafe_chars(text: str) -> str:
+    """Remove control, zero-width and bidi-override characters from provider text."""
+    return _UNSAFE_CHARS.sub("", text)
+
+
+def canonical_text(text: str) -> str:
+    """Fold text to the form postings are compared in.
+
+    Unicode-normalized, case-folded, with every run of non-alphanumerics
+    collapsed to one space. Two boards rendering the same description with
+    different whitespace, bullets or quote styles therefore hash the same.
+    """
+    folded = unicodedata.normalize("NFKC", strip_unsafe_chars(text)).casefold()
+    return " ".join(re.findall(r"\w+", folded))
+
+
+def canonical_company(name: str) -> str:
+    """`canonical_text` for a company name, minus trailing legal-form suffixes."""
+    words = canonical_text(name).split()
+    while len(words) > 1 and words[-1] in _COMPANY_SUFFIXES:
+        words.pop()
+    return " ".join(words)
 
 
 # --- Search profile ----------------------------------------------------------
@@ -185,6 +230,11 @@ class NormalizedPosting(_Value):
     skills: tuple[str, ...] = ()
     raw: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("title", "company", "location", "description", mode="before")
+    @classmethod
+    def _strip_unsafe(cls, value: Any) -> Any:
+        return strip_unsafe_chars(value) if isinstance(value, str) else value
+
     @field_validator("title", "company")
     @classmethod
     def _not_blank(cls, value: str) -> str:
@@ -195,19 +245,34 @@ class NormalizedPosting(_Value):
     @property
     def description_hash(self) -> str:
         """Content hash of the posting text, for near-duplicate detection."""
-        return _canonical_hash(self.description.strip().lower())
+        return _canonical_hash(canonical_text(self.description))
 
     @property
     def dedupe_key(self) -> str:
         """Content-derived identity: same company, same title, same text.
 
-        Truncated to fit `job_postings.dedupe_key` (varchar(150)); the
-        embedded hash is what carries the uniqueness, the readable prefix is
-        there so a duplicate is diagnosable by eye.
+        A readable `company|title` prefix followed by a digest of all three.
+        The prefix is truncated to keep the key inside
+        `job_postings.dedupe_key` (varchar(150)); the digest never is, since it
+        is what carries the uniqueness -- the prefix is only there so a
+        duplicate is diagnosable by eye.
         """
-        company = self.company.strip().lower()
-        title = self.title.strip().lower()
-        return f"{company}|{title}|{self.description_hash}"[:150]
+        company = canonical_company(self.company)
+        title = canonical_text(self.title)
+        digest = _canonical_hash([company, title, self.description_hash])
+        return f"{f'{company}|{title}'[:_DEDUPE_PREFIX_LENGTH]}|{digest}"
+
+
+class PersistedPosting(_Value):
+    """The `job_postings` row a discovered posting resolved to.
+
+    `created` is False when the row already existed -- the posting was stored
+    by an earlier run, or by another provider earlier in this one.
+    """
+
+    job_posting_id: UUID
+    dedupe_key: str
+    created: bool
 
 
 # --- Scoring and evidence ----------------------------------------------------
@@ -976,6 +1041,10 @@ __all__ = [
     "RawPosting",
     "ProviderFailure",
     "NormalizedPosting",
+    "PersistedPosting",
+    "strip_unsafe_chars",
+    "canonical_text",
+    "canonical_company",
     "FilterRejection",
     "ScoredPosting",
     "EvidenceRef",

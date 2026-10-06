@@ -235,7 +235,8 @@ flagged; `open(p, mode)` with a non-literal mode is, because the check cannot
 show it is read-only.
 
 The check is also **transitive**. A reasoning module may not reach an effect
-layer (`persistence`, `tools`, `mcp`, `mcp_servers`, `secrets`, composition), or a
+layer (`persistence`, `tools`, `mcp`, `mcp_servers`, `providers`, `secrets`,
+composition), or a
 non-reasoning module that breaks the rules above, through any chain of
 internal imports — except through `executor`, which is the sanctioned door
 because everything it does is dispatched through a `ToolGateway`. That closes
@@ -337,6 +338,36 @@ manager, caching, and `MCPToolInvoker`, which satisfies the `ToolInvoker` port.
 
 The `persistence` dependency is deliberate and narrow: `MCPServer` uses
 `IdempotencyGuard` so a mutating tool cannot execute without a dedup record.
+
+### `providers` — `personalos/providers/`
+
+Job board adapters. `base.py` defines `JobProvider` (`search`, `get_job`);
+`greenhouse.py` is the real adapter, `fake.py` the in-memory one, and
+`invoker.py` the `ToolInvoker` that runs approved `job_providers.search` /
+`job_providers.get_job` intents against them.
+
+- **May import:** `domain`, `policy`, `tools`, `config`.
+- **Must not:** be imported by `graphs` or `executor`. The graph is handed
+  `executor.job_discovery.GatewayJobProvider`, which holds a `ToolGateway` and
+  nothing else, so a provider call cannot happen without a policy decision.
+
+**Read-only.** Both tools are `READ_EXTERNAL`, the interface has no write
+method, there is no mutating `job_providers.*` entry on the allowlist, and
+`JobProviderInvoker` refuses a mutating intent even if one were approved.
+
+**Untrusted posting text.** Everything a provider returns was written by an
+outside party and is treated as data, never as instructions:
+
+- It lands in typed fields of `NormalizedPosting` (control, zero-width and
+  bidi-override characters stripped) and is stored verbatim in `job_postings`.
+- No node routes on it. Which node runs next, which port is called and which
+  `ActionKind` is proposed are functions of reviewed code and typed state; the
+  tool surface is the policy allowlist, which no posting can edit.
+- A node that shows posting text to a model must pass it as quoted data, and
+  anything that model proposes is an `origin=LLM` intent that still clears
+  policy and the approval triple.
+
+`tests/adversarial/test_posting_prompt_injection.py` holds the regression.
 
 ### `mcp_servers` — `mcp_servers/`
 

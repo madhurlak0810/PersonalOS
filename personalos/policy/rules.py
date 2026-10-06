@@ -196,6 +196,15 @@ JOB_SEARCH_TOOL_ARGUMENTS = {
 }
 
 
+#: Job provider adapters (`personalos.providers`). Both are reads against a
+#: job board; there is deliberately no mutating entry, so a provider write is
+#: unreachable rather than merely approval-gated.
+JOB_PROVIDER_TOOL_ARGUMENTS = {
+    "job_providers.search": {"provider", "profile"},
+    "job_providers.get_job": {"provider", "source_job_id"},
+}
+
+
 #: Tools exposed by the files MCP server. Which paths they may touch is not a
 #: policy question: the server confines them to its allowed roots itself.
 FILE_TOOL_ARGUMENTS = {
@@ -208,10 +217,14 @@ FILE_TOOL_ARGUMENTS = {
 def default_rules() -> list[PolicyRule]:
     """The rule chain the application boots with.
 
-    Job search and file tools are allowlisted; nothing else can run until it
-    is added here deliberately.
+    Job search, job provider and file tools are allowlisted; nothing else can
+    run until it is added here deliberately.
     """
-    tool_arguments = {**JOB_SEARCH_TOOL_ARGUMENTS, **FILE_TOOL_ARGUMENTS}
+    tool_arguments = {
+        **JOB_SEARCH_TOOL_ARGUMENTS,
+        **JOB_PROVIDER_TOOL_ARGUMENTS,
+        **FILE_TOOL_ARGUMENTS,
+    }
     return [
         RequireProvenanceRule(),
         ToolAllowlistRule(tool_arguments.keys()),
@@ -229,6 +242,7 @@ __all__ = [
     "MutatingToolRule",
     "UntrustedOriginRule",
     "JOB_SEARCH_TOOL_ARGUMENTS",
+    "JOB_PROVIDER_TOOL_ARGUMENTS",
     "FILE_TOOL_ARGUMENTS",
     "default_rules",
     "IDEMPOTENCY_KEY_ARG",

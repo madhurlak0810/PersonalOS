@@ -36,6 +36,7 @@ from personalos.domain.job_search import (
     FollowUpCheckpoint,
     NormalizedPosting,
     PersistedApplication,
+    PersistedPosting,
     RawPosting,
     RecruiterMessage,
     RecruiterResponse,
@@ -281,6 +282,31 @@ class FailingProvider:
     async def search(self, search_profile: SearchProfile) -> Sequence[RawPosting]:
         self.calls.append(search_profile)
         raise RuntimeError(self.error)
+
+
+class FakePostingCatalog:
+    """An in-memory posting catalog keyed on `dedupe_key`, as the table is.
+
+    Returns the existing entry for a key it has seen, exactly as
+    `personalos.persistence.job_postings.SqlPostingCatalog` does.
+    """
+
+    def __init__(self):
+        self.rows: dict[str, UUID] = {}
+        self.calls: list[list[NormalizedPosting]] = []
+
+    async def record(self, postings: Sequence[NormalizedPosting]) -> list[PersistedPosting]:
+        self.calls.append(list(postings))
+        persisted = []
+        for target in postings:
+            created = target.dedupe_key not in self.rows
+            row_id = self.rows.setdefault(target.dedupe_key, uuid4())
+            persisted.append(
+                PersistedPosting(
+                    job_posting_id=row_id, dedupe_key=target.dedupe_key, created=created
+                )
+            )
+        return persisted
 
 
 class FakeScorer:

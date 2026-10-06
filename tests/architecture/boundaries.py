@@ -120,6 +120,15 @@ LAYERS: tuple[Layer, ...] = (
         responsibility="concrete MCP tool implementations",
     ),
     Layer(
+        name="providers",
+        modules=("personalos.providers",),
+        allows=("domain", "policy", "tools", "config"),
+        responsibility=(
+            "read-only job board adapters; executes approved job_providers intents and "
+            "is reachable only through the tool gateway"
+        ),
+    ),
+    Layer(
         name="retrieval",
         modules=("personalos.retrieval",),
         allows=("domain", "persistence", "config"),
