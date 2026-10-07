@@ -715,9 +715,10 @@ class ArtifactVersionRepository:
 class CommunicationEventRepository:
     """Repository for recruiter-side signals tied to an application.
 
-    `create` lets the unique constraint on (application_id,
-    provider_message_id) do the work: ingesting the same message twice
-    raises `IntegrityError` rather than creating a duplicate row.
+    `create` lets the unique constraints do the work: ingesting the same
+    message twice -- the same `dedupe_key`, or the same `provider_message_id`
+    for one application -- raises `IntegrityError` rather than creating a
+    duplicate row.
     """
 
     def __init__(self, session: Session):
@@ -732,18 +733,36 @@ class CommunicationEventRepository:
         occurred_at: datetime,
         provider_message_id: str | None = None,
         metadata_json: dict[str, Any] | None = None,
+        dedupe_key: str | None = None,
+        commit: bool = True,
     ) -> CommunicationEventModel:
-        """Insert a communication event. Raises `IntegrityError` on a duplicate provider message for the application."""
+        """Insert a communication event. Raises `IntegrityError` on a duplicate message.
+
+        `commit=False` flushes instead, so the row can be committed together
+        with the transition and the outbox rows it caused.
+        """
         db_event = CommunicationEventModel(
             application_id=application_id,
             classification=classification,
             provider_message_id=provider_message_id,
+            dedupe_key=dedupe_key,
             occurred_at=occurred_at,
             metadata_json=metadata_json or {},
         )
         self.session.add(db_event)
-        self.session.commit()
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
         return db_event
+
+    def get_by_dedupe_key(self, dedupe_key: str) -> CommunicationEventModel | None:
+        """Get the row already recorded for this message, if any."""
+        return (
+            self.session.query(CommunicationEventModel)
+            .filter(CommunicationEventModel.dedupe_key == dedupe_key)
+            .first()
+        )
 
     def get_by_application_id(self, application_id: UUID) -> list[CommunicationEventModel]:
         """Get every communication event recorded for an application."""

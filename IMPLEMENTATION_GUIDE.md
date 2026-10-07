@@ -529,6 +529,10 @@ There is a second way in. A run invoked with `fired_checkpoints` in its input
 is a durable wait coming due, and enters at `draft_follow_up_for_triggered_checkpoint`
 instead of at discovery — see [Pending checkpoints](#14-pending-checkpoints-durable-conditional-waits).
 
+And a third: a run invoked with `inbound_messages` is recruiter mail not yet
+tied to an application, and enters at `classify_recruiter_events` — see
+[Recruiter events](#15-recruiter-events-classification-commitments-and-correlation).
+
 **Approval interrupts before external writes.** Every point at which the graph
 is about to do something the outside world can see goes through those three
 nodes, and only through them:
@@ -734,6 +738,73 @@ comes.
 
 Time is moved rather than waited for: every decision takes an explicit `now`, so
 a seven-day wait is a seven-day test only in the fiction.
+
+### 15. Recruiter Events: Classification, Commitments and Correlation
+
+Inbound recruiter mail is handled by two nodes of the Job Search graph, not by
+a Communications agent:
+
+```
+START -> classify_recruiter_events -> record_recruiter_events
+      -> [a reply is owed] request_approval_for_external_write -> ...
+```
+
+Invoke the graph with `inbound_messages` (dumped `RecruiterMessage`s) and a
+`user_id`, on `personalos.domain.workflow.recruiter_inbox_thread_id(user_id)`.
+
+| Question | Answered by | How |
+| --- | --- | --- |
+| What is this message? | `RecruiterEventExtractor` port | `StructuredLLMRecruiterEventExtractor` binds a chat model to the `RecruiterEventExtraction` JSON schema and validates the result with Pydantic. Invalid output is retried up to `max_attempts` (default 3), then `RuleBasedRecruiterEventExtractor` — deterministic phrase rules — answers instead. The outcome records which one was used. |
+| What does it commit anyone to? | the same extraction | `Commitment`: `actor` (`user` \| `external_person`), `action`, `due_at`, `condition`, `confidence`, `source_message_id`. The source id is stamped by code from the message, never taken from the model. Stored in `commitments`. |
+| Which application is it about? | `correlate_application` | Deterministic identifiers only — a thread already on file, the posting's requisition id quoted in the text, a known sender, the sender's domain, the company name, the title — combined into a confidence. No model is asked. |
+| What happens to it? | `triage` | Matched at or above `DEFAULT_CORRELATION_THRESHOLD` (0.75) and classified at or above `DEFAULT_MIN_CLASSIFICATION_CONFIDENCE` (0.6): recorded, and its transition proposed. Anything less: a `RecruiterEventReview` and an `application.recruiter_event_review_required` event, and no transition. Unrelated mail is dropped. |
+
+Classifications are `RECRUITER_RESPONSE`, `INTERVIEW_INVITE`, `REJECTION`,
+`OFFER`, `ACTION_REQUIRED`, `GENERAL_UPDATE` and `UNRELATED`
+(`CommunicationEventClassification`).
+
+**Exactly once.** `SqlRecruiterEventStore.record` writes the
+`communication_events` row, its commitments, the application's transition and
+the outbox rows in one transaction, keyed on a unique
+`communication_events.dedupe_key` derived from the provider message id. A
+redelivered message finds the first delivery's row and writes nothing.
+
+**The lifecycle still decides.** A classification proposes a status; it goes
+through `ApplicationRepository.update_status` like every other transition. An
+offer email for an application that never reached `INTERVIEWING` is recorded,
+left where it is, and raised for review.
+
+**For the calendar step.** A confident interview invite stages
+`application.interview_invite_received`, whose payload is
+`InterviewInviteReceived` — application, thread, sender and the extracted
+commitments with their times.
+
+**Replies.** A reply the sender is waiting on is drafted automatically (the
+`RecruiterReplyDrafter` port; a plain template by default) and proposed as a
+`SEND_RECRUITER_MESSAGE` intent. Sending it goes through the approval
+interrupt.
+
+**A reviewer's answer** to a review request is passed back as
+`confirmed_correlations: {provider_message_id: application_id}` alongside the
+message; the id must be one of that user's applications.
+
+**Evaluation.** `python -m evals.recruiter_event_classification` reports
+`event_classification_f1` (macro F1) over the 35 synthetic emails in
+`evals/golden/recruiter_emails.json`; `--llm` evaluates the Claude-backed
+extractor instead of the rules. `tests/unit/test_recruiter_event_eval.py`
+pins the rules' score.
+
+**Wiring.** `bootstrap.build_recruiter_event_store()` is both the
+`application_directory` and the `recruiter_event_recorder`; pair it with an
+extractor from `personalos.models.recruiter_events`. Like the rest of
+`JobSearchGraph`, nothing in `bootstrap` constructs the graph itself yet, and
+nothing feeds it mail: a Gmail reader that produces `RecruiterMessage`s is a
+follow-up.
+
+**Tests:** `tests/unit/test_recruiter_events.py` (rules, extractors, store),
+`tests/graph_scenarios/test_recruiter_events.py` (the compiled graph against a
+real database), and the two node contract classes in
+`tests/unit/test_job_search_nodes.py`.
 
 ---
 

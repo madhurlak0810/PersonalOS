@@ -88,6 +88,7 @@ def derive_thread_id(namespace: str, *parts: Any) -> str:
 #: simply start fresh every time.
 JOB_SEARCH_THREAD_NAMESPACE = "job_search"
 SUPERVISOR_THREAD_NAMESPACE = "supervisor"
+RECRUITER_INBOX_THREAD_NAMESPACE = "recruiter_inbox"
 
 
 def job_search_thread_id(user_id: Any, search_key: str | None = None) -> str:
@@ -104,6 +105,16 @@ def job_search_thread_id(user_id: Any, search_key: str | None = None) -> str:
     build actually has.
     """
     return derive_thread_id(JOB_SEARCH_THREAD_NAMESPACE, user_id, search_key or "")
+
+
+def recruiter_inbox_thread_id(user_id: Any) -> str:
+    """The thread id inbound recruiter mail for one candidate is processed on.
+
+    Its own thread rather than the job search's: a batch of inbound messages is
+    about whichever applications it correlates to, and running it on a search
+    thread would overwrite the pending actions of a run parked at an approval.
+    """
+    return derive_thread_id(RECRUITER_INBOX_THREAD_NAMESPACE, user_id)
 
 
 def supervisor_thread_id(conversation_key: Any) -> str:
@@ -229,9 +240,11 @@ __all__ = [
     "MAX_THREAD_ID_LENGTH",
     "JOB_SEARCH_THREAD_NAMESPACE",
     "SUPERVISOR_THREAD_NAMESPACE",
+    "RECRUITER_INBOX_THREAD_NAMESPACE",
     "InvalidWorkflowIdentity",
     "derive_thread_id",
     "job_search_thread_id",
+    "recruiter_inbox_thread_id",
     "supervisor_thread_id",
     "WorkflowThread",
     "WorkflowLease",

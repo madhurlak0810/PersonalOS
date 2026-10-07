@@ -2,6 +2,11 @@
 
 from .artifact_drafting import StructuredLLMDraftWriter, anthropic_draft_writer
 from .job_matching import StructuredLLMSemanticAssessor, anthropic_semantic_assessor
+from .recruiter_events import (
+    RuleBasedRecruiterEventExtractor,
+    StructuredLLMRecruiterEventExtractor,
+    anthropic_recruiter_event_extractor,
+)
 from .routing import (
     DEFAULT_CLASSIFIER_MODEL,
     IntentClassifier,
@@ -22,4 +27,7 @@ __all__ = [
     "anthropic_semantic_assessor",
     "StructuredLLMDraftWriter",
     "anthropic_draft_writer",
+    "RuleBasedRecruiterEventExtractor",
+    "StructuredLLMRecruiterEventExtractor",
+    "anthropic_recruiter_event_extractor",
 ]

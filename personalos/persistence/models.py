@@ -11,6 +11,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -994,8 +995,9 @@ class CommunicationEventModel(Base):
     Captures the classification of an inbound message (interview invite,
     rejection, etc.) so an application's communication history is queryable
     without a standalone Communications Agent, which is out of scope for this
-    build. `provider_message_id` is unique per application so the same
-    message ingested twice collapses onto one row instead of duplicating.
+    build. `dedupe_key` is unique across the table, so the same message
+    delivered twice collapses onto one row whichever application it was
+    correlated to; see `personalos.domain.recruiter_events.communication_dedupe_key`.
     """
 
     __tablename__ = "communication_events"
@@ -1010,11 +1012,14 @@ class CommunicationEventModel(Base):
             "offer",
             "action_required",
             "general_update",
+            "unrelated",
             name="communication_event_classification",
         ),
         nullable=False,
     )
     provider_message_id = Column(String(255), nullable=True)
+    #: NULL only on rows written before the column existed.
+    dedupe_key = Column(String(300), nullable=True)
     occurred_at = Column(DateTime, nullable=False)
     metadata_json = Column(JSON, nullable=False, default={})
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -1027,6 +1032,9 @@ class CommunicationEventModel(Base):
             name="uq_communication_events_app_provider_message",
         ),
         Index("ix_communication_events_application_id", "application_id"),
+        # A unique index rather than a constraint: SQLite cannot add a
+        # constraint to an existing table, and the migration runs on both.
+        Index("uq_communication_events_dedupe_key", "dedupe_key", unique=True),
     )
 
     def to_dict(self) -> dict:
@@ -1036,10 +1044,56 @@ class CommunicationEventModel(Base):
             "application_id": str(self.application_id),
             "classification": self.classification,
             "provider_message_id": self.provider_message_id,
+            "dedupe_key": self.dedupe_key,
             "occurred_at": self.occurred_at.isoformat(),
             "metadata_json": self.metadata_json,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
+        }
+
+
+class CommitmentModel(Base):
+    """ORM model for one commitment read out of a recruiter-side message.
+
+    Who owes what, by when, on what condition. Always tied to the
+    `communication_events` row it was extracted from, so a deadline can be
+    traced to the message that set it.
+    """
+
+    __tablename__ = "commitments"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    communication_event_id = Column(
+        GUID(), ForeignKey("communication_events.id"), nullable=False
+    )
+    application_id = Column(GUID(), ForeignKey("applications.id"), nullable=False)
+    actor = Column(Enum("user", "external_person", name="commitment_actor"), nullable=False)
+    action = Column(Text, nullable=False)
+    due_at = Column(DateTime, nullable=True)
+    condition = Column(Text, nullable=True)
+    confidence = Column(Float, nullable=False)
+    source_message_id = Column(String(255), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_commitments_application_id", "application_id"),
+        Index("ix_commitments_communication_event_id", "communication_event_id"),
+        Index("ix_commitments_due_at", "due_at"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "communication_event_id": str(self.communication_event_id),
+            "application_id": str(self.application_id),
+            "actor": self.actor,
+            "action": self.action,
+            "due_at": self.due_at.isoformat() if self.due_at else None,
+            "condition": self.condition,
+            "confidence": self.confidence,
+            "source_message_id": self.source_message_id,
+            "created_at": self.created_at.isoformat(),
         }
 
 

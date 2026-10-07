@@ -23,6 +23,20 @@ leaves through the same approval triple as everything else:
 
     START -> draft_follow_up -> request_approval_for_external_write -> ...
 
+And a third. A run invoked with `inbound_messages` is recruiter mail that has
+not been tied to an application yet. It enters at `classify_recruiter_events`:
+
+    START -> classify_recruiter_events -> record_recruiter_events
+          -> [a reply is owed] request_approval_for_external_write -> ...
+
+The first node decides what each message is (through the
+`RecruiterEventExtractor` port) and which application it is about (by
+`personalos.domain.recruiter_events.correlate_application`, from deterministic
+identifiers only). The second records what was matched confidently, puts the
+rest in front of a person, and drafts -- never sends -- any reply that is owed.
+Run it on `personalos.domain.workflow.recruiter_inbox_thread_id`, not on a
+search thread.
+
 The waits themselves are scheduled by `create_follow_up_checkpoint` through the
 `PendingCheckpointScheduler` port. What makes them survivable is that they are
 rows, not timers: a wait carries its own condition, its trigger time and an
@@ -91,7 +105,7 @@ import logging
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from typing import Any, Protocol, TypedDict, TypeVar
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -145,6 +159,24 @@ from personalos.domain.models import (
     ArtifactType,
     CommunicationEventClassification,
 )
+from personalos.domain.recruiter_events import (
+    DEFAULT_CORRELATION_THRESHOLD,
+    DEFAULT_MIN_CLASSIFICATION_CONFIDENCE,
+    IMPLIED_STATUS,
+    ApplicationCandidate,
+    ExtractionOutcome,
+    InterviewInviteReceived,
+    RecruiterEvent,
+    RecruiterEventRecord,
+    RecruiterEventReview,
+    RecruiterEventTriage,
+    ReplyDraft,
+    TriageAction,
+    communication_dedupe_key,
+    correlate_application,
+    template_reply,
+    triage,
+)
 from personalos.domain.redaction import redact
 from personalos.domain.workflow import job_search_thread_id
 
@@ -176,6 +208,8 @@ EMIT_APPLICATION_CREATED = "emit_application_created"
 HANDLE_RECRUITER_RESPONSE = "handle_recruiter_response"
 CREATE_FOLLOW_UP_CHECKPOINT = "create_follow_up_checkpoint"
 DRAFT_FOLLOW_UP = "draft_follow_up_for_triggered_checkpoint"
+CLASSIFY_RECRUITER_EVENTS = "classify_recruiter_events"
+RECORD_RECRUITER_EVENTS = "record_recruiter_events"
 
 #: Values of `JobSearchState["approval_stage"]`. The approval node is entered
 #: from two places (a submission, and a recruiter reply), and this is how its
@@ -404,9 +438,105 @@ class RecruiterMessageClassifier(Protocol):
         ...
 
 
+class RecruiterEventExtractor(Protocol):
+    """Says what one inbound message is and what it commits anyone to.
+
+    Returns a typed `ExtractionOutcome`, never text. The implementations are in
+    `personalos.models.recruiter_events`: a schema-constrained model that falls
+    back to deterministic rules when its output will not validate, and those
+    rules on their own.
+    """
+
+    async def extract(self, message: RecruiterMessage) -> ExtractionOutcome:
+        """Return the classification and commitments read out of `message`."""
+        ...
+
+
+class ApplicationDirectory(Protocol):
+    """Reads what is on file about a user's applications, for correlation.
+
+    It supplies identifiers and decides nothing: which application a message
+    belongs to is `correlate_application`'s answer, made in the node.
+    """
+
+    async def candidates(self, user_id: UUID) -> Sequence[ApplicationCandidate]:
+        """Return every application of `user_id` a message could be about."""
+        ...
+
+
+class RecruiterEventRecorder(Protocol):
+    """Stores one matched event, its transition and its events, exactly once.
+
+    The implementation is
+    `personalos.persistence.recruiter_events.SqlRecruiterEventStore`, which
+    writes all of it in one transaction keyed on the event's `dedupe_key`.
+    `emit` is handed over rather than sent through `EventEmitter` for that
+    reason: an event staged with the row cannot be emitted for a redelivery
+    that wrote no row, or lost after a row that was written.
+
+    `transition` is a proposal the lifecycle may refuse; a refusal comes back
+    on the record and is never an exception.
+    """
+
+    async def record(
+        self,
+        event: RecruiterEvent,
+        *,
+        transition: ApplicationStatus | None,
+        emit: Sequence[EmittedEvent],
+    ) -> RecruiterEventRecord:
+        """Persist the event and return what doing so changed."""
+        ...
+
+
+class RecruiterReplyDrafter(Protocol):
+    """Writes the text of a reply. Has no way to send one."""
+
+    async def draft(self, event: RecruiterEvent) -> ReplyDraft:
+        """Return a proposed reply to `event`'s message."""
+        ...
+
+
 # ---------------------------------------------------------------------------
 # Default pure implementations
 # ---------------------------------------------------------------------------
+
+
+class TemplateReplyDrafter:
+    """The default drafter: `personalos.domain.recruiter_events.template_reply`."""
+
+    async def draft(self, event: RecruiterEvent) -> ReplyDraft:
+        return template_reply(event)
+
+
+class ExtractingRecruiterClassifier:
+    """Backs the per-application `RecruiterMessageClassifier` port with an extractor.
+
+    So the branch that reads one application's inbox and the one that takes
+    uncorrelated mail classify with the same thing. The implied status is
+    withheld below `min_confidence`, as it is in `triage`.
+    """
+
+    def __init__(
+        self,
+        extractor: RecruiterEventExtractor,
+        *,
+        min_confidence: float = DEFAULT_MIN_CLASSIFICATION_CONFIDENCE,
+    ):
+        self.extractor = extractor
+        self.min_confidence = min_confidence
+
+    async def classify(self, message: RecruiterMessage) -> RecruiterResponse:
+        extraction = (await self.extractor.extract(message)).extraction
+        confident = extraction.confidence >= self.min_confidence
+        return RecruiterResponse(
+            provider_message_id=message.provider_message_id,
+            classification=extraction.classification,
+            occurred_at=message.received_at,
+            implied_status=IMPLIED_STATUS[extraction.classification] if confident else None,
+            requires_reply=extraction.requires_reply,
+            summary=extraction.summary,
+        )
 
 
 class InterruptOnlyApprovalGate:
@@ -592,6 +722,17 @@ class JobSearchState(TypedDict, total=False):
     #: discovery -- see `JobSearchGraph.route_from_start`.
     fired_checkpoints: list[dict[str, Any]]
 
+    # Inbound recruiter mail.
+    #: Messages not yet tied to an application, supplied as *input*. Like
+    #: `fired_checkpoints`, their presence decides where the run enters.
+    inbound_messages: list[dict[str, Any]]
+    #: A reviewer's answers to earlier review requests, as *input*:
+    #: `provider_message_id -> application_id`.
+    confirmed_correlations: dict[str, str]
+    recruiter_events: list[dict[str, Any]]
+    recruiter_event_records: list[dict[str, Any]]
+    recruiter_event_reviews: list[dict[str, Any]]
+
 
 def _dump(values: Sequence[BaseModel]) -> list[dict[str, Any]]:
     """Dump a sequence of pydantic values to JSON-compatible dicts."""
@@ -611,10 +752,12 @@ def _load(model: type[_ValueT], raws: Sequence[dict[str, Any]] | None) -> list[_
 class JobSearchGraph:
     """Builds and compiles the Job Search subgraph from its injected ports.
 
-    Every port is a required constructor argument except the three that are
-    genuinely optional capabilities: the normalizer (which has a pure default),
-    and the recruiter inbox plus its classifier, which together turn the
-    recruiter-response branch on. Everything else is required for the same
+    Every port is a required constructor argument except the genuinely
+    optional capabilities: the normalizer and reply drafter (which have pure
+    defaults), the posting catalog and checkpoint scheduler, the recruiter
+    inbox plus its classifier, which together turn the recruiter-response
+    branch on, and the event extractor, application directory and recorder,
+    which together turn the inbound-mail entry on. Everything else is required for the same
     reason `JobSearchExecutor` requires a `ToolGateway` -- a graph that can
     fall back to a global default is a graph whose reach is not visible at its
     construction site.
@@ -637,6 +780,12 @@ class JobSearchGraph:
         recruiter_inbox: RecruiterInbox | None = None,
         recruiter_classifier: RecruiterMessageClassifier | None = None,
         checkpoint_scheduler: PendingCheckpointScheduler | None = None,
+        recruiter_event_extractor: RecruiterEventExtractor | None = None,
+        application_directory: ApplicationDirectory | None = None,
+        recruiter_event_recorder: RecruiterEventRecorder | None = None,
+        reply_drafter: RecruiterReplyDrafter | None = None,
+        correlation_threshold: float = DEFAULT_CORRELATION_THRESHOLD,
+        min_classification_confidence: float = DEFAULT_MIN_CLASSIFICATION_CONFIDENCE,
         checkpointer: BaseCheckpointSaver | None = None,
         approval_ttl: timedelta | None = None,
         checkpoint_grace: timedelta | None = None,
@@ -664,6 +813,13 @@ class JobSearchGraph:
                 "an inbox with no classifier cannot produce a typed response, and a "
                 "classifier with no inbox has nothing to classify"
             )
+        inbound_ports = (recruiter_event_extractor, application_directory, recruiter_event_recorder)
+        if any(port is not None for port in inbound_ports) and None in inbound_ports:
+            raise ValueError(
+                "recruiter_event_extractor, application_directory and "
+                "recruiter_event_recorder must be provided together; inbound mail is "
+                "classified, correlated and recorded, and none of the three is optional"
+            )
 
         self.profile_store = profile_store
         self.providers = tuple(providers)
@@ -687,6 +843,14 @@ class JobSearchGraph:
         # Without it the branch still records its `FollowUpCheckpoint`s in
         # state and emits `follow_up_scheduled`; only the durable half is off.
         self.checkpoint_scheduler = checkpoint_scheduler
+        # The inbound-mail entry. Off unless all three are wired; see
+        # `classify_recruiter_events`.
+        self.recruiter_event_extractor = recruiter_event_extractor
+        self.application_directory = application_directory
+        self.recruiter_event_recorder = recruiter_event_recorder
+        self.reply_drafter = reply_drafter or TemplateReplyDrafter()
+        self.correlation_threshold = correlation_threshold
+        self.min_classification_confidence = min_classification_confidence
         # How long past its trigger a scheduled wait stays actionable. `None`
         # means `DEFAULT_CHECKPOINT_GRACE`; a deployment that would rather drop
         # a late follow-up than send one passes something shorter.
@@ -729,8 +893,10 @@ class JobSearchGraph:
         graph.add_node(HANDLE_RECRUITER_RESPONSE, self.handle_recruiter_response)
         graph.add_node(CREATE_FOLLOW_UP_CHECKPOINT, self.create_follow_up_checkpoint)
         graph.add_node(DRAFT_FOLLOW_UP, self.draft_follow_up)
+        graph.add_node(CLASSIFY_RECRUITER_EVENTS, self.classify_recruiter_events)
+        graph.add_node(RECORD_RECRUITER_EVENTS, self.record_recruiter_events)
 
-        # Two ways into this graph, decided at START from the input alone.
+        # Three ways into this graph, decided at START from the input alone.
         #
         # A run handed `fired_checkpoints` is a durable wait coming due: some
         # sweep found a checkpoint whose trigger had arrived and whose
@@ -740,11 +906,19 @@ class JobSearchGraph:
         # a shortlist nobody asked for -- so it enters at the draft node, on
         # top of the state this thread already holds.
         #
+        # A run handed `inbound_messages` is recruiter mail to be classified
+        # and tied to whichever applications it is about. It has no shortlist
+        # and no single application, so it enters at its own pair of nodes.
+        #
         # Everything else starts at the beginning.
         graph.add_conditional_edges(
             START,
             self.route_from_start,
-            {DRAFT_FOLLOW_UP: DRAFT_FOLLOW_UP, LOAD_SEARCH_PROFILE: LOAD_SEARCH_PROFILE},
+            {
+                DRAFT_FOLLOW_UP: DRAFT_FOLLOW_UP,
+                CLASSIFY_RECRUITER_EVENTS: CLASSIFY_RECRUITER_EVENTS,
+                LOAD_SEARCH_PROFILE: LOAD_SEARCH_PROFILE,
+            },
         )
         graph.add_edge(LOAD_SEARCH_PROFILE, SEARCH_PROVIDERS)
         graph.add_edge(SEARCH_PROVIDERS, NORMALIZE_JOBS)
@@ -806,6 +980,13 @@ class JobSearchGraph:
         # it leaves by the same door: the approval triple, never an executor.
         graph.add_conditional_edges(
             DRAFT_FOLLOW_UP,
+            self.route_after_follow_up,
+            {REQUEST_APPROVAL: REQUEST_APPROVAL, END: END},
+        )
+        # And so does a reply drafted to an inbound message.
+        graph.add_edge(CLASSIFY_RECRUITER_EVENTS, RECORD_RECRUITER_EVENTS)
+        graph.add_conditional_edges(
+            RECORD_RECRUITER_EVENTS,
             self.route_after_follow_up,
             {REQUEST_APPROVAL: REQUEST_APPROVAL, END: END},
         )
@@ -1553,6 +1734,155 @@ class JobSearchGraph:
             "fired_checkpoints": [],
         }
 
+    # ------------------------------------------------------------------
+    # Inbound recruiter mail
+    # ------------------------------------------------------------------
+
+    async def classify_recruiter_events(self, state: JobSearchState) -> dict[str, Any]:
+        """Decide what each inbound message is and which application it is about.
+
+        Two separate questions, answered by two separate things. *What it is*
+        goes to the `RecruiterEventExtractor`, which reads the message text and
+        returns a schema-validated classification and commitments. *Which
+        application* is `correlate_application`, a pure function over the
+        identifiers the directory has on file -- the extractor never sees the
+        applications and cannot name one, so message text cannot talk its way
+        onto an application it does not belong to.
+
+        Writes nothing. Everything this node concludes is in `recruiter_events`
+        for `record_recruiter_events` to act on, which also means it is
+        checkpointed before anything is stored.
+        """
+        if self.recruiter_event_extractor is None or self.application_directory is None:
+            raise JobSearchContractError(
+                "inbound_messages were supplied, but this graph has no recruiter event "
+                "extractor, application directory and recorder wired"
+            )
+        user_id = _require_uuid(state.get("user_id"), "user_id")
+        messages = _load(RecruiterMessage, state.get("inbound_messages"))
+        confirmed = state.get("confirmed_correlations") or {}
+        candidates = list(await self.application_directory.candidates(user_id))
+
+        events: list[RecruiterEvent] = []
+        seen: set[str] = set()
+        for message in messages:
+            key = communication_dedupe_key(message.provider_message_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            outcome = await self.recruiter_event_extractor.extract(message)
+            confirmed_id = confirmed.get(message.provider_message_id)
+            correlation = correlate_application(
+                message,
+                candidates,
+                threshold=self.correlation_threshold,
+                confirmed_application_id=(
+                    _require_uuid(confirmed_id, "confirmed_correlations") if confirmed_id else None
+                ),
+            )
+            events.append(RecruiterEvent.build(message, outcome, correlation))
+
+        return {
+            "recruiter_events": _dump(events),
+            # Consumed, so cleared, for the reason `fired_checkpoints` is.
+            "inbound_messages": [],
+            "confirmed_correlations": {},
+        }
+
+    async def record_recruiter_events(self, state: JobSearchState) -> dict[str, Any]:
+        """Record what was matched, hand the rest to a person, draft owed replies.
+
+        `triage` decides each event's fate, and the rule it applies is the
+        point of this node: an application is only moved by an event that was
+        tied to it above the correlation threshold *and* classified above the
+        confidence floor. Anything less is a `RecruiterEventReview` and an
+        `application.recruiter_event_review_required` event -- visible, and
+        inert.
+
+        A recorded event is written through `RecruiterEventRecorder` together
+        with the events it produces, so a message delivered twice yields one
+        row, one transition and one `application.interview_invite_received`.
+        A redelivery comes back `created=False` and is otherwise skipped: no
+        review is raised and no reply drafted for it a second time.
+
+        A reply the sender is waiting on becomes a `SEND_RECRUITER_MESSAGE`
+        intent carrying its drafted text. Drafting is this node's to do;
+        sending is not -- it has no executor, and the intent leaves through the
+        approval triple like every other outward-facing action.
+        """
+        if self.recruiter_event_recorder is None:  # pragma: no cover - classify raises first
+            raise JobSearchContractError("record_recruiter_events reached without a recorder")
+        events = _load(RecruiterEvent, state.get("recruiter_events"))
+        now = self.clock()
+
+        records: list[RecruiterEventRecord] = []
+        reviews: list[RecruiterEventReview] = []
+        emitted: list[EmittedEvent] = []
+        intents: list[ActionIntent] = []
+
+        for event in events:
+            decision = triage(
+                event, min_classification_confidence=self.min_classification_confidence
+            )
+            if decision.action is TriageAction.IGNORE:
+                continue
+
+            record: RecruiterEventRecord | None = None
+            reason = decision.review_reason
+            if decision.action is TriageAction.RECORD:
+                outgoing = _events_for_recorded(event, decision, now)
+                record = await self.recruiter_event_recorder.record(
+                    event, transition=decision.transition, emit=outgoing
+                )
+                records.append(record)
+                if not record.created:
+                    continue
+                emitted.extend(outgoing)
+                if record.refused_transition is not None:
+                    reason = (
+                        f"the application is '{record.status.value}', and the lifecycle does "
+                        f"not allow '{record.refused_transition.value}' from there"
+                    )
+
+            if reason:
+                review = RecruiterEventReview(
+                    dedupe_key=event.dedupe_key,
+                    provider_message_id=event.message.provider_message_id,
+                    classification=event.classification,
+                    reason=reason,
+                    application_id=record.application_id if record else None,
+                    candidates=event.correlation.candidates,
+                )
+                reviews.append(review)
+                review_event = EmittedEvent(
+                    type=JobSearchEventType.RECRUITER_EVENT_REVIEW_REQUIRED,
+                    # An unmatched message has no application to hang the event
+                    # on, so it gets a stable aggregate of its own.
+                    aggregate_id=(
+                        record.application_id if record else uuid5(NAMESPACE_URL, event.dedupe_key)
+                    ),
+                    payload=review.model_dump(mode="json"),
+                    dedupe_key=f"recruiter_event_review:{event.dedupe_key}",
+                    occurred_at=now,
+                )
+                await self.event_emitter.emit(review_event)
+                emitted.append(review_event)
+                # Nothing is drafted for an event still in question: a reply
+                # to the wrong reading of a message is worse than a late one.
+                continue
+
+            if record is not None and event.requires_reply:
+                draft = await self.reply_drafter.draft(event)
+                intents.append(_reply_intent(event, record.application_id, draft, now))
+
+        return {
+            "recruiter_event_records": _dump(records),
+            "recruiter_event_reviews": _dump(reviews),
+            "emitted_events": [*(state.get("emitted_events") or []), *_dump(emitted)],
+            "pending_actions": _dump(intents),
+            "approval_stage": STAGE_RECRUITER_OUTREACH,
+        }
+
     def _durable_wait(
         self,
         checkpoint: FollowUpCheckpoint,
@@ -1586,17 +1916,20 @@ class JobSearchGraph:
     # ------------------------------------------------------------------
 
     def route_from_start(self, state: JobSearchState) -> str:
-        """Enter at the follow-up draft when a durable wait fired, else at discovery.
+        """Enter where the input says the run is for; discovery unless told otherwise.
 
         The only routing decision made from the graph's input rather than from
         work it has done, because it answers a question the run cannot answer
         for itself: *why* was this thread invoked? A monitor acting on a
         triggered checkpoint and a caller starting a fresh search hand the same
         graph the same thread, and only the `fired_checkpoints` in the input
-        tells the two apart.
+        tells the two apart. `inbound_messages` is the same kind of signal for
+        recruiter mail.
         """
         if state.get("fired_checkpoints"):
             return DRAFT_FOLLOW_UP
+        if state.get("inbound_messages"):
+            return CLASSIFY_RECRUITER_EVENTS
         return LOAD_SEARCH_PROFILE
 
     def route_after_shortlist(self, state: JobSearchState) -> str:
@@ -1722,6 +2055,81 @@ def _follow_ups_for(
                 ),
             )
     return list(by_kind.values())
+
+
+def _events_for_recorded(
+    event: RecruiterEvent, decision: RecruiterEventTriage, now: datetime
+) -> list[EmittedEvent]:
+    """The domain events recording one matched event produces.
+
+    Built before the write and handed to the recorder, so they are stored with
+    the row or not at all. The interview-invite event is only raised for an
+    invite confident enough to propose a transition: a calendar hold is not
+    something to offer on a classification nobody would act on.
+    """
+    application_id = event.correlation.application_id
+    if application_id is None:  # pragma: no cover - triage only records matched events
+        raise JobSearchContractError("an unmatched recruiter event cannot be recorded")
+    events = [
+        EmittedEvent(
+            type=JobSearchEventType.RECRUITER_RESPONSE_RECORDED,
+            aggregate_id=application_id,
+            payload={
+                "application_id": str(application_id),
+                "provider_message_id": event.message.provider_message_id,
+                "classification": event.classification.value,
+                "implied_status": decision.transition.value if decision.transition else None,
+                "commitments": _dump(event.commitments),
+            },
+            dedupe_key=f"recruiter_event:{event.dedupe_key}",
+            occurred_at=now,
+        )
+    ]
+    if (
+        event.classification is CommunicationEventClassification.INTERVIEW_INVITE
+        and decision.transition is not None
+    ):
+        events.append(
+            EmittedEvent(
+                type=JobSearchEventType.INTERVIEW_INVITE_RECEIVED,
+                aggregate_id=application_id,
+                payload=InterviewInviteReceived.from_event(event, application_id).model_dump(
+                    mode="json"
+                ),
+                dedupe_key=f"interview_invite:{event.dedupe_key}",
+                occurred_at=now,
+            )
+        )
+    return events
+
+
+def _reply_intent(
+    event: RecruiterEvent, application_id: UUID, draft: ReplyDraft, now: datetime
+) -> ActionIntent:
+    """The approval-gated proposal to send `draft` in reply to `event`'s message."""
+    message = event.message
+    return ActionIntent(
+        kind=ActionKind.SEND_RECRUITER_MESSAGE,
+        target=(
+            f"{draft.recipient or 'recruiter'} "
+            f"(thread {message.thread_id or message.provider_message_id})"
+        ),
+        summary=(
+            f"Reply to the recruiter's {event.classification.value.replace('_', ' ')}: "
+            f"{message.subject or message.provider_message_id}"
+        ),
+        payload={
+            "application_id": str(application_id),
+            "in_reply_to": message.provider_message_id,
+            "classification": event.classification.value,
+            PAYLOAD_RECIPIENT: draft.recipient,
+            PAYLOAD_SUBJECT: draft.subject,
+            PAYLOAD_BODY: draft.body,
+        },
+        idempotency_key=f"reply-{application_id}-{message.provider_message_id}"[:255],
+        requested_by=f"graph:job_search#{RECORD_RECRUITER_EVENTS}",
+        created_at=now,
+    )
 
 
 def _decisions_from_resume(resumed: Any) -> list[ApprovalDecision]:

@@ -42,6 +42,7 @@ EXPECTED_TABLES = {
     "applications",
     "artifact_versions",
     "communication_events",
+    "commitments",
     "tool_executions",
     "policy_decisions",
     "audit_events",

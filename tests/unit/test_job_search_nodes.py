@@ -61,6 +61,16 @@ from personalos.domain.job_search import (
     ShortlistEntry,
 )
 from personalos.domain.models import ApplicationStatus, CommunicationEventClassification
+from personalos.domain.recruiter_events import (
+    CommitmentActor,
+    CorrelationOutcome,
+    CorrelationSignal,
+    ExtractedCommitment,
+    InterviewInviteReceived,
+    RecruiterEvent,
+    RecruiterEventRecord,
+    RecruiterEventReview,
+)
 from personalos.graphs import job_search as jsg
 from personalos.graphs.job_search import (
     END,
@@ -1575,6 +1585,254 @@ class TestRouters:
         assert subgraph.route_after_follow_up({"pending_actions": []}) == END
 
 
+# --- classify_recruiter_events / record_recruiter_events ----------------------
+
+
+def inbound_graph(candidates=None, extractor=None, **overrides):
+    """A graph with the inbound-mail entry wired on."""
+    return graph(
+        recruiter_event_extractor=extractor or fakes.FakeRecruiterEventExtractor(),
+        application_directory=fakes.FakeApplicationDirectory(candidates),
+        recruiter_event_recorder=fakes.FakeRecruiterEventRecorder(),
+        **overrides,
+    )
+
+
+def _inbound(*messages, **extra) -> dict:
+    return {"user_id": str(fakes.USER_ID), "inbound_messages": dumped(*messages), **extra}
+
+
+async def _classified(subgraph, *messages, **extra) -> dict:
+    """State as `record_recruiter_events` finds it."""
+    return await subgraph.classify_recruiter_events(_inbound(*messages, **extra))
+
+
+class TestClassifyRecruiterEvents:
+    async def test_classifies_and_correlates_without_writing_anything(self):
+        subgraph, ports = inbound_graph()
+        message = fakes.inbound_message()
+
+        update = await subgraph.classify_recruiter_events(_inbound(message))
+
+        assert set(update) == {"recruiter_events", "inbound_messages", "confirmed_correlations"}
+        (event,) = [RecruiterEvent.model_validate(raw) for raw in update["recruiter_events"]]
+        assert event.classification == CommunicationEventClassification.INTERVIEW_INVITE
+        assert event.correlation.outcome == CorrelationOutcome.MATCHED
+        assert event.correlation.application_id == fakes.APPLICATION_ID
+        assert CorrelationSignal.REFERENCE in event.correlation.signals
+        # The input channel is consumed, so it cannot re-route the next run.
+        assert update["inbound_messages"] == []
+        assert ports["application_directory"].calls == [fakes.USER_ID]
+        assert ports["recruiter_event_recorder"].calls == []
+        assert ports["event_emitter"].events == []
+
+    async def test_a_message_matching_only_on_company_name_is_not_linked(self):
+        subgraph, _ports = inbound_graph()
+        message = fakes.inbound_message(
+            subject="Hello from Acme", body="We have an update.", thread_id=None,
+            from_address="someone@mail.test",
+        )
+
+        update = await subgraph.classify_recruiter_events(_inbound(message))
+
+        correlation = RecruiterEvent.model_validate(update["recruiter_events"][0]).correlation
+        assert correlation.outcome == CorrelationOutcome.NEEDS_REVIEW
+        assert correlation.application_id is None
+        assert [c.application_id for c in correlation.candidates] == [fakes.APPLICATION_ID]
+
+    async def test_a_reviewers_confirmation_overrides_a_weak_match(self):
+        subgraph, _ports = inbound_graph()
+        message = fakes.inbound_message(subject="Hello", body="An update.", thread_id=None)
+
+        update = await subgraph.classify_recruiter_events(
+            _inbound(
+                message,
+                confirmed_correlations={message.provider_message_id: str(fakes.APPLICATION_ID)},
+            )
+        )
+
+        correlation = RecruiterEvent.model_validate(update["recruiter_events"][0]).correlation
+        assert correlation.application_id == fakes.APPLICATION_ID
+        assert correlation.signals == (CorrelationSignal.REVIEWER_CONFIRMED,)
+
+    async def test_the_same_message_twice_in_one_batch_is_classified_once(self):
+        subgraph, ports = inbound_graph()
+        message = fakes.inbound_message()
+
+        update = await subgraph.classify_recruiter_events(_inbound(message, message))
+
+        assert len(update["recruiter_events"]) == 1
+        assert len(ports["recruiter_event_extractor"].calls) == 1
+
+    async def test_inbound_mail_without_the_ports_is_a_contract_error(self):
+        subgraph, _ports = graph()
+
+        with pytest.raises(JobSearchContractError, match="extractor"):
+            await subgraph.classify_recruiter_events(_inbound(fakes.inbound_message()))
+
+    def test_the_three_inbound_ports_are_all_or_nothing(self):
+        with pytest.raises(ValueError, match="provided together"):
+            graph(recruiter_event_extractor=fakes.FakeRecruiterEventExtractor())
+
+
+class TestRecordRecruiterEvents:
+    async def test_records_transitions_and_stages_the_calendar_event(self):
+        commitment = ExtractedCommitment(
+            actor=CommitmentActor.USER,
+            action="send availability",
+            due_at=fakes.NOW + timedelta(days=2),
+            confidence=0.8,
+        )
+        subgraph, ports = inbound_graph(
+            extractor=fakes.FakeRecruiterEventExtractor(fakes.extraction(commitments=[commitment]))
+        )
+        message = fakes.inbound_message()
+
+        update = await subgraph.record_recruiter_events(await _classified(subgraph, message))
+
+        assert set(update) == {
+            "recruiter_event_records",
+            "recruiter_event_reviews",
+            "emitted_events",
+            "pending_actions",
+            "approval_stage",
+        }
+        (record,) = [
+            RecruiterEventRecord.model_validate(raw) for raw in update["recruiter_event_records"]
+        ]
+        assert record.created and record.transitioned
+        assert record.status == ApplicationStatus.INTERVIEWING
+        assert update["recruiter_event_reviews"] == []
+
+        events = [EmittedEvent.model_validate(raw) for raw in update["emitted_events"]]
+        assert [event.type for event in events] == [
+            JobSearchEventType.RECRUITER_RESPONSE_RECORDED,
+            JobSearchEventType.INTERVIEW_INVITE_RECEIVED,
+        ]
+        # Staged with the row by the recorder, not sent separately.
+        assert ports["recruiter_event_recorder"].staged == events
+        assert ports["event_emitter"].events == []
+        invite = InterviewInviteReceived.model_validate(events[1].payload)
+        assert invite.application_id == fakes.APPLICATION_ID
+        assert invite.source_message_id == message.provider_message_id
+        assert invite.thread_id == message.thread_id
+        # The commitment's source is the message, stamped by code.
+        assert [c.source_message_id for c in invite.commitments] == [message.provider_message_id]
+        assert invite.commitments[0].due_at == commitment.due_at
+
+    async def test_a_redelivered_message_changes_nothing_the_second_time(self):
+        subgraph, ports = inbound_graph()
+        message = fakes.inbound_message()
+        await subgraph.record_recruiter_events(await _classified(subgraph, message))
+
+        update = await subgraph.record_recruiter_events(await _classified(subgraph, message))
+
+        assert [raw["created"] for raw in update["recruiter_event_records"]] == [False]
+        assert update["emitted_events"] == []
+        assert update["pending_actions"] == []
+        recorder = ports["recruiter_event_recorder"]
+        assert len(recorder.recorded) == 1
+        assert [event.type for event in recorder.staged] == [
+            JobSearchEventType.RECRUITER_RESPONSE_RECORDED,
+            JobSearchEventType.INTERVIEW_INVITE_RECEIVED,
+        ]
+
+    async def test_a_low_confidence_match_goes_to_review_and_moves_nothing(self):
+        subgraph, ports = inbound_graph()
+        message = fakes.inbound_message(
+            subject="Hello from Acme", body="We would like to interview you.", thread_id=None,
+            from_address="someone@mail.test",
+        )
+
+        update = await subgraph.record_recruiter_events(await _classified(subgraph, message))
+
+        assert update["recruiter_event_records"] == []
+        (review,) = [
+            RecruiterEventReview.model_validate(raw) for raw in update["recruiter_event_reviews"]
+        ]
+        assert review.application_id is None
+        assert [c.application_id for c in review.candidates] == [fakes.APPLICATION_ID]
+        recorder = ports["recruiter_event_recorder"]
+        assert recorder.calls == []
+        assert recorder.statuses[fakes.APPLICATION_ID] == ApplicationStatus.APPLIED
+        assert ports["event_emitter"].types() == [
+            JobSearchEventType.RECRUITER_EVENT_REVIEW_REQUIRED.value
+        ]
+        assert update["pending_actions"] == []
+
+    async def test_an_uncertain_classification_is_recorded_but_proposes_no_transition(self):
+        subgraph, ports = inbound_graph(
+            extractor=fakes.FakeRecruiterEventExtractor(fakes.extraction(confidence=0.4))
+        )
+
+        update = await subgraph.record_recruiter_events(
+            await _classified(subgraph, fakes.inbound_message())
+        )
+
+        record = RecruiterEventRecord.model_validate(update["recruiter_event_records"][0])
+        assert record.created and not record.transitioned
+        assert record.status == ApplicationStatus.APPLIED
+        assert len(update["recruiter_event_reviews"]) == 1
+        # No calendar event for an invite nobody would act on.
+        assert [e.type for e in ports["recruiter_event_recorder"].staged] == [
+            JobSearchEventType.RECRUITER_RESPONSE_RECORDED
+        ]
+
+    async def test_a_transition_the_lifecycle_refuses_is_reviewed_not_forced(self):
+        subgraph, ports = inbound_graph(
+            extractor=fakes.FakeRecruiterEventExtractor(
+                fakes.extraction(CommunicationEventClassification.OFFER)
+            )
+        )
+
+        update = await subgraph.record_recruiter_events(
+            await _classified(subgraph, fakes.inbound_message())
+        )
+
+        record = RecruiterEventRecord.model_validate(update["recruiter_event_records"][0])
+        assert record.refused_transition == ApplicationStatus.OFFER
+        assert record.status == ApplicationStatus.APPLIED
+        review = RecruiterEventReview.model_validate(update["recruiter_event_reviews"][0])
+        assert review.application_id == fakes.APPLICATION_ID
+        assert "lifecycle" in review.reason
+        assert ports["event_emitter"].events[0].aggregate_id == fakes.APPLICATION_ID
+
+    async def test_unrelated_mail_is_dropped(self):
+        subgraph, ports = inbound_graph(
+            extractor=fakes.FakeRecruiterEventExtractor(
+                fakes.extraction(CommunicationEventClassification.UNRELATED)
+            )
+        )
+        message = fakes.inbound_message(
+            subject="12 new jobs", body="Job alert", thread_id=None, from_address="a@board.test"
+        )
+
+        update = await subgraph.record_recruiter_events(await _classified(subgraph, message))
+
+        assert update["recruiter_event_records"] == []
+        assert update["recruiter_event_reviews"] == []
+        assert ports["recruiter_event_recorder"].calls == []
+        assert ports["event_emitter"].events == []
+
+    async def test_an_owed_reply_is_drafted_as_an_intent_and_never_sent(self):
+        subgraph, ports = inbound_graph(
+            extractor=fakes.FakeRecruiterEventExtractor(fakes.extraction(requires_reply=True))
+        )
+        message = fakes.inbound_message()
+
+        update = await subgraph.record_recruiter_events(await _classified(subgraph, message))
+
+        (intent,) = [ActionIntent.model_validate(raw) for raw in update["pending_actions"]]
+        assert intent.kind == ActionKind.SEND_RECRUITER_MESSAGE
+        assert intent.payload["recipient"] == message.from_address
+        assert intent.payload["subject"] == f"Re: {message.subject}"
+        assert intent.payload["body"]
+        assert intent.payload["in_reply_to"] == message.provider_message_id
+        assert update["approval_stage"] == STAGE_RECRUITER_OUTREACH
+        assert subgraph.route_after_follow_up(update) == REQUEST_APPROVAL
+        assert ports["action_executor"].executed == []
+
+
 # --- Coverage guard -----------------------------------------------------------
 
 
@@ -1602,6 +1860,8 @@ NODE_TEST_CLASSES = {
     jsg.HANDLE_RECRUITER_RESPONSE: TestHandleRecruiterResponse,
     jsg.CREATE_FOLLOW_UP_CHECKPOINT: TestCreateFollowUpCheckpoint,
     jsg.DRAFT_FOLLOW_UP: TestDraftFollowUp,
+    jsg.CLASSIFY_RECRUITER_EVENTS: TestClassifyRecruiterEvents,
+    jsg.RECORD_RECRUITER_EVENTS: TestRecordRecruiterEvents,
 }
 
 

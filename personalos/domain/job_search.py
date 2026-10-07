@@ -1384,6 +1384,13 @@ class JobSearchEventType(str, Enum):
     #: because most scheduled follow-ups never become this one: the recruiter
     #: replies, the wait resolves silently, and nothing is emitted at all.
     FOLLOW_UP_TRIGGERED = "application.follow_up_triggered"
+    #: An interview invite was recorded against an application. The payload is
+    #: `personalos.domain.recruiter_events.InterviewInviteReceived`, which is
+    #: what a calendar step reads to propose a hold.
+    INTERVIEW_INVITE_RECEIVED = "application.interview_invite_received"
+    #: An inbound message could not be tied to an application, or classified,
+    #: confidently enough to act on. Nothing was transitioned; a person decides.
+    RECRUITER_EVENT_REVIEW_REQUIRED = "application.recruiter_event_review_required"
 
 
 class EmittedEvent(_Value):
@@ -1417,6 +1424,10 @@ class RecruiterMessage(_Value):
     body: str = ""
     subject: str | None = None
     from_address: str | None = None
+    #: The provider's conversation id, when it has one. A reply on a thread
+    #: already tied to an application is the strongest identifier there is for
+    #: which application a message is about.
+    thread_id: str | None = None
 
 
 class RecruiterResponse(_Value):

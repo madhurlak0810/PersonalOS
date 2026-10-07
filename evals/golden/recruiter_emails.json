@@ -1,0 +1,251 @@
+{
+  "description": "Synthetic recruiter-side emails with a hand-assigned classification each. No real person, company or message.",
+  "received_at": "2026-10-07T09:00:00",
+  "emails": [
+    {
+      "id": "golden-01",
+      "expected": "interview_invite",
+      "subject": "Interview with Northwind - Senior Backend Engineer",
+      "from_address": "priya@northwind.example",
+      "body": "Hi Sam,\n\nThanks for applying. We'd like to schedule a 45-minute technical interview with two of our engineers. Please send your availability by Friday and I'll get something on the calendar.\n\nPriya"
+    },
+    {
+      "id": "golden-02",
+      "expected": "interview_invite",
+      "subject": "Next steps",
+      "from_address": "talent@globex.example",
+      "body": "Hello,\n\nThe team enjoyed reading your application and would like to move you to the next round. Could you pick a time on my Calendly for a 30 minute phone screen this week?\n\nBest,\nDan"
+    },
+    {
+      "id": "golden-03",
+      "expected": "interview_invite",
+      "subject": "Onsite confirmation",
+      "from_address": "coordinator@initech.example",
+      "body": "Hi Sam, confirming your onsite on Tuesday at 10am at our Austin office. You will meet four people over about three hours. Let me know if you need anything beforehand."
+    },
+    {
+      "id": "golden-04",
+      "expected": "interview_invite",
+      "subject": "Quick chat?",
+      "from_address": "maria@hooli.example",
+      "body": "Hi Sam - I lead recruiting for the platform org. Your background looks like a strong fit and I'd love to set up an intro call with the hiring manager. What does your calendar look like next week?"
+    },
+    {
+      "id": "golden-05",
+      "expected": "interview_invite",
+      "subject": "Re: Staff Engineer application",
+      "from_address": "jobs@umbrella.example",
+      "body": "We would like to invite you to a video interview for the Staff Engineer position. The interview will last one hour. Please reply with three time slots that work for you before October 16."
+    },
+    {
+      "id": "golden-06",
+      "expected": "rejection",
+      "subject": "Your application to Globex",
+      "from_address": "no-reply@globex.example",
+      "body": "Dear Sam,\n\nThank you for your interest in Globex and for taking the time to apply. After careful consideration, we have decided to move forward with other candidates whose experience more closely matches our needs. We wish you the best in your search."
+    },
+    {
+      "id": "golden-07",
+      "expected": "rejection",
+      "subject": "Update on your candidacy",
+      "from_address": "priya@northwind.example",
+      "body": "Hi Sam,\n\nI wanted to follow up after your interviews last week. Unfortunately we will not be moving forward at this time. The team was impressed, and I'd encourage you to apply again in the future."
+    },
+    {
+      "id": "golden-08",
+      "expected": "rejection",
+      "subject": "Staff Engineer role",
+      "from_address": "jobs@umbrella.example",
+      "body": "Thank you for applying. We regret to inform you that the position has been filled. We will keep your resume on file."
+    },
+    {
+      "id": "golden-09",
+      "expected": "rejection",
+      "subject": "Thanks for interviewing with us",
+      "from_address": "dan@stark.example",
+      "body": "Sam, thanks again for the time you put into the process. This was a hard call, but we've decided to go with another candidate for this role. Happy to share feedback if useful."
+    },
+    {
+      "id": "golden-10",
+      "expected": "rejection",
+      "subject": "Application status: Backend Engineer",
+      "from_address": "careers@vandelay.example",
+      "body": "We appreciate your interest in Vandelay. At this time you have not been selected for the Backend Engineer position."
+    },
+    {
+      "id": "golden-11",
+      "expected": "offer",
+      "subject": "Offer from Northwind!",
+      "from_address": "priya@northwind.example",
+      "body": "Hi Sam,\n\nGreat news - we are pleased to offer you the Senior Backend Engineer position. The offer letter is attached with the full compensation package. Please let us know your decision by October 20.\n\nPriya"
+    },
+    {
+      "id": "golden-12",
+      "expected": "offer",
+      "subject": "Your offer letter",
+      "from_address": "hr@globex.example",
+      "body": "Congratulations! Attached is your formal offer of employment with Globex. Please sign and return it within 5 business days. We will then confirm your start date."
+    },
+    {
+      "id": "golden-13",
+      "expected": "offer",
+      "subject": "Following our call",
+      "from_address": "dan@stark.example",
+      "body": "Sam - as discussed, we'd like to extend an offer for the Staff Engineer role at a base of $210k plus equity. I'll send the paperwork tomorrow. Excited to hopefully have you on the team."
+    },
+    {
+      "id": "golden-14",
+      "expected": "offer",
+      "subject": "Verbal offer",
+      "from_address": "maria@hooli.example",
+      "body": "Hi Sam, the committee approved and I'm delighted to extend you a verbal offer. The written offer will follow once you confirm you are still interested. Can we talk through the details on a call?"
+    },
+    {
+      "id": "golden-15",
+      "expected": "offer",
+      "subject": "Welcome aboard (pending your signature)",
+      "from_address": "people@initech.example",
+      "body": "We are thrilled to make you an offer to join Initech as a Software Engineer III. Salary, bonus and benefits are described in the attached document."
+    },
+    {
+      "id": "golden-16",
+      "expected": "action_required",
+      "subject": "Action required: complete your assessment",
+      "from_address": "assessments@globex.example",
+      "body": "Hi Sam,\n\nAs the next step in our process, please complete the online assessment linked below. It takes about 90 minutes and must be submitted by October 14."
+    },
+    {
+      "id": "golden-17",
+      "expected": "action_required",
+      "subject": "Take-home exercise",
+      "from_address": "dan@stark.example",
+      "body": "Attached is our take-home coding challenge. Most candidates spend 3-4 hours. Please send your solution back within 7 days."
+    },
+    {
+      "id": "golden-18",
+      "expected": "action_required",
+      "subject": "Background check authorization",
+      "from_address": "hr@northwind.example",
+      "body": "To continue, we need you to complete the background check form from our vendor. You will receive a separate email with a link. Kindly complete it by Friday."
+    },
+    {
+      "id": "golden-19",
+      "expected": "action_required",
+      "subject": "A few more details needed",
+      "from_address": "jobs@umbrella.example",
+      "body": "Thanks for your application. Before we can review it, please upload a copy of your work authorization and fill out the attached questionnaire."
+    },
+    {
+      "id": "golden-20",
+      "expected": "action_required",
+      "subject": "References",
+      "from_address": "maria@hooli.example",
+      "body": "Hi Sam, could you provide the names and contact details of two professional references? We need them before the hiring committee meets on Thursday."
+    },
+    {
+      "id": "golden-21",
+      "expected": "recruiter_response",
+      "subject": "Re: Senior Backend Engineer",
+      "from_address": "priya@northwind.example",
+      "body": "Hi Sam, thanks for your note. To answer your question: the role is fully remote within the US, and the team is eight engineers. Let me know if anything else would help."
+    },
+    {
+      "id": "golden-22",
+      "expected": "recruiter_response",
+      "subject": "Your profile",
+      "from_address": "sourcer@stark.example",
+      "body": "Hi Sam, I came across your profile and wanted to reach out about a Staff Engineer opening on our infrastructure team. Are you open to hearing more?"
+    },
+    {
+      "id": "golden-23",
+      "expected": "recruiter_response",
+      "subject": "Re: salary range",
+      "from_address": "dan@stark.example",
+      "body": "Thanks for the reply. The range for this level is 190-220k base. I'm checking with the hiring manager on the leveling question and will come back to you."
+    },
+    {
+      "id": "golden-24",
+      "expected": "recruiter_response",
+      "subject": "Checking in",
+      "from_address": "maria@hooli.example",
+      "body": "Hi Sam, just following up on my last message - are you still interested in the platform role? No pressure either way."
+    },
+    {
+      "id": "golden-25",
+      "expected": "recruiter_response",
+      "subject": "Re: timeline",
+      "from_address": "talent@globex.example",
+      "body": "Hi Sam, good question. We expect to make a decision in the next two weeks. I'll be in touch as soon as I know more."
+    },
+    {
+      "id": "golden-26",
+      "expected": "general_update",
+      "subject": "We received your application",
+      "from_address": "no-reply@globex.example",
+      "body": "Thank you for applying to the Backend Engineer position at Globex. We have received your application and our team will review it. If your qualifications match, we will contact you."
+    },
+    {
+      "id": "golden-27",
+      "expected": "general_update",
+      "subject": "Application submitted",
+      "from_address": "notifications@ats.example",
+      "body": "Your application for Senior Backend Engineer at Northwind has been submitted successfully. You can check its status at any time in your candidate portal."
+    },
+    {
+      "id": "golden-28",
+      "expected": "general_update",
+      "subject": "Still reviewing",
+      "from_address": "jobs@umbrella.example",
+      "body": "We wanted to let you know that your application is still under review. We are working through a high volume of candidates and appreciate your patience."
+    },
+    {
+      "id": "golden-29",
+      "expected": "general_update",
+      "subject": "Thanks for your interest in Initech",
+      "from_address": "careers@initech.example",
+      "body": "Thanks for your interest in Initech. This is an automated message to confirm we have your application on file."
+    },
+    {
+      "id": "golden-30",
+      "expected": "general_update",
+      "subject": "Hiring update",
+      "from_address": "talent@hooli.example",
+      "body": "A quick update: the hiring manager is out this week, so the process is paused until Monday. Nothing is needed from you."
+    },
+    {
+      "id": "golden-31",
+      "expected": "unrelated",
+      "subject": "12 new jobs for you",
+      "from_address": "alerts@jobboard.example",
+      "body": "Job alert: 12 new jobs matching 'backend engineer' in Austin, TX. Senior Backend Engineer at Acme, Staff Engineer at Contoso... Unsubscribe from these alerts."
+    },
+    {
+      "id": "golden-32",
+      "expected": "unrelated",
+      "subject": "Your weekly newsletter",
+      "from_address": "news@techdigest.example",
+      "body": "This week: how to ace the system design interview, salary trends for 2026, and an offer on our premium plan. View in browser. Manage your preferences."
+    },
+    {
+      "id": "golden-33",
+      "expected": "unrelated",
+      "subject": "Your receipt from CloudHost",
+      "from_address": "billing@cloudhost.example",
+      "body": "Thanks for your payment. Your invoice for October is attached. Amount charged: $12.00."
+    },
+    {
+      "id": "golden-34",
+      "expected": "unrelated",
+      "subject": "Free webinar: negotiating your offer",
+      "from_address": "events@careercoach.example",
+      "body": "Join our free webinar on Thursday and learn how to negotiate a job offer like a pro. Seats are limited - register now!"
+    },
+    {
+      "id": "golden-35",
+      "expected": "unrelated",
+      "subject": "Dinner Saturday?",
+      "from_address": "alex@friends.example",
+      "body": "Hey! Are you around Saturday? Thinking of trying the new ramen place. Let me know."
+    }
+  ]
+}
