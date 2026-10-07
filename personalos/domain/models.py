@@ -655,9 +655,9 @@ class CommunicationEventClassification(str, Enum):
     """How a recruiter-side message tied to an application was classified.
 
     Recorded for every inbound communication so an application's history can
-    be read without re-parsing message content, even though the standalone
-    Communications Agent that will produce these classifications is out of
-    scope for this build — this table only captures its signal.
+    be read without re-parsing message content. The classification is produced
+    inside the Job Search graph (see `personalos.domain.recruiter_events`);
+    there is no standalone Communications Agent in this build.
     """
 
     RECRUITER_RESPONSE = "recruiter_response"
@@ -666,6 +666,9 @@ class CommunicationEventClassification(str, Enum):
     OFFER = "offer"
     ACTION_REQUIRED = "action_required"
     GENERAL_UPDATE = "general_update"
+    #: Not about any application: a job alert, a newsletter, a receipt. The
+    #: classifier needs somewhere to put these that is not a lifecycle signal.
+    UNRELATED = "unrelated"
 
 
 class ToolExecutionStatus(str, Enum):

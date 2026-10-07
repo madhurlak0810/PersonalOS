@@ -48,7 +48,17 @@ from personalos.domain.models import (
     ApplicationStatus,
     ArtifactType,
     CommunicationEventClassification,
+    InvalidApplicationTransition,
     validate_application_status_transition,
+)
+from personalos.domain.recruiter_events import (
+    ApplicationCandidate,
+    ExtractedCommitment,
+    ExtractionOutcome,
+    ExtractionSource,
+    RecruiterEvent,
+    RecruiterEventExtraction,
+    RecruiterEventRecord,
 )
 
 #: Fixed ids so assertions can name them.
@@ -619,4 +629,138 @@ class FakeRecruiterClassifier:
             implied_status=implied,
             requires_reply=requires_reply,
             summary=message.subject,
+        )
+
+
+# --- Inbound recruiter mail ---------------------------------------------------
+
+
+def application_candidate(**overrides: Any) -> ApplicationCandidate:
+    """What the directory has on file for the fixture application."""
+    fields: dict[str, Any] = {
+        "application_id": APPLICATION_ID,
+        "company": "Acme, Inc.",
+        "title": "Senior Backend Engineer",
+        "status": ApplicationStatus.APPLIED,
+        "reference": "REQ-48213",
+    }
+    fields.update(overrides)
+    return ApplicationCandidate(**fields)
+
+
+def inbound_message(message_id: str = "msg-in-1", **overrides: Any) -> RecruiterMessage:
+    """An interview invite that names the fixture application's requisition."""
+    fields: dict[str, Any] = {
+        "provider_message_id": message_id,
+        "received_at": NOW,
+        "subject": "Interview for REQ-48213",
+        "from_address": "recruiter@acme.test",
+        "body": "We would like to schedule an interview. Please send times by Friday.",
+        "thread_id": "thread-acme-1",
+    }
+    fields.update(overrides)
+    return RecruiterMessage(**fields)
+
+
+def extraction(
+    classification: CommunicationEventClassification = (
+        CommunicationEventClassification.INTERVIEW_INVITE
+    ),
+    *,
+    confidence: float = 0.9,
+    requires_reply: bool = False,
+    commitments: Sequence[ExtractedCommitment] = (),
+) -> RecruiterEventExtraction:
+    return RecruiterEventExtraction(
+        classification=classification,
+        confidence=confidence,
+        summary="summary",
+        requires_reply=requires_reply,
+        commitments=tuple(commitments),
+    )
+
+
+class FakeRecruiterEventExtractor:
+    """Returns a scripted extraction per message id, or one default for all."""
+
+    def __init__(
+        self,
+        default: RecruiterEventExtraction | None = None,
+        by_message: dict[str, RecruiterEventExtraction] | None = None,
+    ):
+        self.default = default or extraction()
+        self.by_message = by_message or {}
+        self.calls: list[RecruiterMessage] = []
+
+    async def extract(self, message: RecruiterMessage) -> ExtractionOutcome:
+        self.calls.append(message)
+        return ExtractionOutcome(
+            extraction=self.by_message.get(message.provider_message_id, self.default),
+            source=ExtractionSource.MODEL,
+        )
+
+
+class FakeApplicationDirectory:
+    """Returns a fixed list of correlation candidates for any user."""
+
+    def __init__(self, candidates: Sequence[ApplicationCandidate] | None = None):
+        self._candidates = list(candidates if candidates is not None else [application_candidate()])
+        self.calls: list[UUID] = []
+
+    async def candidates(self, user_id: UUID) -> Sequence[ApplicationCandidate]:
+        self.calls.append(user_id)
+        return self._candidates
+
+
+class FakeRecruiterEventRecorder:
+    """Records events once per dedupe key and enforces the lifecycle.
+
+    Both behaviours belong to the real store and are kept here for the reason
+    `FakeApplicationStore` validates transitions: a fake that recorded a
+    redelivery twice, or accepted any status, would let a node test pass on
+    behaviour production does not have.
+    """
+
+    def __init__(self, statuses: dict[UUID, ApplicationStatus] | None = None):
+        self.statuses = statuses or {APPLICATION_ID: ApplicationStatus.APPLIED}
+        self.recorded: dict[str, RecruiterEvent] = {}
+        self.staged: list[EmittedEvent] = []
+        self.calls: list[RecruiterEvent] = []
+
+    async def record(
+        self,
+        event: RecruiterEvent,
+        *,
+        transition: ApplicationStatus | None,
+        emit: Sequence[EmittedEvent],
+    ) -> RecruiterEventRecord:
+        self.calls.append(event)
+        application_id = event.correlation.application_id
+        assert application_id is not None, "only matched events may be recorded"
+        current = self.statuses[application_id]
+        fields: dict[str, Any] = {
+            "dedupe_key": event.dedupe_key,
+            "application_id": application_id,
+            "communication_event_id": uuid4(),
+        }
+        if event.dedupe_key in self.recorded:
+            return RecruiterEventRecord(created=False, status=current, **fields)
+
+        self.recorded[event.dedupe_key] = event
+        self.staged.extend(emit)
+        transitioned, refused = False, None
+        if transition is not None and transition is not current:
+            try:
+                validate_application_status_transition(current, transition)
+            except InvalidApplicationTransition:
+                refused = transition
+            else:
+                self.statuses[application_id] = transition
+                transitioned = True
+        return RecruiterEventRecord(
+            created=True,
+            status=self.statuses[application_id],
+            transitioned=transitioned,
+            refused_transition=refused,
+            **fields,
         )

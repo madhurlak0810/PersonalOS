@@ -155,7 +155,10 @@ reach is not visible at its construction site. Four are genuinely optional:
 the posting normalizer (which has a pure, dependency-free default), the
 recruiter inbox plus its classifier, which are what turn the
 recruiter-response branch on and must be supplied together, and the pending
-checkpoint scheduler, which turns durable follow-up waits on. That last one is
+checkpoint scheduler, which turns durable follow-up waits on. The inbound-mail
+entry adds three more that must be supplied together — a recruiter event
+extractor, an application directory and a recruiter event recorder — plus a
+reply drafter with a pure default. The checkpoint scheduler is
 optional rather than defaulted because scheduling a wait no process will ever
 sweep is worse than scheduling none — the row reads, in SQL, as a follow-up
 that is coming.

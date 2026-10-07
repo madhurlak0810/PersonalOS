@@ -46,6 +46,7 @@ from personalos.persistence.pending_checkpoints import (
     StorePendingCheckpointScheduler,
 )
 from personalos.persistence.policy_log import SqlPolicyDecisionLog
+from personalos.persistence.recruiter_events import SqlRecruiterEventStore
 from personalos.persistence.repositories import JobRepository
 from personalos.policy import PolicyEngine, default_policy_engine
 from personalos.providers import (
@@ -429,6 +430,20 @@ def build_application_lifecycle_store(
     return ApplicationLifecycleStore(session_factory)
 
 
+def build_recruiter_event_store(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> SqlRecruiterEventStore:
+    """Build the store behind inbound recruiter mail.
+
+    Pass the result to `JobSearchGraph` as both `application_directory=` and
+    `recruiter_event_recorder=`, with an extractor from
+    `personalos.models.recruiter_events` as `recruiter_event_extractor=`:
+    `anthropic_recruiter_event_extractor()` for Claude, or
+    `RuleBasedRecruiterEventExtractor()` to run on the deterministic rules alone.
+    """
+    return SqlRecruiterEventStore(session_factory)
+
+
 def build_pending_checkpoint_store(
     session_factory: Callable[[], object] = SessionLocal,
 ) -> PendingCheckpointStore:
@@ -557,6 +572,7 @@ __all__ = [
     "build_workflow_lease_store",
     "build_journaled_action_executor",
     "build_tool_executor",
+    "build_recruiter_event_store",
     "build_pending_checkpoint_store",
     "build_pending_checkpoint_scheduler",
     "register_job_search_thread",
