@@ -29,6 +29,7 @@ from personalos.mcp.adapter import MCPToolInvoker
 from personalos.mcp.base import MCPServer
 from personalos.mcp.manager import MCPServerManager, get_mcp_manager
 from personalos.persistence.action_journal import ActionExecutorPort, JournaledActionExecutor
+from personalos.persistence.application_lifecycle import ApplicationLifecycleStore
 from personalos.persistence.artifact_drafts import SqlArtifactDraftStore
 from personalos.persistence.checkpointer import (
     SqlAlchemyCheckpointSaver,
@@ -414,6 +415,18 @@ def build_tool_executor(
         ExecutionLedger(session_factory, workflow_id=workflow_id),
         reconciler=reconciler,
     )
+
+
+def build_application_lifecycle_store(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> ApplicationLifecycleStore:
+    """Build the store that moves applications along their lifecycle.
+
+    Shared, like `build_pending_checkpoint_store`, by processes with no other
+    connection: whatever acts on a recommended transition writes through it,
+    and `apps.worker.stall_monitor` sweeps the same rows on its own schedule.
+    """
+    return ApplicationLifecycleStore(session_factory)
 
 
 def build_pending_checkpoint_store(

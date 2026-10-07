@@ -11,13 +11,17 @@ from sqlalchemy.orm import Session
 from personalos.domain.context import ExecutionContext
 from personalos.domain.credentials import CredentialKind, CredentialRef
 from personalos.domain.models import (
+    APPLICATION_AGGREGATE_TYPE,
+    APPLICATION_STATUS_CHANGED_EVENT,
     ApplicationStatus,
+    ApplicationTransitionConflict,
     Job,
     JobStatus,
     OperationRecord,
     OperationStatus,
     OutboxEventStatus,
     ToolExecutionStatus,
+    resume_status_after,
     validate_application_status_transition,
     validate_evidence_links,
 )
@@ -559,13 +563,36 @@ class ApplicationRepository:
         )
 
     def update_status(
-        self, application_id: UUID, new_status: ApplicationStatus, *, commit: bool = True
+        self,
+        application_id: UUID,
+        new_status: ApplicationStatus,
+        *,
+        reason: str | None = None,
+        actor: str = "system",
+        now: datetime | None = None,
+        quiet_since: datetime | None = None,
+        commit: bool = True,
     ) -> ApplicationModel:
-        """Move an application to `new_status`.
+        """Move an application to `new_status`, and record that it moved.
 
-        Raises `ValueError` if the application does not exist, or
+        One transaction does three things, or none of them: the guarded
+        `UPDATE` of `applications.status`, an `application.status_changed` row
+        appended to `event_log`, and `application_status_view` moved to point
+        at that row. There is no way to change the status that skips the event.
+
+        Raises `ValueError` if the application does not exist,
         `InvalidApplicationTransition` if `new_status` is not reachable from
-        the application's current status (e.g. DISCOVERED -> OFFER).
+        the application's current status (e.g. DISCOVERED -> OFFER), or
+        `ApplicationTransitionConflict` if another writer moved the
+        application after it was read here.
+
+        The write is `UPDATE ... WHERE id = ? AND status = <the status just
+        validated against>`, for the reason `PendingCheckpointStore.close` is:
+        of two writers racing from the same status exactly one updates a row,
+        and only that one emits an event. `quiet_since` tightens the guard to
+        `last_activity_at <= quiet_since`, which is how the stall check
+        refuses to stall an application that became active after it was
+        selected.
 
         `commit=False` leaves the change pending on the session so a caller
         can write an `outbox_events` row (see `OutboxEventRepository.create`)
@@ -576,16 +603,65 @@ class ApplicationRepository:
             raise ValueError(f"Application {application_id} not found")
 
         current = ApplicationStatus(db_application.status)
-        validate_application_status_transition(current, new_status)
+        held_from = (
+            ApplicationStatus(db_application.resume_status)
+            if db_application.resume_status
+            else None
+        )
+        validate_application_status_transition(current, new_status, resume_status=held_from)
+        next_held_from = resume_status_after(current, new_status, resume_status=held_from)
 
-        db_application.status = new_status.value
-        db_application.updated_at = datetime.utcnow()
-        if new_status == ApplicationStatus.APPLIED:
-            db_application.applied_at = datetime.utcnow()
+        now = now or datetime.utcnow()
+        values: dict[Any, Any] = {
+            ApplicationModel.status: new_status.value,
+            ApplicationModel.resume_status: next_held_from.value if next_held_from else None,
+            ApplicationModel.updated_at: now,
+        }
+        # Stalling is the absence of activity, not an instance of it.
+        if new_status is not ApplicationStatus.STALLED:
+            values[ApplicationModel.last_activity_at] = now
+        # Only the first arrival: resuming a held application back to APPLIED
+        # must not re-date when it was applied to.
+        if new_status is ApplicationStatus.APPLIED and db_application.applied_at is None:
+            values[ApplicationModel.applied_at] = now
+
+        guard = [ApplicationModel.id == application_id, ApplicationModel.status == current.value]
+        if quiet_since is not None:
+            guard.append(ApplicationModel.last_activity_at <= quiet_since)
+        updated = (
+            self.session.query(ApplicationModel)
+            .filter(*guard)
+            .update(values, synchronize_session=False)
+        )
+        if updated != 1:
+            raise ApplicationTransitionConflict(
+                f"application {application_id} changed while moving it from "
+                f"'{current.value}' to '{new_status.value}'"
+            )
+        self.session.refresh(db_application)
+
+        event = EventLogRepository(self.session).append(
+            aggregate_type=APPLICATION_AGGREGATE_TYPE,
+            aggregate_id=application_id,
+            event_type=APPLICATION_STATUS_CHANGED_EVENT,
+            payload={
+                "from": current.value,
+                "to": new_status.value,
+                "resume_status": next_held_from.value if next_held_from else None,
+                "actor": actor,
+                "reason": reason,
+            },
+            occurred_at=now,
+            commit=False,
+        )
+        ApplicationStatusViewRepository(self.session).recompute(
+            application_id=application_id,
+            status=new_status.value,
+            last_event_id=event.id,
+            commit=False,
+        )
         if commit:
             self.session.commit()
-        else:
-            self.session.flush()
         return db_application
 
 

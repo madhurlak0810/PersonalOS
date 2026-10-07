@@ -758,7 +758,8 @@ class ApprovalModel(Base):
 # `applications.status` is constrained by its Enum to the values in
 # `personalos.domain.models.ApplicationStatus`, but the *transition* between
 # them -- whether DISCOVERED may become SAVED, never OFFER directly -- is
-# enforced by `ApplicationRepository.update_status` calling
+# enforced by `personalos.persistence.application_lifecycle.apply_transition`
+# (which `ApplicationRepository.update_status` delegates to) calling
 # `personalos.domain.models.validate_application_status_transition`. The
 # column alone only rejects an unknown status string, not an illegal move.
 
@@ -877,19 +878,31 @@ class ApplicationModel(Base):
             "preparing",
             "ready_to_apply",
             "applied",
+            "response",
             "interviewing",
             "offer",
+            "accepted",
+            "declined",
             "rejected",
             "withdrawn",
             "skipped",
+            "follow_up_pending",
+            "stalled",
             name="application_status",
         ),
         nullable=False,
         default="discovered",
     )
+    #: The status a held application (FOLLOW_UP_PENDING, STALLED) was held
+    #: from, and so what it may resume to. NULL in every other status.
+    resume_status = Column(String(32), nullable=True)
     resume_doc_id = Column(String(255), nullable=True)
     notes = Column(Text, nullable=True)
     applied_at = Column(DateTime, nullable=True)
+    #: When something last happened on this application: a transition, or
+    #: anything reported through `ApplicationLifecycleStore.record_activity`.
+    #: The stall check reads this and nothing else -- never a chat transcript.
+    last_activity_at = Column(DateTime, nullable=True, default=datetime.utcnow)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -899,6 +912,8 @@ class ApplicationModel(Base):
         ),
         Index("ix_applications_user_id", "user_id"),
         Index("ix_applications_status", "status"),
+        # The stall check's index: "still in play, quiet the longest first".
+        Index("ix_applications_status_last_activity_at", "status", "last_activity_at"),
     )
 
     def to_dict(self) -> dict:
@@ -911,9 +926,13 @@ class ApplicationModel(Base):
             if self.candidate_profile_id
             else None,
             "status": self.status,
+            "resume_status": self.resume_status,
             "resume_doc_id": self.resume_doc_id,
             "notes": self.notes,
             "applied_at": self.applied_at.isoformat() if self.applied_at else None,
+            "last_activity_at": (
+                self.last_activity_at.isoformat() if self.last_activity_at else None
+            ),
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
@@ -1268,6 +1287,9 @@ class CredentialModel(Base):
 # `application_status_view` is a mutable projection recomputed from
 # `event_log` -- the current-status read surface for an application, rebuilt
 # by `ApplicationStatusViewRepository.recompute` rather than written directly.
+# `personalos.persistence.application_lifecycle.apply_transition` is what
+# keeps the two in step: one transaction appends the `application.status_changed`
+# event and moves the projection to it.
 
 
 class OutboxEventModel(Base):

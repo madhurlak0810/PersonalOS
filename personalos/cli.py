@@ -53,5 +53,22 @@ def worker():
     logger.info("Worker not yet implemented")
 
 
+@cli.command()
+@click.option("--once", is_flag=True, help="Run a single sweep and exit (for cron).")
+def stall_monitor(once: bool):
+    """Move applications with no activity past the stall window to STALLED."""
+    import asyncio
+
+    from apps.worker.stall_monitor import StalledApplicationMonitor
+    from personalos.bootstrap import build_application_lifecycle_store
+
+    monitor = StalledApplicationMonitor(store=build_application_lifecycle_store())
+    if once:
+        report = monitor.sweep()
+        logger.info("Stall sweep: %s stalled, %s skipped", len(report.stalled), len(report.skipped))
+        return
+    asyncio.run(monitor.run_forever())
+
+
 if __name__ == "__main__":
     cli()
