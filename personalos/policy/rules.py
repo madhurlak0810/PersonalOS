@@ -178,6 +178,53 @@ class UntrustedOriginRule(PolicyRule):
         return None
 
 
+class DocumentOverwriteRule(PolicyRule):
+    """Replacing an existing document needs its precondition and a human.
+
+    Whether a write replaces something is read off the intent, not the disk
+    (a rule performs no I/O): the files server refuses to replace a file
+    unless the caller names the hash of the version it read, so an intent
+    carrying that hash is an overwrite and one without it can only create.
+
+    Independent of ``intent.mutating`` and of any auto-approval, so listing
+    ``files.write_file`` as safe to run unattended -- reasonable for creating
+    drafts -- can never extend to writing over a file that is already there.
+    """
+
+    name = "document_overwrite"
+
+    def __init__(
+        self,
+        overwrite_tools: Iterable[str] = ("files.overwrite_document",),
+        guarded_write_tools: Iterable[str] = ("files.write_file",),
+        precondition_arg: str = "expected_sha256",
+    ):
+        """Take the tools that always overwrite and those that do when guarded."""
+        self.overwrite_tools: set[str] = set(overwrite_tools)
+        self.guarded_write_tools: set[str] = set(guarded_write_tools)
+        self.precondition_arg = precondition_arg
+
+    def evaluate(self, intent: ToolIntent) -> PolicyDecision | None:
+        """Deny an overwrite with no precondition; hold every other one for approval."""
+        precondition = intent.arguments.get(self.precondition_arg)
+        if intent.tool_ref in self.overwrite_tools:
+            if not precondition:
+                return self.deny(
+                    intent,
+                    f"'{intent.tool_ref}' requires {self.precondition_arg}: the hash of "
+                    f"the version being replaced",
+                )
+            return self.require_approval(
+                intent, f"'{intent.tool_ref}' replaces an existing document"
+            )
+        if intent.tool_ref in self.guarded_write_tools and precondition:
+            return self.require_approval(
+                intent,
+                f"'{intent.tool_ref}' with {self.precondition_arg} replaces an existing document",
+            )
+        return None
+
+
 #: Tools exposed by the jobs MCP server, with the argument surface each accepts.
 #: Being listed here makes a tool reachable; whether it can run unattended is
 #: still decided by MutatingToolRule and UntrustedOriginRule.
@@ -211,6 +258,9 @@ FILE_TOOL_ARGUMENTS = {
     "files.read_file": {"path"},
     # Mutating: reachable, but MutatingToolRule holds it for approval.
     "files.write_file": {"path", "content", "encoding", "expected_sha256"},
+    # Destructive: replaces an existing file, after backing it up. Held for
+    # approval by its permission class and by DocumentOverwriteRule.
+    "files.overwrite_document": {"path", "content", "encoding", "expected_sha256"},
 }
 
 
@@ -230,6 +280,7 @@ def default_rules() -> list[PolicyRule]:
         ToolAllowlistRule(tool_arguments.keys()),
         ArgumentAllowlistRule(tool_arguments),
         MutatingToolRule(),
+        DocumentOverwriteRule(),
         UntrustedOriginRule(),
     ]
 
@@ -240,6 +291,7 @@ __all__ = [
     "ToolAllowlistRule",
     "ArgumentAllowlistRule",
     "MutatingToolRule",
+    "DocumentOverwriteRule",
     "UntrustedOriginRule",
     "JOB_SEARCH_TOOL_ARGUMENTS",
     "JOB_PROVIDER_TOOL_ARGUMENTS",

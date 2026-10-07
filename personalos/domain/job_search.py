@@ -25,6 +25,7 @@ Three properties are load-bearing:
   specific `ToolIntent`.
 """
 
+import difflib
 import hashlib
 import json
 import re
@@ -732,6 +733,9 @@ class ArtifactDraft(_Value):
     artifact_type: ArtifactType
     content: str
     evidence: tuple[EvidenceRef, ...]
+    #: The `artifact_versions` row this draft was stored as, once it has been.
+    #: `None` for a draft that exists only in state.
+    artifact_version_id: UUID | None = None
 
     @field_validator("evidence")
     @classmethod
@@ -765,7 +769,7 @@ class ApplicationPacket(_Value):
 
 
 class ActionKind(str, Enum):
-    """The outward-facing actions this subgraph may propose.
+    """The approval-gated actions this subgraph may propose.
 
     A closed set, for the same reason `RouteDomain` is closed: a node cannot
     invent a new kind of side effect, and the approval node's handling of each
@@ -774,6 +778,7 @@ class ActionKind(str, Enum):
 
     SUBMIT_APPLICATION = "submit_application"
     SEND_RECRUITER_MESSAGE = "send_recruiter_message"
+    OVERWRITE_DOCUMENT = "overwrite_document"
 
 
 class RiskLevel(str, Enum):
@@ -844,6 +849,16 @@ ACTION_RISK_PROFILES: Mapping[ActionKind, ActionRiskProfile] = MappingProxyType(
             risk=RiskLevel.MEDIUM,
             scopes=("communications:send",),
             approval_ttl=timedelta(days=3),
+        ),
+        ActionKind.OVERWRITE_DOCUMENT: ActionRiskProfile(
+            kind=ActionKind.OVERWRITE_DOCUMENT,
+            # Local and backed up, so recoverable -- but it replaces a document
+            # the candidate wrote with one a model tailored.
+            risk=RiskLevel.MEDIUM,
+            scopes=("artifacts:write",),
+            # Short: the approval is of a diff against one version of the file,
+            # and the file is the candidate's to edit in the meantime.
+            approval_ttl=timedelta(days=1),
         ),
     }
 )
@@ -926,6 +941,78 @@ class ActionIntent(_Value):
         return risk_profile_for(self.kind)
 
 
+#: `ActionIntent.payload` keys an `ActionPreview` is read from. They are part
+#: of the payload, and so of the action's hash: what the reviewer is shown and
+#: what the approval is bound to cannot be two different things.
+PAYLOAD_RECIPIENT = "recipient"
+PAYLOAD_SUBJECT = "subject"
+PAYLOAD_BODY = "body"
+PAYLOAD_PREVIOUS_BODY = "previous_body"
+PAYLOAD_ATTACHMENTS = "attachments"
+
+
+def body_diff(previous: str, proposed: str) -> str:
+    """Unified diff from what is there now to what the action would put there.
+
+    Empty when the two are the same. A body with no previous version diffs
+    against nothing, so every line of it reads as an addition.
+    """
+    return "\n".join(
+        difflib.unified_diff(
+            previous.splitlines(),
+            proposed.splitlines(),
+            fromfile="current",
+            tofile="proposed",
+            lineterm="",
+        )
+    )
+
+
+class AttachmentPreview(_Value):
+    """One document an action would send, identified by content rather than name."""
+
+    name: str
+    artifact_type: str | None = None
+    #: SHA-256 of the attachment's content, so swapping the document after
+    #: approval changes the action's hash.
+    sha256: str | None = None
+    artifact_version_id: str | None = None
+    evidence_ids: tuple[str, ...] = ()
+
+
+class ActionPreview(_Value):
+    """What an outward-facing write would look like from the other side.
+
+    The part of an approval payload a reviewer reads: who receives it, under
+    what subject, how the body differs from what is there now, and what is
+    attached.
+    """
+
+    recipient: str
+    subject: str | None = None
+    body_diff: str = ""
+    attachments: tuple[AttachmentPreview, ...] = ()
+
+    @classmethod
+    def for_intent(cls, intent: "ActionIntent") -> "ActionPreview":
+        """Read the preview out of the intent's own payload.
+
+        Derived, never supplied: a preview handed in separately could describe
+        a different action from the one being hashed.
+        """
+        payload = intent.payload
+        attachments = payload.get(PAYLOAD_ATTACHMENTS) or ()
+        return cls(
+            recipient=str(payload.get(PAYLOAD_RECIPIENT) or intent.target),
+            subject=payload.get(PAYLOAD_SUBJECT),
+            body_diff=body_diff(
+                str(payload.get(PAYLOAD_PREVIOUS_BODY) or ""),
+                str(payload.get(PAYLOAD_BODY) or ""),
+            ),
+            attachments=tuple(AttachmentPreview.model_validate(item) for item in attachments),
+        )
+
+
 class ApprovalRequest(_Value):
     """What a reviewer is shown, and what an approval is later checked against.
 
@@ -956,6 +1043,9 @@ class ApprovalRequest(_Value):
     requested_by: str = "graph:job_search"
     requested_at: datetime = Field(default_factory=datetime.utcnow)
     expires_at: datetime
+    #: Recipient, subject, body diff and attachments, as of the same moment
+    #: `action_hash` was taken.
+    preview: ActionPreview | None = None
 
     @field_validator("expires_at")
     @classmethod
@@ -996,6 +1086,7 @@ class ApprovalRequest(_Value):
             requested_by=intent.requested_by,
             requested_at=raised_at,
             expires_at=raised_at + (ttl or profile.approval_ttl),
+            preview=ActionPreview.for_intent(intent),
         )
 
     def is_expired(self, now: datetime) -> bool:
@@ -1424,6 +1515,14 @@ __all__ = [
     "ACTION_RISK_PROFILES",
     "risk_profile_for",
     "ActionIntent",
+    "PAYLOAD_RECIPIENT",
+    "PAYLOAD_SUBJECT",
+    "PAYLOAD_BODY",
+    "PAYLOAD_PREVIOUS_BODY",
+    "PAYLOAD_ATTACHMENTS",
+    "body_diff",
+    "AttachmentPreview",
+    "ActionPreview",
     "ApprovalRequest",
     "ApprovalVerdict",
     "ApprovalDecision",

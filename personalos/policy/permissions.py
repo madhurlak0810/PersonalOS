@@ -128,6 +128,11 @@ DEFAULT_TOOL_PERMISSIONS: Mapping[str, ToolPermission] = MappingProxyType(
         # Hash-guarded: it can create a file or replace the exact version the
         # caller read, never one it has not seen.
         "files.write_file": _permission(PermissionClass.WRITE_REVERSIBLE, {"artifacts:write"}),
+        # A new `artifact_versions` row in this system's own database. Earlier
+        # versions are kept, so a draft can always be superseded or ignored.
+        "artifacts.create_draft": _permission(
+            PermissionClass.WRITE_REVERSIBLE, {"artifacts:draft"}
+        ),
         # WRITE_EXTERNAL
         "google.gmail_send_message": _permission(
             PermissionClass.WRITE_EXTERNAL, {"communications:send"}

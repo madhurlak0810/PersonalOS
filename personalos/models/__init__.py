@@ -1,5 +1,6 @@
 """Models package."""
 
+from .artifact_drafting import StructuredLLMDraftWriter, anthropic_draft_writer
 from .job_matching import StructuredLLMSemanticAssessor, anthropic_semantic_assessor
 from .routing import (
     DEFAULT_CLASSIFIER_MODEL,
@@ -19,4 +20,6 @@ __all__ = [
     "anthropic_intent_classifier",
     "StructuredLLMSemanticAssessor",
     "anthropic_semantic_assessor",
+    "StructuredLLMDraftWriter",
+    "anthropic_draft_writer",
 ]

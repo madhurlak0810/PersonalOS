@@ -32,6 +32,7 @@ from .permissions import (
 )
 from .rules import (
     ArgumentAllowlistRule,
+    DocumentOverwriteRule,
     MutatingToolRule,
     PolicyRule,
     RequireProvenanceRule,
@@ -66,6 +67,7 @@ __all__ = [
     "ToolAllowlistRule",
     "ArgumentAllowlistRule",
     "MutatingToolRule",
+    "DocumentOverwriteRule",
     "UntrustedOriginRule",
     "default_rules",
     # Errors
