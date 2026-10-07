@@ -19,6 +19,7 @@ from personalos.domain.workflow import (
     job_search_thread_id,
     supervisor_thread_id,
 )
+from personalos.executor.artifact_prep import DocumentOverwriteExecutor, PolicyGatedDraftSink
 from personalos.executor.credentials import CredentialBroker
 from personalos.executor.job_discovery import GatewayJobProvider
 from personalos.executor.job_search import JobSearchExecutor
@@ -28,12 +29,13 @@ from personalos.mcp.adapter import MCPToolInvoker
 from personalos.mcp.base import MCPServer
 from personalos.mcp.manager import MCPServerManager, get_mcp_manager
 from personalos.persistence.action_journal import ActionExecutorPort, JournaledActionExecutor
+from personalos.persistence.artifact_drafts import SqlArtifactDraftStore
 from personalos.persistence.checkpointer import (
     SqlAlchemyCheckpointSaver,
     WorkflowThreadRegistry,
 )
 from personalos.persistence.database import SessionLocal
-from personalos.persistence.evidence import SqlEvidenceSource
+from personalos.persistence.evidence import SqlEvidenceIndex, SqlEvidenceSource
 from personalos.persistence.execution_ledger import ExecutionLedger
 from personalos.persistence.idempotency import OperationStore, SqlOperationStore
 from personalos.persistence.job_postings import SqlPostingCatalog
@@ -50,6 +52,13 @@ from personalos.providers import (
     GreenhouseProvider,
     JobProvider,
     JobProviderInvoker,
+)
+from personalos.retrieval.artifact_prep import (
+    DEFAULT_TOP_K,
+    DraftWriter,
+    Embedder,
+    EvidenceSelector,
+    TailoredPacketBuilder,
 )
 from personalos.retrieval.job_matching import HybridJobMatcher, ScoringConfig, SemanticAssessor
 from personalos.secrets.exchange import (
@@ -193,6 +202,62 @@ def build_job_matcher(
     return HybridJobMatcher(
         evidence_source=SqlEvidenceSource(session_factory), assessor=assessor, config=config
     )
+
+
+def build_artifact_packet_builder(
+    writer: DraftWriter,
+    embedder: Embedder,
+    session_factory=SessionLocal,
+    *,
+    policy: PolicyEngine | None = None,
+    workflow_id: UUID | None = None,
+    top_k: int = DEFAULT_TOP_K,
+    min_similarity: float = 0.0,
+    context_terms: Iterable[str] = (),
+) -> TailoredPacketBuilder:
+    """Build the `packet_builder` a `JobSearchGraph` takes for tailored drafts.
+
+    Evidence is selected from `evidence_chunks` by similarity to the posting,
+    every draft is checked against that evidence before it is kept, and the
+    survivors are stored as `artifact_versions` rows under a recorded
+    `WRITE_REVERSIBLE` decision.
+
+    `writer` and `embedder` are required rather than defaulted, as `assessor`
+    is for `build_job_matcher`: pass
+    `personalos.models.artifact_drafting.anthropic_draft_writer()` for Claude,
+    and an embedder whose `model` is the one the evidence was ingested with.
+    `context_terms` are names a draft may use without citing evidence -- the
+    candidate's own name.
+    """
+    return TailoredPacketBuilder(
+        selector=EvidenceSelector(
+            embedder=embedder,
+            index=SqlEvidenceIndex(session_factory),
+            top_k=top_k,
+            min_similarity=min_similarity,
+        ),
+        writer=writer,
+        sink=PolicyGatedDraftSink(
+            SqlArtifactDraftStore(session_factory),
+            policy or build_policy_engine(session_factory),
+            workflow_id=workflow_id,
+        ),
+        context_terms=tuple(context_terms),
+    )
+
+
+def build_document_overwrite_executor(
+    gateway: ToolGateway | None = None,
+    policy: PolicyEngine | None = None,
+) -> DocumentOverwriteExecutor:
+    """Build the adapter that carries out an approved `OVERWRITE_DOCUMENT` action.
+
+    It dispatches `files.overwrite_document` through the gateway, so the files
+    server's hash precondition and backup apply. Pass the result to
+    `build_tool_executor` as `inner` -- that is what makes the overwrite
+    at-most-once and audited against the approval it ran under.
+    """
+    return DocumentOverwriteExecutor(gateway or build_tool_gateway(policy=policy))
 
 
 def build_job_search_executor(
@@ -466,6 +531,8 @@ __all__ = [
     "build_job_providers",
     "build_posting_catalog",
     "build_job_matcher",
+    "build_artifact_packet_builder",
+    "build_document_overwrite_executor",
     "build_job_search_executor",
     "GOOGLE_PROVIDER",
     "API_KEY_PROVIDERS",

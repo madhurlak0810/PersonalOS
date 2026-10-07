@@ -101,12 +101,17 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 from pydantic import BaseModel
 
+from personalos.domain.artifacts import content_sha256
 from personalos.domain.checkpoints import (
     DEFAULT_CHECKPOINT_GRACE,
     PendingCheckpoint,
 )
 from personalos.domain.job_search import (
     MAX_POSTINGS_PER_RUN,
+    PAYLOAD_ATTACHMENTS,
+    PAYLOAD_BODY,
+    PAYLOAD_RECIPIENT,
+    PAYLOAD_SUBJECT,
     ActionIntent,
     ActionKind,
     ActionReceipt,
@@ -135,7 +140,11 @@ from personalos.domain.job_search import (
     ShortlistEntry,
     authorize_execution,
 )
-from personalos.domain.models import ApplicationStatus, CommunicationEventClassification
+from personalos.domain.models import (
+    ApplicationStatus,
+    ArtifactType,
+    CommunicationEventClassification,
+)
 from personalos.domain.redaction import redact
 from personalos.domain.workflow import job_search_thread_id
 
@@ -1006,16 +1015,22 @@ class JobSearchGraph:
         top = entries[0]
 
         packet = await self.packet_builder.build(top, profile)
+        # Where the write lands, as a reviewer would check it: the posting's
+        # own URL when the provider gave one, and otherwise the company and
+        # role it was listed under. Part of the action's hash, so re-pointing
+        # an otherwise identical submission invalidates its approval.
+        target = packet.posting.url or f"{packet.posting.company} / {packet.posting.title}"
+        cover_letter = next(
+            (
+                draft.content
+                for draft in packet.artifacts
+                if draft.artifact_type == ArtifactType.COVER_LETTER
+            ),
+            "",
+        )
         intent = ActionIntent(
             kind=ActionKind.SUBMIT_APPLICATION,
-            # Where the write lands, as a reviewer would check it: the posting's
-            # own URL when the provider gave one, and otherwise the company and
-            # role it was listed under. Part of the action's hash, so
-            # re-pointing an otherwise identical submission invalidates its
-            # approval.
-            target=(
-                packet.posting.url or f"{packet.posting.company} / {packet.posting.title}"
-            ),
+            target=target,
             summary=(
                 f"Submit an application to {packet.posting.company} " f"for {packet.posting.title}"
             ),
@@ -1025,6 +1040,26 @@ class JobSearchGraph:
                 "title": packet.posting.title,
                 "url": packet.posting.url,
                 "artifact_types": [draft.artifact_type.value for draft in packet.artifacts],
+                # What the reviewer is shown (see `ActionPreview`). In the
+                # payload, and so in the hash: the approval is of these exact
+                # documents, and a draft swapped afterwards fails closed.
+                PAYLOAD_RECIPIENT: target,
+                PAYLOAD_SUBJECT: (
+                    f"Application for {packet.posting.title} at {packet.posting.company}"
+                ),
+                PAYLOAD_BODY: cover_letter,
+                PAYLOAD_ATTACHMENTS: [
+                    {
+                        "name": draft.artifact_type.value,
+                        "artifact_type": draft.artifact_type.value,
+                        "sha256": content_sha256(draft.content),
+                        "artifact_version_id": (
+                            str(draft.artifact_version_id) if draft.artifact_version_id else None
+                        ),
+                        "evidence_ids": [ref.ref for ref in draft.evidence],
+                    }
+                    for draft in packet.artifacts
+                ],
             },
             # Content-derived, so retrying the run proposes the same submission
             # rather than a second one.

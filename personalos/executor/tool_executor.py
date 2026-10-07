@@ -73,6 +73,7 @@ ACTION_TOOLS: Mapping[ActionKind, str] = MappingProxyType(
     {
         ActionKind.SUBMIT_APPLICATION: "jobs.submit_application",
         ActionKind.SEND_RECRUITER_MESSAGE: "google.gmail_send_message",
+        ActionKind.OVERWRITE_DOCUMENT: "files.overwrite_document",
     }
 )
 

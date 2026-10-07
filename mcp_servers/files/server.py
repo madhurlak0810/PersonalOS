@@ -7,6 +7,11 @@ roots regardless of what the caller sent. See `mcp_servers/files/sandbox.py`.
 Writes are compare-and-swap on content: the caller names the SHA-256 of the
 version it read, and the write is refused if the file on disk no longer hashes
 to that. A caller that never read the file can only create it.
+
+`overwrite_document` is the tool for replacing a document that already exists
+and matters -- the candidate's own resume. It only replaces, the hash of the
+version being replaced is mandatory, and the old content is copied to a backup
+beside the file before the new content lands.
 """
 
 import base64
@@ -56,12 +61,32 @@ class WriteFileIntent(MutatingIntent):
     @field_validator("expected_sha256")
     @classmethod
     def _check_sha256(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        value = value.lower()
-        if len(value) != _SHA256_HEX_LENGTH or any(c not in "0123456789abcdef" for c in value):
-            raise ValueError("must be a hex-encoded SHA-256 digest")
-        return value
+        return None if value is None else _normalize_sha256(value)
+
+
+class OverwriteDocumentIntent(MutatingIntent):
+    """Typed parameters for the mutating `overwrite_document`.
+
+    `expected_sha256` is required: there is no way to overwrite a document
+    without naming the version being replaced.
+    """
+
+    path: str
+    content: str
+    encoding: ContentEncoding = "utf-8"
+    expected_sha256: str
+
+    @field_validator("expected_sha256")
+    @classmethod
+    def _check_sha256(cls, value: str) -> str:
+        return _normalize_sha256(value)
+
+
+def _normalize_sha256(value: str) -> str:
+    value = value.lower()
+    if len(value) != _SHA256_HEX_LENGTH or any(c not in "0123456789abcdef" for c in value):
+        raise ValueError("must be a hex-encoded SHA-256 digest")
+    return value
 
 
 def content_sha256(data: bytes) -> str:
@@ -162,6 +187,41 @@ class FilesMCPServer(MCPServer):
         )
         self.register_tool(write_schema, self._write_file)
 
+        overwrite_schema = ToolSchema(
+            name="overwrite_document",
+            description=(
+                "Replace an existing document inside the allowed roots, keeping "
+                "a backup of the version it replaces. expected_sha256 must match "
+                "the file's current content."
+            ),
+            intent_type=OverwriteDocumentIntent,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path of the existing document to replace",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "New content, encoded as `encoding` says",
+                    },
+                    "encoding": {
+                        "type": "string",
+                        "enum": ["utf-8", "base64"],
+                        "default": "utf-8",
+                        "description": "How `content` is encoded",
+                    },
+                    "expected_sha256": {
+                        "type": "string",
+                        "description": "sha256 of the version being replaced, from read_file",
+                    },
+                },
+            },
+            required=["path", "content", "expected_sha256"],
+        )
+        self.register_tool(overwrite_schema, self._overwrite_document)
+
     def _read_file(self, path: str) -> dict[str, Any]:
         """Read a file inside the allowed roots."""
         target = self.sandbox.resolve(path)
@@ -231,6 +291,66 @@ class FilesMCPServer(MCPServer):
             "previous_sha256": previous_sha256,
             "created": current is None,
         }
+
+    def _overwrite_document(
+        self,
+        path: str,
+        content: str,
+        expected_sha256: str,
+        encoding: ContentEncoding = "utf-8",
+    ) -> dict[str, Any]:
+        """Replace an existing document, backing up the version it replaces."""
+        target = self.sandbox.resolve(path)
+        data = _decode_content(content, encoding)
+        if len(data) > self.max_bytes:
+            raise ValidationFailed(
+                f"content is {len(data)} bytes; the limit is {self.max_bytes}"
+            )
+
+        with self._write_lock:
+            current = self._read_bytes(target, path)
+            if current is None:
+                raise NotFound(
+                    f"file {path!r} does not exist; overwrite_document only replaces "
+                    f"an existing file"
+                )
+            previous_sha256 = content_sha256(current)
+            if previous_sha256 != expected_sha256:
+                raise StaleWrite(
+                    f"file {path!r} changed since it was read "
+                    f"(current sha256 {previous_sha256}); re-read it before overwriting"
+                )
+            # The backup is written, and durable, before the original is
+            # touched: a failure from here on leaves both versions on disk.
+            backup = self._back_up(target, current, previous_sha256, path)
+            self._replace_atomically(target, data, path, creating=False)
+
+        logger.info(f"Overwrote {target} with {len(data)} bytes; backup at {backup}")
+        return {
+            "path": str(target),
+            "size": len(data),
+            "sha256": content_sha256(data),
+            "previous_sha256": previous_sha256,
+            "backup_path": str(backup),
+            "created": False,
+        }
+
+    def _back_up(self, target: Path, current: bytes, sha256: str, requested: str) -> Path:
+        """Copy `current` beside `target`, named for the version it holds.
+
+        Named by content hash, so a retried overwrite finds the backup it
+        already made instead of leaving a second copy.
+        """
+        backup = self.sandbox.resolve(str(target.with_name(f"{target.name}.bak-{sha256[:12]}")))
+        existing = self._read_bytes(backup, requested)
+        if existing is None:
+            self._replace_atomically(backup, current, requested, creating=True)
+        elif existing != current:
+            raise StaleWrite(
+                f"backup path {backup.name!r} is already taken by different content; "
+                f"refusing to overwrite {requested!r} without a backup"
+            )
+        return backup
 
     def _read_bytes(self, target: Path, requested: str) -> bytes | None:
         """Read a canonical path's bytes, or return None if nothing is there.
