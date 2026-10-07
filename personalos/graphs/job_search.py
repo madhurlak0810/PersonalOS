@@ -37,6 +37,15 @@ rest in front of a person, and drafts -- never sends -- any reply that is owed.
 Run it on `personalos.domain.workflow.recruiter_inbox_thread_id`, not on a
 search thread.
 
+An invite that fixes a time continues into `plan_interview_schedule`, which
+reads the calendar and proposes the interview event and its prep blocks as
+`CREATE_CALENDAR_EVENT` / `UPDATE_CALENDAR_EVENT` intents -- through the same
+approval triple. A run invoked with `calendar_changes` (an interview event
+that moved on the calendar itself) enters at that node directly, so the prep
+blocks follow the interview whichever side moved it:
+
+    START -> plan_interview_schedule -> request_approval_for_external_write -> ...
+
 The waits themselves are scheduled by `create_follow_up_checkpoint` through the
 `PendingCheckpointScheduler` port. What makes them survivable is that they are
 rows, not timers: a wait carries its own condition, its trigger time and an
@@ -119,11 +128,37 @@ from personalos.domain.artifacts import content_sha256
 from personalos.domain.checkpoints import (
     DEFAULT_CHECKPOINT_GRACE,
     PendingCheckpoint,
+    condition_for_kind,
+)
+from personalos.domain.interview_scheduling import (
+    DEFAULT_PREP_BLOCKS,
+    PAYLOAD_ENDS_AT,
+    PAYLOAD_EVENT_ID,
+    PAYLOAD_LOGICAL_KEY,
+    PAYLOAD_PROPERTIES,
+    PAYLOAD_ROLE,
+    PAYLOAD_STARTS_AT,
+    PAYLOAD_TITLE,
+    CalendarEvent,
+    InterviewRequest,
+    InterviewSchedulePlan,
+    PrepBlockSpec,
+    ScheduleChange,
+    ScheduleOp,
+    WorkingHours,
+    calendar_create_key,
+    calendar_update_key,
+    event_properties,
+    interview_reminder_dedupe_key,
+    interview_request_from,
+    interview_request_from_event,
+    plan_interview_schedule,
 )
 from personalos.domain.job_search import (
     MAX_POSTINGS_PER_RUN,
     PAYLOAD_ATTACHMENTS,
     PAYLOAD_BODY,
+    PAYLOAD_PREVIOUS_BODY,
     PAYLOAD_RECIPIENT,
     PAYLOAD_SUBJECT,
     ActionIntent,
@@ -210,6 +245,7 @@ CREATE_FOLLOW_UP_CHECKPOINT = "create_follow_up_checkpoint"
 DRAFT_FOLLOW_UP = "draft_follow_up_for_triggered_checkpoint"
 CLASSIFY_RECRUITER_EVENTS = "classify_recruiter_events"
 RECORD_RECRUITER_EVENTS = "record_recruiter_events"
+PLAN_INTERVIEW_SCHEDULE = "plan_interview_schedule"
 
 #: Values of `JobSearchState["approval_stage"]`. The approval node is entered
 #: from two places (a submission, and a recruiter reply), and this is how its
@@ -217,6 +253,7 @@ RECORD_RECRUITER_EVENTS = "record_recruiter_events"
 #: which fields happen to be populated.
 STAGE_SUBMISSION = "external_submission"
 STAGE_RECRUITER_OUTREACH = "recruiter_outreach"
+STAGE_INTERVIEW_SCHEDULING = "interview_scheduling"
 
 #: How far out a follow-up is scheduled when a recruiter has gone quiet, and
 #: when one is owed a reply. The quiet period is longer because the ball is in
@@ -411,6 +448,39 @@ class PendingCheckpointScheduler(Protocol):
 
     async def schedule(self, checkpoint: PendingCheckpoint) -> PendingCheckpoint:
         """Persist the wait and return the stored one."""
+        ...
+
+    async def reschedule(self, checkpoint: PendingCheckpoint, *, reason: str) -> PendingCheckpoint:
+        """Persist the wait and cancel the open waits of its kind it replaces.
+
+        For a wait dated off something that can move. `schedule` keeps the
+        first wait's date on purpose; this is how a moved interview's reminder
+        moves with it.
+        """
+        ...
+
+
+class CalendarReader(Protocol):
+    """Reads the candidate's calendar. It cannot write to it.
+
+    Two questions, because they have different extents. What is booked is
+    asked over a window. What this system already put on the calendar for an
+    application is asked by application -- found through the events' private
+    extended properties -- because an interview that moved a fortnight leaves
+    its old events outside any window drawn around the new time, and an event
+    the planner cannot see is an event it creates a second time.
+    """
+
+    async def events_between(
+        self, user_id: UUID, start: datetime, end: datetime
+    ) -> Sequence[CalendarEvent]:
+        """Every event overlapping the window."""
+        ...
+
+    async def events_for_application(
+        self, user_id: UUID, application_id: UUID
+    ) -> Sequence[CalendarEvent]:
+        """Every event linked to the application, wherever it sits."""
         ...
 
 
@@ -733,6 +803,17 @@ class JobSearchState(TypedDict, total=False):
     recruiter_event_records: list[dict[str, Any]]
     recruiter_event_reviews: list[dict[str, Any]]
 
+    # Interview scheduling.
+    #: Interviews with a known time that `record_recruiter_events` read out of
+    #: confident invites, for `plan_interview_schedule`.
+    interview_requests: list[dict[str, Any]]
+    #: Interview events that changed on the calendar itself, supplied as
+    #: *input* (dumped `CalendarEvent`s). Their presence decides where the run
+    #: enters, like `fired_checkpoints`.
+    calendar_changes: list[dict[str, Any]]
+    #: The plans the last scheduling pass produced, kept for provenance.
+    interview_schedules: list[dict[str, Any]]
+
 
 def _dump(values: Sequence[BaseModel]) -> list[dict[str, Any]]:
     """Dump a sequence of pydantic values to JSON-compatible dicts."""
@@ -757,7 +838,8 @@ class JobSearchGraph:
     defaults), the posting catalog and checkpoint scheduler, the recruiter
     inbox plus its classifier, which together turn the recruiter-response
     branch on, and the event extractor, application directory and recorder,
-    which together turn the inbound-mail entry on. Everything else is required for the same
+    which together turn the inbound-mail entry on, and the calendar reader,
+    which turns interview scheduling on. Everything else is required for the same
     reason `JobSearchExecutor` requires a `ToolGateway` -- a graph that can
     fall back to a global default is a graph whose reach is not visible at its
     construction site.
@@ -784,6 +866,9 @@ class JobSearchGraph:
         application_directory: ApplicationDirectory | None = None,
         recruiter_event_recorder: RecruiterEventRecorder | None = None,
         reply_drafter: RecruiterReplyDrafter | None = None,
+        calendar_reader: CalendarReader | None = None,
+        prep_blocks: Sequence[PrepBlockSpec] = DEFAULT_PREP_BLOCKS,
+        working_hours: WorkingHours | None = None,
         correlation_threshold: float = DEFAULT_CORRELATION_THRESHOLD,
         min_classification_confidence: float = DEFAULT_MIN_CLASSIFICATION_CONFIDENCE,
         checkpointer: BaseCheckpointSaver | None = None,
@@ -849,6 +934,11 @@ class JobSearchGraph:
         self.application_directory = application_directory
         self.recruiter_event_recorder = recruiter_event_recorder
         self.reply_drafter = reply_drafter or TemplateReplyDrafter()
+        # Interview scheduling is off without a calendar to read: a prep block
+        # placed blind is as likely to land on a meeting as beside one.
+        self.calendar_reader = calendar_reader
+        self.prep_blocks = tuple(prep_blocks)
+        self.working_hours = working_hours or WorkingHours()
         self.correlation_threshold = correlation_threshold
         self.min_classification_confidence = min_classification_confidence
         # How long past its trigger a scheduled wait stays actionable. `None`
@@ -895,8 +985,9 @@ class JobSearchGraph:
         graph.add_node(DRAFT_FOLLOW_UP, self.draft_follow_up)
         graph.add_node(CLASSIFY_RECRUITER_EVENTS, self.classify_recruiter_events)
         graph.add_node(RECORD_RECRUITER_EVENTS, self.record_recruiter_events)
+        graph.add_node(PLAN_INTERVIEW_SCHEDULE, self.plan_interview_schedule)
 
-        # Three ways into this graph, decided at START from the input alone.
+        # Four ways into this graph, decided at START from the input alone.
         #
         # A run handed `fired_checkpoints` is a durable wait coming due: some
         # sweep found a checkpoint whose trigger had arrived and whose
@@ -910,6 +1001,10 @@ class JobSearchGraph:
         # and tied to whichever applications it is about. It has no shortlist
         # and no single application, so it enters at its own pair of nodes.
         #
+        # A run handed `calendar_changes` is an interview event that moved on
+        # the calendar. Nothing needs classifying; its prep blocks need
+        # re-planning, so it enters at the node that does that.
+        #
         # Everything else starts at the beginning.
         graph.add_conditional_edges(
             START,
@@ -917,6 +1012,7 @@ class JobSearchGraph:
             {
                 DRAFT_FOLLOW_UP: DRAFT_FOLLOW_UP,
                 CLASSIFY_RECRUITER_EVENTS: CLASSIFY_RECRUITER_EVENTS,
+                PLAN_INTERVIEW_SCHEDULE: PLAN_INTERVIEW_SCHEDULE,
                 LOAD_SEARCH_PROFILE: LOAD_SEARCH_PROFILE,
             },
         )
@@ -987,6 +1083,18 @@ class JobSearchGraph:
         graph.add_edge(CLASSIFY_RECRUITER_EVENTS, RECORD_RECRUITER_EVENTS)
         graph.add_conditional_edges(
             RECORD_RECRUITER_EVENTS,
+            self.route_after_record,
+            {
+                PLAN_INTERVIEW_SCHEDULE: PLAN_INTERVIEW_SCHEDULE,
+                REQUEST_APPROVAL: REQUEST_APPROVAL,
+                END: END,
+            },
+        )
+        # Calendar writes are external writes: the planner proposes them and
+        # they leave by the approval triple, alongside any reply drafted in
+        # the same run.
+        graph.add_conditional_edges(
+            PLAN_INTERVIEW_SCHEDULE,
             self.route_after_follow_up,
             {REQUEST_APPROVAL: REQUEST_APPROVAL, END: END},
         )
@@ -1670,12 +1778,23 @@ class JobSearchGraph:
         thread has been about all along, and a monitor that passed its own copy
         could follow up on an application that had since moved on.
         """
-        application = _require_application(state)
         fired = _load(PendingCheckpoint, state.get("fired_checkpoints"))
         now = self.clock()
 
         intents: list[ActionIntent] = []
         events: list[EmittedEvent] = []
+        # An interview-prep wait is a reminder to the candidate, not a message
+        # owed to a recruiter: it becomes an event and proposes nothing. It is
+        # also complete in itself, so it fires correctly on the inbox thread,
+        # which holds no single application.
+        for checkpoint in fired:
+            if checkpoint.kind is FollowUpKind.INTERVIEW_PREP:
+                event = _interview_reminder_event(checkpoint, now)
+                await self.event_emitter.emit(event)
+                events.append(event)
+        fired = [c for c in fired if c.kind is not FollowUpKind.INTERVIEW_PREP]
+
+        application = _require_application(state) if fired else None
         for checkpoint in fired:
             if checkpoint.application_id != application.application_id:
                 # A checkpoint for a different application reached this thread.
@@ -1819,6 +1938,7 @@ class JobSearchGraph:
         reviews: list[RecruiterEventReview] = []
         emitted: list[EmittedEvent] = []
         intents: list[ActionIntent] = []
+        interviews: list[InterviewRequest] = []
 
         for event in events:
             decision = triage(
@@ -1871,6 +1991,9 @@ class JobSearchGraph:
                 # to the wrong reading of a message is worse than a late one.
                 continue
 
+            if record is not None:
+                interviews.extend(_interview_requests_for(event, decision, record.application_id))
+
             if record is not None and event.requires_reply:
                 draft = await self.reply_drafter.draft(event)
                 intents.append(_reply_intent(event, record.application_id, draft, now))
@@ -1881,7 +2004,162 @@ class JobSearchGraph:
             "emitted_events": [*(state.get("emitted_events") or []), *_dump(emitted)],
             "pending_actions": _dump(intents),
             "approval_stage": STAGE_RECRUITER_OUTREACH,
+            "interview_requests": _dump(interviews),
         }
+
+    # ------------------------------------------------------------------
+    # Interview scheduling
+    # ------------------------------------------------------------------
+
+    async def plan_interview_schedule(
+        self, state: JobSearchState, config: RunnableConfig | None = None
+    ) -> dict[str, Any]:
+        """Propose the calendar writes an interview needs. Never makes them.
+
+        Reached two ways: from `record_recruiter_events`, with the interviews
+        read out of confident invites, and from START, with interview events
+        that moved on the calendar. Both become an `InterviewRequest`, and
+        from there the work is the same: read the calendar, reconcile the
+        interview and its prep blocks against it
+        (`personalos.domain.interview_scheduling.plan_interview_schedule`),
+        and turn each create or move into an `ActionIntent`. A first invite
+        yields creates; a changed time yields updates to the interview event
+        and to whichever linked prep blocks no longer fit.
+
+        Reading the calendar happens here, through a port that cannot write.
+        Writing to it does not: this node holds no executor, and its intents
+        leave through the approval triple like every other external write.
+
+        What it does do unattended is tell someone. Each plan with something
+        to write is emitted as `application.interview_schedule_proposed`,
+        anything booked over the interview or any prep block with nowhere to
+        go as `application.interview_schedule_conflict`, and a durable
+        reminder is (re)scheduled for when preparation should start -- so the
+        candidate hears about the interview from this system and not only
+        from whatever the calendar UI chooses to show.
+        """
+        if self.calendar_reader is None:
+            raise JobSearchContractError(
+                "plan_interview_schedule reached without a calendar reader wired"
+            )
+        user_id = _require_uuid(state.get("user_id"), "user_id")
+        from_calendar = _load(CalendarEvent, state.get("calendar_changes"))
+        now = self.clock()
+
+        # One request per application; a later one replaces an earlier one, so
+        # two messages in a batch about the same interview plan it once, at
+        # the time the newer message gives.
+        requests: dict[UUID, InterviewRequest] = {
+            request.application_id: request
+            for request in _load(InterviewRequest, state.get("interview_requests"))
+        }
+        for changed in from_calendar:
+            request = interview_request_from_event(changed)
+            if request is not None:
+                requests[request.application_id] = request
+
+        plans: list[InterviewSchedulePlan] = []
+        intents: list[ActionIntent] = []
+        events: list[EmittedEvent] = []
+        scheduled: list[PendingCheckpoint] = []
+
+        for request in requests.values():
+            linked = await self.calendar_reader.events_for_application(
+                user_id, request.application_id
+            )
+            horizon = max((spec.horizon for spec in self.prep_blocks), default=timedelta(0))
+            booked = await self.calendar_reader.events_between(
+                user_id, min(now, request.starts_at - horizon), request.ends_at
+            )
+            # A linked event inside the window comes back from both reads.
+            by_id = {event.event_id: event for event in (*booked, *linked)}
+            plan = plan_interview_schedule(
+                request,
+                list(by_id.values()),
+                now=now,
+                prep_blocks=self.prep_blocks,
+                working_hours=self.working_hours,
+            )
+            plans.append(plan)
+            intents.extend(_calendar_intent(plan, change, now) for change in plan.writes)
+            events.extend(_events_for_schedule(plan, request, now))
+
+            reminder = self._interview_reminder(plan, now=now, config=config)
+            if reminder is not None and self.checkpoint_scheduler is not None:
+                scheduled.append(
+                    await self.checkpoint_scheduler.reschedule(
+                        reminder,
+                        reason=(
+                            f"superseded: the interview is now at "
+                            f"{plan.interview_starts_at.isoformat()}"
+                        ),
+                    )
+                )
+
+        for event in events:
+            await self.event_emitter.emit(event)
+
+        # Entered from START, the thread's `pending_actions` are a previous
+        # run's and already settled; entered from the record node, they are
+        # the replies drafted a step ago and must reach approval too.
+        carried = [] if from_calendar else list(state.get("pending_actions") or [])
+        update: dict[str, Any] = {
+            "interview_schedules": _dump(plans),
+            "pending_actions": [*carried, *_dump(intents)],
+            "pending_checkpoints": [*(state.get("pending_checkpoints") or []), *_dump(scheduled)],
+            "emitted_events": [*(state.get("emitted_events") or []), *_dump(events)],
+            # Consumed, so cleared, for the reason `fired_checkpoints` is.
+            "interview_requests": [],
+            "calendar_changes": [],
+        }
+        if not carried:
+            update["approval_stage"] = STAGE_INTERVIEW_SCHEDULING
+        return update
+
+    def _interview_reminder(
+        self,
+        plan: InterviewSchedulePlan,
+        *,
+        now: datetime,
+        config: RunnableConfig | None,
+    ) -> PendingCheckpoint | None:
+        """The durable prep reminder for a planned interview, or `None` if too late."""
+        remind_at = plan.reminder_at(now)
+        configurable = (config or {}).get("configurable") or {}
+        thread_id = configurable.get("thread_id")
+        if remind_at is None or not thread_id:
+            return None
+        raw_workflow_id = configurable.get("workflow_id")
+        condition = condition_for_kind(FollowUpKind.INTERVIEW_PREP, plan.application_id, since=now)
+        return PendingCheckpoint(
+            application_id=plan.application_id,
+            kind=FollowUpKind.INTERVIEW_PREP,
+            condition=condition.model_copy(
+                update={
+                    "params": {
+                        "interview_starts_at": plan.interview_starts_at.isoformat(),
+                        "prep_blocks": [
+                            {
+                                PAYLOAD_LOGICAL_KEY: block.logical_key,
+                                PAYLOAD_STARTS_AT: block.starts_at.isoformat(),
+                                PAYLOAD_ENDS_AT: block.ends_at.isoformat(),
+                            }
+                            for block in plan.prep_blocks
+                        ],
+                    }
+                }
+            ),
+            reason=f"prepare for the interview at {plan.interview_starts_at.isoformat()}",
+            thread_id=str(thread_id),
+            workflow_id=UUID(str(raw_workflow_id)) if raw_workflow_id else None,
+            created_at=now,
+            trigger_at=remind_at,
+            # A prep reminder is worthless once the interview has started.
+            expires_at=plan.interview_starts_at,
+            dedupe_key=interview_reminder_dedupe_key(
+                plan.application_id, plan.interview_starts_at
+            ),
+        )
 
     def _durable_wait(
         self,
@@ -1930,6 +2208,8 @@ class JobSearchGraph:
             return DRAFT_FOLLOW_UP
         if state.get("inbound_messages"):
             return CLASSIFY_RECRUITER_EVENTS
+        if state.get("calendar_changes"):
+            return PLAN_INTERVIEW_SCHEDULE
         return LOAD_SEARCH_PROFILE
 
     def route_after_shortlist(self, state: JobSearchState) -> str:
@@ -1965,6 +2245,12 @@ class JobSearchGraph:
         if not state.get("application"):  # pragma: no cover - persist always sets one
             return END
         return HANDLE_RECRUITER_RESPONSE
+
+    def route_after_record(self, state: JobSearchState) -> str:
+        """Plan the calendar for an interview with a known time; otherwise as usual."""
+        if state.get("interview_requests") and self.calendar_reader is not None:
+            return PLAN_INTERVIEW_SCHEDULE
+        return self.route_after_follow_up(state)
 
     def route_after_follow_up(self, state: JobSearchState) -> str:
         """Send a proposed message back through the approval checkpoint, or finish.
@@ -2103,6 +2389,24 @@ def _events_for_recorded(
     return events
 
 
+def _interview_requests_for(
+    event: RecruiterEvent, decision: RecruiterEventTriage, application_id: UUID
+) -> list[InterviewRequest]:
+    """The interview a recorded event puts on the calendar: one, or none.
+
+    Held to the bar the interview-invite event is: a confident invite. And
+    only one that fixes a time -- an invite asking for availability is
+    answered by a reply, and there is nothing to schedule until it is.
+    """
+    if (
+        event.classification is not CommunicationEventClassification.INTERVIEW_INVITE
+        or decision.transition is None
+    ):
+        return []
+    request = interview_request_from(InterviewInviteReceived.from_event(event, application_id))
+    return [request] if request is not None else []
+
+
 def _reply_intent(
     event: RecruiterEvent, application_id: UUID, draft: ReplyDraft, now: datetime
 ) -> ActionIntent:
@@ -2129,6 +2433,124 @@ def _reply_intent(
         idempotency_key=f"reply-{application_id}-{message.provider_message_id}"[:255],
         requested_by=f"graph:job_search#{RECORD_RECRUITER_EVENTS}",
         created_at=now,
+    )
+
+
+def _when(start: datetime, end: datetime) -> str:
+    """A time range as a reviewer reads it. Times are UTC."""
+    return f"{start:%a %d %b %Y %H:%M}-{end:%H:%M} UTC"
+
+
+def _calendar_intent(
+    plan: InterviewSchedulePlan, change: ScheduleChange, now: datetime
+) -> ActionIntent:
+    """The approval-gated proposal to make one calendar write of a plan."""
+    when = _when(change.starts_at, change.ends_at)
+    payload: dict[str, Any] = {
+        "application_id": str(plan.application_id),
+        PAYLOAD_LOGICAL_KEY: change.logical_key,
+        PAYLOAD_ROLE: change.role.value,
+        PAYLOAD_TITLE: change.title,
+        PAYLOAD_STARTS_AT: change.starts_at.isoformat(),
+        PAYLOAD_ENDS_AT: change.ends_at.isoformat(),
+        PAYLOAD_SUBJECT: change.title,
+    }
+    if change.op is ScheduleOp.CREATE:
+        payload[PAYLOAD_PROPERTIES] = event_properties(plan.application_id, change)
+        payload[PAYLOAD_BODY] = f"{change.title}\n{when}"
+        return ActionIntent(
+            kind=ActionKind.CREATE_CALENDAR_EVENT,
+            target=f"calendar: new event '{change.title}'",
+            summary=f"Add '{change.title}' to the calendar, {when}",
+            payload=payload,
+            idempotency_key=calendar_create_key(change),
+            requested_by=f"graph:job_search#{PLAN_INTERVIEW_SCHEDULE}",
+            created_at=now,
+        )
+
+    was = _when(change.previous_starts_at, change.previous_ends_at)
+    payload[PAYLOAD_EVENT_ID] = change.event_id
+    payload["previous_starts_at"] = change.previous_starts_at.isoformat()
+    payload["previous_ends_at"] = change.previous_ends_at.isoformat()
+    payload[PAYLOAD_PREVIOUS_BODY] = f"{change.title}\n{was}"
+    payload[PAYLOAD_BODY] = f"{change.title}\n{when}"
+    return ActionIntent(
+        kind=ActionKind.UPDATE_CALENDAR_EVENT,
+        target=f"calendar: event {change.event_id} ('{change.title}')",
+        summary=f"Move '{change.title}' from {was} to {when}",
+        payload=payload,
+        idempotency_key=calendar_update_key(change),
+        requested_by=f"graph:job_search#{PLAN_INTERVIEW_SCHEDULE}",
+        created_at=now,
+    )
+
+
+def _events_for_schedule(
+    plan: InterviewSchedulePlan, request: InterviewRequest, now: datetime
+) -> list[EmittedEvent]:
+    """The status events one planning pass produces.
+
+    Keyed on what was planned, so a replayed step re-emits the same events and
+    a genuinely new plan -- a moved interview -- emits new ones.
+    """
+    events: list[EmittedEvent] = []
+    stamp = plan.interview_starts_at.isoformat()
+    if plan.writes:
+        writes = ",".join(
+            f"{change.logical_key}@{change.starts_at.isoformat()}" for change in plan.writes
+        )
+        events.append(
+            EmittedEvent(
+                type=JobSearchEventType.INTERVIEW_SCHEDULE_PROPOSED,
+                aggregate_id=plan.application_id,
+                payload={
+                    **plan.model_dump(mode="json"),
+                    "source_message_id": request.source_message_id,
+                },
+                dedupe_key=(
+                    f"interview_schedule:{plan.application_id}:{content_sha256(writes)[:16]}"
+                ),
+                occurred_at=now,
+            )
+        )
+    if plan.conflicts:
+        conflicts = ",".join(
+            f"{conflict.kind.value}:{conflict.logical_key}:{conflict.event_id}"
+            for conflict in plan.conflicts
+        )
+        events.append(
+            EmittedEvent(
+                type=JobSearchEventType.INTERVIEW_SCHEDULE_CONFLICT,
+                aggregate_id=plan.application_id,
+                payload={
+                    "application_id": str(plan.application_id),
+                    "interview_starts_at": stamp,
+                    "interview_ends_at": plan.interview_ends_at.isoformat(),
+                    "conflicts": _dump(plan.conflicts),
+                },
+                dedupe_key=(
+                    f"interview_conflict:{plan.application_id}:{stamp}:"
+                    f"{content_sha256(conflicts)[:16]}"
+                ),
+                occurred_at=now,
+            )
+        )
+    return events
+
+
+def _interview_reminder_event(checkpoint: PendingCheckpoint, now: datetime) -> EmittedEvent:
+    """The reminder a fired interview-prep wait becomes."""
+    return EmittedEvent(
+        type=JobSearchEventType.INTERVIEW_REMINDER,
+        aggregate_id=checkpoint.application_id,
+        payload={
+            "application_id": str(checkpoint.application_id),
+            "checkpoint_id": str(checkpoint.checkpoint_id),
+            "reason": checkpoint.reason,
+            **checkpoint.condition.params,
+        },
+        dedupe_key=f"interview_reminder:{checkpoint.checkpoint_id}",
+        occurred_at=now,
     )
 
 
@@ -2322,6 +2744,7 @@ __all__ = [
     "RecruiterInbox",
     "RecruiterMessageClassifier",
     "PendingCheckpointScheduler",
+    "CalendarReader",
     # Node names
     "LOAD_SEARCH_PROFILE",
     "SEARCH_PROVIDERS",
@@ -2341,6 +2764,8 @@ __all__ = [
     "HANDLE_RECRUITER_RESPONSE",
     "CREATE_FOLLOW_UP_CHECKPOINT",
     "DRAFT_FOLLOW_UP",
+    "PLAN_INTERVIEW_SCHEDULE",
     "STAGE_SUBMISSION",
     "STAGE_RECRUITER_OUTREACH",
+    "STAGE_INTERVIEW_SCHEDULING",
 ]

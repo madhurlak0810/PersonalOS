@@ -71,6 +71,7 @@ from personalos.domain.recruiter_events import (
     RecruiterEventRecord,
     RecruiterEventReview,
 )
+from personalos.executor.calendar import CalendarActionExecutor
 from personalos.graphs import job_search as jsg
 from personalos.graphs.job_search import (
     END,
@@ -1462,6 +1463,25 @@ class TestDraftFollowUp:
         with pytest.raises(JobSearchContractError, match="no application in state"):
             await subgraph.draft_follow_up({"fired_checkpoints": dumped(_pending_wait())})
 
+    async def test_an_interview_prep_wait_is_a_reminder_not_a_message(self):
+        """Nobody is owed a message when it is time to prepare.
+
+        It fires on the inbox thread, which holds no single application, so it
+        must not need one.
+        """
+        subgraph, ports = recruiter_graph()
+        wait = _pending_wait(kind=FollowUpKind.INTERVIEW_PREP, reason="prepare for the interview")
+
+        update = await subgraph.draft_follow_up({"fired_checkpoints": dumped(wait)})
+
+        assert update["pending_actions"] == []
+        assert subgraph.route_after_follow_up(update) == END
+        (event,) = [EmittedEvent.model_validate(raw) for raw in update["emitted_events"]]
+        assert event.type == JobSearchEventType.INTERVIEW_REMINDER
+        assert event.aggregate_id == fakes.APPLICATION_ID
+        assert event.payload["checkpoint_id"] == str(wait.checkpoint_id)
+        assert ports["event_emitter"].types() == [JobSearchEventType.INTERVIEW_REMINDER.value]
+
 
 # --- Routers ------------------------------------------------------------------
 
@@ -1696,7 +1716,10 @@ class TestRecordRecruiterEvents:
             "emitted_events",
             "pending_actions",
             "approval_stage",
+            "interview_requests",
         }
+        # "Send availability" fixes no time, so there is nothing to schedule.
+        assert update["interview_requests"] == []
         (record,) = [
             RecruiterEventRecord.model_validate(raw) for raw in update["recruiter_event_records"]
         ]
@@ -1833,6 +1856,207 @@ class TestRecordRecruiterEvents:
         assert ports["action_executor"].executed == []
 
 
+# --- Interview scheduling ------------------------------------------------------
+
+#: Thursday 14:00; `fakes.NOW` is the Monday before.
+INTERVIEW_AT = datetime(2026, 10, 1, 14, 0)
+
+
+def _interview_commitment(due_at=INTERVIEW_AT) -> ExtractedCommitment:
+    return ExtractedCommitment(
+        actor=CommitmentActor.EXTERNAL_PERSON,
+        action="Technical interview with the team",
+        due_at=due_at,
+        confidence=0.9,
+    )
+
+
+def scheduling_graph(calendar=None, **overrides):
+    """An inbound graph that can also read a calendar."""
+    calendar = calendar or fakes.FakeCalendar()
+    overrides.setdefault(
+        "extractor",
+        fakes.FakeRecruiterEventExtractor(fakes.extraction(commitments=[_interview_commitment()])),
+    )
+    subgraph, ports = inbound_graph(
+        calendar_reader=calendar,
+        checkpoint_scheduler=fakes.FakePendingCheckpointScheduler(),
+        **overrides,
+    )
+    return subgraph, {**ports, "calendar": calendar}
+
+
+async def _invited(subgraph) -> dict:
+    """State as `plan_interview_schedule` finds it after a timed invite."""
+    classified = await _classified(subgraph, fakes.inbound_message())
+    recorded = await subgraph.record_recruiter_events(classified)
+    return {"user_id": str(fakes.USER_ID), **classified, **recorded}
+
+
+class TestPlanInterviewSchedule:
+    async def test_a_timed_invite_is_handed_on_as_an_interview_request(self):
+        subgraph, _ports = scheduling_graph()
+
+        recorded = await _invited(subgraph)
+
+        (request,) = recorded["interview_requests"]
+        assert request["application_id"] == str(fakes.APPLICATION_ID)
+        assert request["starts_at"] == INTERVIEW_AT.isoformat()
+        assert subgraph.route_after_record(recorded) == jsg.PLAN_INTERVIEW_SCHEDULE
+
+    async def test_it_proposes_the_interview_and_prep_blocks_and_writes_nothing(self):
+        subgraph, ports = scheduling_graph()
+
+        update = await subgraph.plan_interview_schedule(await _invited(subgraph), THREAD_CONFIG)
+
+        assert set(update) == {
+            "interview_schedules",
+            "pending_actions",
+            "pending_checkpoints",
+            "emitted_events",
+            "interview_requests",
+            "calendar_changes",
+            "approval_stage",
+        }
+        intents = [ActionIntent.model_validate(raw) for raw in update["pending_actions"]]
+        assert [intent.kind for intent in intents] == [ActionKind.CREATE_CALENDAR_EVENT] * 3
+        assert [intent.payload["role"] for intent in intents] == ["interview", "prep", "prep"]
+        assert intents[0].payload["starts_at"] == INTERVIEW_AT.isoformat()
+        # Each write is one a reviewer answers, as a calendar write.
+        for intent in intents:
+            assert intent.risk_profile().scopes == ("calendar:write",)
+        assert update["approval_stage"] == jsg.STAGE_INTERVIEW_SCHEDULING
+        assert subgraph.route_after_follow_up(update) == REQUEST_APPROVAL
+        # Proposed, not done: the calendar is untouched and nothing executed.
+        assert ports["calendar"].events == {}
+        assert ports["action_executor"].executed == []
+        # Consumed, so a later run on this thread does not plan it again.
+        assert update["interview_requests"] == [] and update["calendar_changes"] == []
+
+    async def test_it_emits_the_proposal_and_schedules_a_reminder(self):
+        subgraph, ports = scheduling_graph()
+
+        update = await subgraph.plan_interview_schedule(await _invited(subgraph), THREAD_CONFIG)
+
+        assert ports["event_emitter"].types() == [
+            JobSearchEventType.INTERVIEW_SCHEDULE_PROPOSED.value
+        ]
+        (reminder,) = ports["checkpoint_scheduler"].waits()
+        assert reminder.kind == FollowUpKind.INTERVIEW_PREP
+        assert reminder.thread_id == "thread-under-test"
+        # At the start of the first prep block, and dead once the interview starts.
+        first_prep = min(
+            raw["payload"]["starts_at"]
+            for raw in update["pending_actions"]
+            if raw["payload"]["role"] == "prep"
+        )
+        assert reminder.trigger_at.isoformat() == first_prep
+        assert reminder.expires_at == INTERVIEW_AT
+        assert reminder.condition.params["interview_starts_at"] == INTERVIEW_AT.isoformat()
+        assert [raw["dedupe_key"] for raw in update["pending_checkpoints"]] == [
+            reminder.dedupe_key
+        ]
+
+    async def test_a_reply_drafted_in_the_same_run_is_carried_to_approval_too(self):
+        subgraph, _ports = scheduling_graph(
+            extractor=fakes.FakeRecruiterEventExtractor(
+                fakes.extraction(requires_reply=True, commitments=[_interview_commitment()])
+            )
+        )
+
+        update = await subgraph.plan_interview_schedule(await _invited(subgraph), THREAD_CONFIG)
+
+        kinds = [raw["kind"] for raw in update["pending_actions"]]
+        assert kinds[0] == ActionKind.SEND_RECRUITER_MESSAGE.value
+        assert kinds[1:] == [ActionKind.CREATE_CALENDAR_EVENT.value] * 3
+        # The stage the reply set is left alone.
+        assert "approval_stage" not in update
+
+    async def test_a_clash_with_the_interview_raises_a_conflict_event(self):
+        calendar = fakes.FakeCalendar()
+        calendar.add("Offsite", INTERVIEW_AT, INTERVIEW_AT + timedelta(hours=3))
+        subgraph, ports = scheduling_graph(calendar)
+
+        update = await subgraph.plan_interview_schedule(await _invited(subgraph), THREAD_CONFIG)
+
+        assert JobSearchEventType.INTERVIEW_SCHEDULE_CONFLICT.value in ports[
+            "event_emitter"
+        ].types()
+        conflict = EmittedEvent.model_validate(update["emitted_events"][-1])
+        assert conflict.payload["conflicts"][0]["kind"] == "interview_overlap"
+
+    async def test_an_interview_moved_on_the_calendar_moves_its_prep_blocks(self):
+        """The calendar entry: the interview is where it now is; prep follows it."""
+        calendar = fakes.FakeCalendar()
+        subgraph, ports = scheduling_graph(calendar)
+        first = await subgraph.plan_interview_schedule(await _invited(subgraph), THREAD_CONFIG)
+        executor = CalendarActionExecutor(calendar)
+        for raw in first["pending_actions"]:
+            intent = ActionIntent.model_validate(raw)
+            await executor.execute(intent, fakes.approval_decision(fakes.approval_request(intent)))
+        interview = calendar.by_key(f"interview:{fakes.APPLICATION_ID}")
+        moved_to = datetime(2026, 10, 5, 10, 0)
+        moved = await calendar.update_event(
+            interview.event_id,
+            title=interview.title,
+            starts_at=moved_to,
+            ends_at=moved_to + timedelta(hours=1),
+            properties={},
+        )
+
+        state = {
+            "user_id": str(fakes.USER_ID),
+            "calendar_changes": dumped(moved),
+            # A previous run's settled actions, still in the thread's state.
+            "pending_actions": first["pending_actions"],
+        }
+        assert subgraph.route_from_start(state) == jsg.PLAN_INTERVIEW_SCHEDULE
+        update = await subgraph.plan_interview_schedule(state, THREAD_CONFIG)
+
+        intents = [ActionIntent.model_validate(raw) for raw in update["pending_actions"]]
+        # Only the prep blocks move -- the interview already is where it is --
+        # and the stale actions from the earlier run are not re-proposed.
+        assert [i.kind for i in intents] == [ActionKind.UPDATE_CALENDAR_EVENT] * 2
+        assert {i.payload["role"] for i in intents} == {"prep"}
+        assert {i.payload["event_id"] for i in intents} == {
+            calendar.by_key(f"prep:{fakes.APPLICATION_ID}:{slot}").event_id
+            for slot in ("deep_prep", "warm_up")
+        }
+        for intent in intents:
+            assert datetime.fromisoformat(intent.payload["ends_at"]) <= moved_to
+        # The reminder moved with it; the old one was cancelled, not left to fire.
+        (reminder,) = ports["checkpoint_scheduler"].waits()
+        assert reminder.expires_at == moved_to
+        assert len(ports["checkpoint_scheduler"].cancelled) == 1
+
+    async def test_a_foreign_calendar_change_plans_nothing(self):
+        calendar = fakes.FakeCalendar()
+        lunch = calendar.add("Lunch", INTERVIEW_AT, INTERVIEW_AT + timedelta(hours=1))
+        subgraph, ports = scheduling_graph(calendar)
+
+        update = await subgraph.plan_interview_schedule(
+            {"user_id": str(fakes.USER_ID), "calendar_changes": dumped(lunch)}, THREAD_CONFIG
+        )
+
+        assert update["pending_actions"] == []
+        assert subgraph.route_after_follow_up(update) == END
+        assert ports["event_emitter"].events == []
+
+    async def test_without_a_calendar_reader_scheduling_is_off(self):
+        subgraph, _ports = inbound_graph(
+            extractor=fakes.FakeRecruiterEventExtractor(
+                fakes.extraction(commitments=[_interview_commitment()])
+            )
+        )
+        recorded = await _invited(subgraph)
+
+        # The request is still read out; nothing routes to the planner.
+        assert recorded["interview_requests"]
+        assert subgraph.route_after_record(recorded) == END
+        with pytest.raises(JobSearchContractError, match="calendar reader"):
+            await subgraph.plan_interview_schedule(recorded, THREAD_CONFIG)
+
+
 # --- Coverage guard -----------------------------------------------------------
 
 
@@ -1862,6 +2086,7 @@ NODE_TEST_CLASSES = {
     jsg.DRAFT_FOLLOW_UP: TestDraftFollowUp,
     jsg.CLASSIFY_RECRUITER_EVENTS: TestClassifyRecruiterEvents,
     jsg.RECORD_RECRUITER_EVENTS: TestRecordRecruiterEvents,
+    jsg.PLAN_INTERVIEW_SCHEDULE: TestPlanInterviewSchedule,
 }
 
 

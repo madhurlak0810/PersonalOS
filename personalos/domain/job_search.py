@@ -779,6 +779,11 @@ class ActionKind(str, Enum):
     SUBMIT_APPLICATION = "submit_application"
     SEND_RECRUITER_MESSAGE = "send_recruiter_message"
     OVERWRITE_DOCUMENT = "overwrite_document"
+    #: Put an interview, or a prep block for one, on the candidate's calendar.
+    CREATE_CALENDAR_EVENT = "create_calendar_event"
+    #: Move an event this system created, because the interview it belongs to
+    #: moved or something was booked over it.
+    UPDATE_CALENDAR_EVENT = "update_calendar_event"
 
 
 class RiskLevel(str, Enum):
@@ -859,6 +864,21 @@ ACTION_RISK_PROFILES: Mapping[ActionKind, ActionRiskProfile] = MappingProxyType(
             # Short: the approval is of a diff against one version of the file,
             # and the file is the candidate's to edit in the meantime.
             approval_ttl=timedelta(days=1),
+        ),
+        ActionKind.CREATE_CALENDAR_EVENT: ActionRiskProfile(
+            kind=ActionKind.CREATE_CALENDAR_EVENT,
+            # On the candidate's own calendar and easily removed.
+            risk=RiskLevel.LOW,
+            scopes=("calendar:write",),
+            # Short: the slot was free when it was proposed, and calendars fill.
+            approval_ttl=timedelta(days=2),
+        ),
+        ActionKind.UPDATE_CALENDAR_EVENT: ActionRiskProfile(
+            kind=ActionKind.UPDATE_CALENDAR_EVENT,
+            # Moves something the candidate may already be planning around.
+            risk=RiskLevel.MEDIUM,
+            scopes=("calendar:write",),
+            approval_ttl=timedelta(days=2),
         ),
     }
 )
@@ -1391,6 +1411,16 @@ class JobSearchEventType(str, Enum):
     #: An inbound message could not be tied to an application, or classified,
     #: confidently enough to act on. Nothing was transitioned; a person decides.
     RECRUITER_EVENT_REVIEW_REQUIRED = "application.recruiter_event_review_required"
+    #: An interview and its prep blocks were planned against the calendar and
+    #: the writes that plan needs were proposed for approval. The payload is
+    #: `personalos.domain.interview_scheduling.InterviewSchedulePlan`.
+    INTERVIEW_SCHEDULE_PROPOSED = "application.interview_schedule_proposed"
+    #: Something is booked over the interview, or a prep block has nowhere to
+    #: go. Raised alongside the proposal, because the calendar alone will not
+    #: say so.
+    INTERVIEW_SCHEDULE_CONFLICT = "application.interview_schedule_conflict"
+    #: An interview-prep reminder came due. Nothing is drafted or sent for it.
+    INTERVIEW_REMINDER = "application.interview_reminder"
 
 
 class EmittedEvent(_Value):

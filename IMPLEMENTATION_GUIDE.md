@@ -533,6 +533,10 @@ And a third: a run invoked with `inbound_messages` is recruiter mail not yet
 tied to an application, and enters at `classify_recruiter_events` — see
 [Recruiter events](#15-recruiter-events-classification-commitments-and-correlation).
 
+And a fourth: a run invoked with `calendar_changes` is an interview event that
+moved on the calendar, and enters at `plan_interview_schedule` -- see
+[Interview scheduling](#16-conditional-follow-ups-and-interview-scheduling).
+
 **Approval interrupts before external writes.** Every point at which the graph
 is about to do something the outside world can see goes through those three
 nodes, and only through them:
@@ -805,6 +809,128 @@ follow-up.
 `tests/graph_scenarios/test_recruiter_events.py` (the compiled graph against a
 real database), and the two node contract classes in
 `tests/unit/test_job_search_nodes.py`.
+
+### 16. Conditional Follow-ups and Interview Scheduling
+
+Calendar and task behaviour lives in the Job Search graph, not in a Calendar
+subgraph: a follow-up, an interview and its prep blocks all exist to move one
+application forward.
+
+#### Follow-ups that cancel themselves
+
+The wait is a [pending checkpoint](#14-pending-checkpoints-durable-conditional-waits)
+and its condition is a stored `CheckpointCondition` -- `kind`, `subject_id`,
+`since`, `params`. What this phase adds is the thing that answers it.
+[`persistence/checkpoint_conditions.py`](personalos/persistence/checkpoint_conditions.py)
+(`SqlCheckpointConditionEvaluator`, built by
+`bootstrap.build_checkpoint_condition_evaluator`) is the evaluator a deployment
+hands `PendingCheckpointMonitor`:
+
+| Condition | Met when |
+| --- | --- |
+| `RECRUITER_RESPONSE_RECEIVED` | a `communication_events` row for the application, not classified `unrelated`, with `occurred_at >= since` |
+| `CANDIDATE_REPLY_SENT` | a completed `tool_executions` row keyed `reply-<application_id>-...`, updated since |
+| `APPLICATION_CLOSED` | the application's status is terminal (or the application is gone) |
+
+So "seven days after applying, if no recruiter response, draft a follow-up" is:
+the search run schedules the wait; a reply arriving on day two is recorded by
+the inbound-mail path on a different thread and touches no checkpoint; the
+sweep on day seven asks the database, finds the reply, and closes the wait
+`resolved` with no draft, no approval request and no event.
+
+An `INTERVIEW_PREP` wait that fires is a reminder to the candidate, not a
+message to a recruiter: `draft_follow_up_for_triggered_checkpoint` emits
+`application.interview_reminder` for it and proposes nothing.
+
+#### Interview scheduling
+
+```
+record_recruiter_events -> [invite with a time] plan_interview_schedule
+                        -> request_approval_for_external_write -> ...
+START -> [calendar_changes] plan_interview_schedule -> ...
+```
+
+| Piece | Where | Does |
+| --- | --- | --- |
+| Planner | [`domain/interview_scheduling.py`](personalos/domain/interview_scheduling.py) | `plan_interview_schedule(request, calendar_events, now=...)`: pure. Reconciles the interview and its prep blocks against the calendar and returns a create / update / keep per event, plus conflicts. |
+| Node | `JobSearchGraph.plan_interview_schedule` | Reads the calendar through the `CalendarReader` port, plans, turns each write into a `CREATE_CALENDAR_EVENT` / `UPDATE_CALENDAR_EVENT` intent, emits status events, (re)schedules the reminder. Holds no executor. |
+| Executor | [`executor/calendar.py`](personalos/executor/calendar.py) | `CalendarActionExecutor` performs approved writes through the `CalendarClient` port; `CalendarReconciler` tells `ToolExecutor` whether an unrecorded write landed. |
+
+**An invite is schedulable only if it fixes a time.** `interview_time_from`
+takes a commitment as the interview when its action reads like one and not
+like arranging one. "Send your availability by Friday" schedules nothing; the
+drafted reply handles it.
+
+**The calendar is the record of the schedule.** Every event created carries
+private extended properties: `personalos_application_id`, `personalos_key`
+(`interview:<application>` or `prep:<application>:<slot>`), `personalos_role`,
+`personalos_interview_key` on a prep block, and `personalos_idempotency_key`.
+Nothing else stores which prep block belongs to which interview, so a changed
+time needs no bookkeeping: the events are found by application, matched by
+key, and moved. `CalendarReader.events_for_application` exists for that -- an
+interview that moved two weeks leaves its old events outside any window around
+the new time.
+
+**Prep blocks** (`DEFAULT_PREP_BLOCKS`): 90 minutes ending at least 12 hours
+before the interview, inside `WorkingHours`; and 30 minutes ending 15 minutes
+before it. Each goes in the latest free slot that fits. An existing block is
+left alone while it still fits and is moved when it does not -- the interview
+moved, or something was booked over it. A block with nowhere to go, or
+anything booked over the interview itself, is a `ScheduleConflict`.
+
+**Writes need approval.** Both kinds map to `google.calendar_create_event` /
+`google.calendar_update_event`, which are `WRITE_EXTERNAL`, and leave through
+the approval triple with the requested scope `calendar:write`.
+
+**Events, not only the calendar UI.**
+
+| Event | When |
+| --- | --- |
+| `application.interview_schedule_proposed` | a plan has writes to make; payload is the `InterviewSchedulePlan` |
+| `application.interview_schedule_conflict` | the interview overlaps something, or a prep block could not be placed |
+| `application.interview_reminder` | the prep reminder came due |
+| `action.succeeded` | each calendar write that took effect (from `ToolExecutor`) |
+
+The reminder is a pending checkpoint keyed on the interview time, triggered at
+the first prep block and expiring when the interview starts. A moved interview
+schedules a new one through `PendingCheckpointScheduler.reschedule`, which
+cancels the old.
+
+**No duplicates on retry.** A calendar insert is not idempotent at the
+provider. `CalendarActionExecutor` looks for an event stamped with the
+intent's idempotency key before it inserts, and reads an event by id before it
+moves it. Under `ToolExecutor` (`bootstrap.build_calendar_action_executor`),
+an attempt with no recorded outcome is settled by `CalendarReconciler` from
+the same lookups: found means the receipt is recorded and nothing is sent;
+positively not found means it is sent; a calendar that cannot be asked means
+nothing is sent.
+
+**Wiring.** Pass a `CalendarReader` as `calendar_reader=` to turn scheduling
+on, and `build_calendar_action_executor(client, fallback=...)` as
+`action_executor=`. Nothing in the repository implements `CalendarReader` or
+`CalendarClient` against Google yet, and nothing produces `calendar_changes`:
+both are the Google MCP server's job.
+
+**Not handled:** a cancelled interview (its events are left in place), and a
+new booking over an existing prep block is only noticed the next time that
+application's schedule is planned.
+
+**Tests:**
+
+- [`tests/graph_scenarios/test_conditional_follow_ups.py`](tests/graph_scenarios/test_conditional_follow_ups.py)
+  -- a recruiter reply before `trigger_at` closes the follow-up without
+  drafting anything, against the real evaluator; and the control where no
+  reply arrives and it is drafted.
+- [`tests/unit/test_calendar_executor.py`](tests/unit/test_calendar_executor.py)
+  -- a create that succeeds with its response lost is reconciled on retry and
+  not duplicated, through the real `ToolExecutor` and ledger.
+- [`tests/graph_scenarios/test_interview_scheduling.py`](tests/graph_scenarios/test_interview_scheduling.py)
+  -- a changed interview time moves the interview and its linked prep blocks,
+  whether a message or the calendar moved it.
+- [`tests/unit/test_interview_scheduling.py`](tests/unit/test_interview_scheduling.py)
+  (the planner), `TestPlanInterviewSchedule` in
+  `tests/unit/test_job_search_nodes.py`, and the evaluator and `supersede`
+  cases in `tests/unit/test_pending_checkpoints.py`.
 
 ---
 

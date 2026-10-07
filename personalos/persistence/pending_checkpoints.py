@@ -169,6 +169,47 @@ class PendingCheckpointStore:
         finally:
             session.close()
 
+    def supersede(
+        self,
+        checkpoint: PendingCheckpoint,
+        *,
+        reason: str,
+        now: datetime | None = None,
+    ) -> PendingCheckpoint:
+        """Store a wait and cancel every other open wait of its kind on its application.
+
+        For a wait whose date follows something that can move -- the reminder
+        for an interview. `schedule` deliberately keeps the first row's
+        `trigger_at`, which is right for a replayed step and wrong for a moved
+        interview, so a re-dated wait arrives under a *new* `dedupe_key` and
+        this closes the ones it replaces. They are closed `cancelled`, with the
+        reason, rather than deleted: "why did the Tuesday reminder never
+        fire?" has an answer.
+
+        The new wait is stored first, so a crash between the two steps leaves
+        one reminder too many rather than none.
+        """
+        now = now or self.clock()
+        stored = self.schedule(checkpoint)
+        session = self.session_factory()
+        try:
+            stale = [
+                row.id
+                for row in session.query(PendingCheckpointModel)
+                .filter(
+                    PendingCheckpointModel.application_id == checkpoint.application_id,
+                    PendingCheckpointModel.kind == checkpoint.kind.value,
+                    PendingCheckpointModel.status == PendingCheckpointStatus.PENDING.value,
+                    PendingCheckpointModel.dedupe_key != stored.dedupe_key,
+                )
+                .all()
+            ]
+        finally:
+            session.close()
+        for checkpoint_id in stale:
+            self.close(checkpoint_id, PendingCheckpointStatus.CANCELLED, reason=reason, now=now)
+        return stored
+
     def resolve_matching(
         self,
         *,
@@ -345,6 +386,10 @@ class StorePendingCheckpointScheduler:
     async def schedule(self, checkpoint: PendingCheckpoint) -> PendingCheckpoint:
         """Persist the wait, returning whichever row now owns it."""
         return self.store.schedule(checkpoint)
+
+    async def reschedule(self, checkpoint: PendingCheckpoint, *, reason: str) -> PendingCheckpoint:
+        """Persist the wait and cancel the open ones of its kind it replaces."""
+        return self.store.supersede(checkpoint, reason=reason)
 
 
 def _to_row(checkpoint: PendingCheckpoint) -> PendingCheckpointModel:
