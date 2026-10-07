@@ -1,6 +1,6 @@
 """Core domain models for PersonalOS."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from personalos.domain.context import ExecutionContext
-from personalos.domain.errors import ValidationFailed
+from personalos.domain.errors import RetryableFailure, ValidationFailed
 
 # Minimum length for an idempotency key. Keys are supplied by callers and must
 # carry enough entropy that two unrelated operations cannot collide by accident;
@@ -354,37 +354,72 @@ class ApplicationStatus(str, Enum):
     PREPARING = "preparing"
     READY_TO_APPLY = "ready_to_apply"
     APPLIED = "applied"
+    RESPONSE = "response"
     INTERVIEWING = "interviewing"
     OFFER = "offer"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
     REJECTED = "rejected"
     WITHDRAWN = "withdrawn"
     SKIPPED = "skipped"
+    FOLLOW_UP_PENDING = "follow_up_pending"
+    STALLED = "stalled"
 
 
 #: Documented lifecycle: DISCOVERED -> SAVED -> PREPARING -> READY_TO_APPLY ->
-#: APPLIED -> INTERVIEWING -> OFFER/REJECTED/WITHDRAWN. SKIPPED is reachable
-#: from any pre-APPLIED state (the candidate drops the lead before applying);
-#: REJECTED/WITHDRAWN are also reachable once APPLIED, since a rejection or
-#: withdrawal doesn't require an interview to have happened. Terminal states
-#: (OFFER aside, which can still be withdrawn) have no outgoing transitions.
+#: APPLIED -> (RESPONSE) -> INTERVIEWING -> OFFER -> ACCEPTED | DECLINED.
+#: RESPONSE is optional: an interview invite or a rejection can be the first
+#: thing that comes back. SKIPPED is reachable from any pre-APPLIED state (the
+#: candidate drops the lead before applying); REJECTED/WITHDRAWN from any
+#: post-APPLIED one. FOLLOW_UP_PENDING is entered while the other side is
+#: owed or owes a nudge, and STALLED from any state in
+#: `STALLABLE_APPLICATION_STATUSES`.
+#:
+#: The two holding states have no row of their own: where an application may
+#: go from one depends on where it was held *from*, which this table cannot
+#: know. See `allowed_application_transitions`.
 ALLOWED_APPLICATION_TRANSITIONS: dict[ApplicationStatus, frozenset[ApplicationStatus]] = {
     ApplicationStatus.DISCOVERED: frozenset(
         {ApplicationStatus.SAVED, ApplicationStatus.SKIPPED}
     ),
     ApplicationStatus.SAVED: frozenset(
-        {ApplicationStatus.PREPARING, ApplicationStatus.SKIPPED}
+        {
+            ApplicationStatus.PREPARING,
+            ApplicationStatus.SKIPPED,
+            ApplicationStatus.STALLED,
+        }
     ),
     ApplicationStatus.PREPARING: frozenset(
-        {ApplicationStatus.READY_TO_APPLY, ApplicationStatus.SKIPPED}
+        {
+            ApplicationStatus.READY_TO_APPLY,
+            ApplicationStatus.SKIPPED,
+            ApplicationStatus.STALLED,
+        }
     ),
     ApplicationStatus.READY_TO_APPLY: frozenset(
-        {ApplicationStatus.APPLIED, ApplicationStatus.SKIPPED}
+        {
+            ApplicationStatus.APPLIED,
+            ApplicationStatus.SKIPPED,
+            ApplicationStatus.STALLED,
+        }
     ),
     ApplicationStatus.APPLIED: frozenset(
+        {
+            ApplicationStatus.RESPONSE,
+            ApplicationStatus.INTERVIEWING,
+            ApplicationStatus.REJECTED,
+            ApplicationStatus.WITHDRAWN,
+            ApplicationStatus.FOLLOW_UP_PENDING,
+            ApplicationStatus.STALLED,
+        }
+    ),
+    ApplicationStatus.RESPONSE: frozenset(
         {
             ApplicationStatus.INTERVIEWING,
             ApplicationStatus.REJECTED,
             ApplicationStatus.WITHDRAWN,
+            ApplicationStatus.FOLLOW_UP_PENDING,
+            ApplicationStatus.STALLED,
         }
     ),
     ApplicationStatus.INTERVIEWING: frozenset(
@@ -392,13 +427,48 @@ ALLOWED_APPLICATION_TRANSITIONS: dict[ApplicationStatus, frozenset[ApplicationSt
             ApplicationStatus.OFFER,
             ApplicationStatus.REJECTED,
             ApplicationStatus.WITHDRAWN,
+            ApplicationStatus.FOLLOW_UP_PENDING,
+            ApplicationStatus.STALLED,
         }
     ),
-    ApplicationStatus.OFFER: frozenset({ApplicationStatus.WITHDRAWN}),
+    ApplicationStatus.OFFER: frozenset(
+        {
+            ApplicationStatus.ACCEPTED,
+            ApplicationStatus.DECLINED,
+            ApplicationStatus.WITHDRAWN,
+            ApplicationStatus.STALLED,
+        }
+    ),
+    ApplicationStatus.ACCEPTED: frozenset(),
+    ApplicationStatus.DECLINED: frozenset(),
     ApplicationStatus.REJECTED: frozenset(),
     ApplicationStatus.WITHDRAWN: frozenset(),
     ApplicationStatus.SKIPPED: frozenset(),
 }
+
+#: States an application is parked in rather than progressing through. Leaving
+#: one is governed by the status it was entered from (`resume_status`), not by
+#: a fixed set of successors.
+HOLDING_APPLICATION_STATUSES: frozenset[ApplicationStatus] = frozenset(
+    {ApplicationStatus.FOLLOW_UP_PENDING, ApplicationStatus.STALLED}
+)
+
+#: States with nothing after them.
+TERMINAL_APPLICATION_STATUSES: frozenset[ApplicationStatus] = frozenset(
+    status for status, successors in ALLOWED_APPLICATION_TRANSITIONS.items() if not successors
+)
+
+#: States the scheduled stall check may move to STALLED. DISCOVERED is left
+#: out on purpose: a posting nobody has acted on yet is not a pursuit that
+#: went quiet, and stalling it would flag every unread lead after one window.
+STALLABLE_APPLICATION_STATUSES: frozenset[ApplicationStatus] = frozenset(
+    {
+        status
+        for status, successors in ALLOWED_APPLICATION_TRANSITIONS.items()
+        if ApplicationStatus.STALLED in successors
+    }
+    | {ApplicationStatus.FOLLOW_UP_PENDING}
+)
 
 
 class InvalidApplicationTransition(ValidationFailed, ValueError):
@@ -410,8 +480,47 @@ class InvalidApplicationTransition(ValidationFailed, ValueError):
     """
 
 
+class ApplicationTransitionConflict(RetryableFailure):
+    """Raised when an application moved between being read and being written.
+
+    The transition was valid against the status that was read, but another
+    writer got there first. Nothing was changed and no event was emitted;
+    re-reading and deciding again is safe.
+    """
+
+
+#: `event_log.aggregate_type` for an application's lifecycle events.
+APPLICATION_AGGREGATE_TYPE = "application"
+#: `event_log.event_type` emitted by every status transition.
+APPLICATION_STATUS_CHANGED_EVENT = "application.status_changed"
+#: `event_log.payload_json["actor"]` for transitions made by the stall check.
+STALL_MONITOR_ACTOR = "stall_monitor"
+
+
+def allowed_application_transitions(
+    current: ApplicationStatus, *, resume_status: ApplicationStatus | None = None
+) -> frozenset[ApplicationStatus]:
+    """Every status reachable from `current` in one step.
+
+    For a holding state that is the status it was entered from plus whatever
+    that status could have moved to -- so a held application resumes or moves
+    on exactly as if it had never been held, and DISCOVERED -> ... -> STALLED
+    -> OFFER is no more possible than DISCOVERED -> OFFER. A holding state
+    with no recorded `resume_status` has nowhere to go: guessing one would be
+    setting a status nobody validated.
+    """
+    if current not in HOLDING_APPLICATION_STATUSES:
+        return ALLOWED_APPLICATION_TRANSITIONS.get(current, frozenset())
+    if resume_status is None or resume_status in HOLDING_APPLICATION_STATUSES:
+        return frozenset()
+    return (ALLOWED_APPLICATION_TRANSITIONS[resume_status] | {resume_status}) - {current}
+
+
 def validate_application_status_transition(
-    current: ApplicationStatus, new: ApplicationStatus
+    current: ApplicationStatus,
+    new: ApplicationStatus,
+    *,
+    resume_status: ApplicationStatus | None = None,
 ) -> ApplicationStatus:
     """Check that `current -> new` is an allowed step on the application lifecycle.
 
@@ -420,13 +529,95 @@ def validate_application_status_transition(
     the current status — every transition must be an explicit, documented
     move, not a status set directly by a caller (e.g. an LLM) without going
     through this check.
+
+    `resume_status` is the status a held application was held from; it is
+    ignored unless `current` is a holding state.
     """
-    allowed = ALLOWED_APPLICATION_TRANSITIONS.get(current, frozenset())
-    if new not in allowed:
+    if new not in allowed_application_transitions(current, resume_status=resume_status):
         raise InvalidApplicationTransition(
             f"cannot transition application from '{current.value}' to '{new.value}'"
         )
     return new
+
+
+def resume_status_after(
+    current: ApplicationStatus,
+    new: ApplicationStatus,
+    *,
+    resume_status: ApplicationStatus | None = None,
+) -> ApplicationStatus | None:
+    """The `resume_status` an application carries once `current -> new` is applied.
+
+    Entering a holding state remembers where from; moving between the two
+    holding states keeps the original, since FOLLOW_UP_PENDING is not
+    somewhere a stalled application should resume *to*; leaving clears it.
+    """
+    if new not in HOLDING_APPLICATION_STATUSES:
+        return None
+    return resume_status if current in HOLDING_APPLICATION_STATUSES else current
+
+
+class ApplicationTransitionRecommendation(BaseModel):
+    """A status move proposed by something that is not allowed to make it.
+
+    What an LLM-driven caller hands the lifecycle instead of a status: `to` is
+    free text until `parse_recommended_status` has checked it names a real
+    state, and the move itself is still subject to
+    `validate_application_status_transition` against the application's
+    stored status. Nothing on this model is ever written to a row as-is.
+    """
+
+    application_id: UUID
+    to: str
+    reason: str | None = None
+
+
+def parse_recommended_status(
+    recommendation: ApplicationTransitionRecommendation,
+) -> ApplicationStatus:
+    """The status a recommendation names, if it is one a caller may ask for.
+
+    STALLED is refused here even where the lifecycle allows the edge: it is a
+    fact about the clock, established by the scheduled stall check, not
+    something to be argued into from a conversation.
+    """
+    try:
+        status = ApplicationStatus(recommendation.to.strip().lower())
+    except ValueError as exc:
+        raise InvalidApplicationTransition(
+            f"'{recommendation.to}' is not an application status"
+        ) from exc
+    if status is ApplicationStatus.STALLED:
+        raise InvalidApplicationTransition(
+            "'stalled' is set by the scheduled stall check and cannot be recommended"
+        )
+    return status
+
+
+class ApplicationLifecycleState(BaseModel):
+    """Where an application is on its lifecycle, read from the database alone."""
+
+    model_config = ConfigDict(frozen=True)
+
+    application_id: UUID
+    status: ApplicationStatus
+    #: Set only while `status` is a holding state.
+    resume_status: ApplicationStatus | None = None
+    last_activity_at: datetime
+    #: The `event_log` row the status projection currently reflects; `None`
+    #: for an application that has never transitioned.
+    last_event_id: UUID | None = None
+
+
+def is_application_stalled(
+    status: ApplicationStatus,
+    last_activity_at: datetime,
+    *,
+    now: datetime,
+    window: timedelta,
+) -> bool:
+    """Whether an application has gone a full `window` with no activity."""
+    return status in STALLABLE_APPLICATION_STATUSES and last_activity_at <= now - window
 
 
 class ArtifactType(str, Enum):

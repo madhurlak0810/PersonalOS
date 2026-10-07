@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     # Set as JSON: GREENHOUSE_BOARDS={"acme": "Acme"}
     greenhouse_boards: dict[str, str] = {}
 
+    # Application lifecycle. An application with no activity for this many
+    # days is moved to STALLED by `apps.worker.stall_monitor`, which a
+    # scheduler runs every `application_stall_check_interval_seconds`.
+    application_stall_window_days: int = 14
+    application_stall_check_interval_seconds: int = 3600
+
     # Google Integration
     google_api_key: str = ""
     google_search_engine_id: str = ""
