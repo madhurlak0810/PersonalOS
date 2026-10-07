@@ -20,6 +20,11 @@ from personalos.domain.workflow import (
     supervisor_thread_id,
 )
 from personalos.executor.artifact_prep import DocumentOverwriteExecutor, PolicyGatedDraftSink
+from personalos.executor.calendar import (
+    CalendarActionExecutor,
+    CalendarClient,
+    CalendarReconciler,
+)
 from personalos.executor.credentials import CredentialBroker
 from personalos.executor.job_discovery import GatewayJobProvider
 from personalos.executor.job_search import JobSearchExecutor
@@ -31,6 +36,7 @@ from personalos.mcp.manager import MCPServerManager, get_mcp_manager
 from personalos.persistence.action_journal import ActionExecutorPort, JournaledActionExecutor
 from personalos.persistence.application_lifecycle import ApplicationLifecycleStore
 from personalos.persistence.artifact_drafts import SqlArtifactDraftStore
+from personalos.persistence.checkpoint_conditions import SqlCheckpointConditionEvaluator
 from personalos.persistence.checkpointer import (
     SqlAlchemyCheckpointSaver,
     WorkflowThreadRegistry,
@@ -418,6 +424,43 @@ def build_tool_executor(
     )
 
 
+def build_calendar_action_executor(
+    client: CalendarClient,
+    session_factory: Callable[[], object] = SessionLocal,
+    *,
+    fallback: ActionExecutorPort | None = None,
+    workflow_id: UUID | None = None,
+    policy: PolicyEngine | None = None,
+) -> ToolExecutor:
+    """Build the `action_executor` for a graph that schedules interviews.
+
+    Calendar creates and updates go to `client`; every other action kind goes
+    to `fallback`. The pairing with `CalendarReconciler` is the point of
+    building it here: a calendar write whose outcome was never recorded is
+    looked up on the calendar -- by the idempotency key stamped on the event,
+    or by event id -- before `ToolExecutor` is allowed to send it again.
+    """
+    return build_tool_executor(
+        CalendarActionExecutor(client, fallback=fallback),
+        session_factory,
+        workflow_id=workflow_id,
+        policy=policy,
+        reconciler=CalendarReconciler(client),
+    )
+
+
+def build_checkpoint_condition_evaluator(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> SqlCheckpointConditionEvaluator:
+    """Build the evaluator `PendingCheckpointMonitor` re-asks conditions through.
+
+    Answers from the rows the rest of the system has written since the wait
+    was scheduled, which is what lets a follow-up cancel itself when the
+    recruiter replies in the meantime.
+    """
+    return SqlCheckpointConditionEvaluator(session_factory)
+
+
 def build_application_lifecycle_store(
     session_factory: Callable[[], object] = SessionLocal,
 ) -> ApplicationLifecycleStore:
@@ -574,6 +617,8 @@ __all__ = [
     "build_tool_executor",
     "build_recruiter_event_store",
     "build_pending_checkpoint_store",
+    "build_calendar_action_executor",
+    "build_checkpoint_condition_evaluator",
     "build_pending_checkpoint_scheduler",
     "register_job_search_thread",
     "register_supervisor_thread",

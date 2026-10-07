@@ -39,7 +39,14 @@ from personalos.domain.checkpoints import (
     follow_up_dedupe_key,
 )
 from personalos.domain.job_search import FollowUpKind
-from personalos.persistence.models import Base
+from personalos.domain.models import ApplicationStatus, ToolExecutionStatus
+from personalos.persistence.checkpoint_conditions import SqlCheckpointConditionEvaluator
+from personalos.persistence.models import (
+    ApplicationModel,
+    Base,
+    CommunicationEventModel,
+    ToolExecutionModel,
+)
 from personalos.persistence.pending_checkpoints import PendingCheckpointStore
 
 NOW = datetime(2026, 9, 29, 12, 0, 0)
@@ -345,3 +352,135 @@ async def test_the_default_evaluator_never_reports_a_condition_met():
     evaluator = NeverMetConditionEvaluator()
 
     assert (await evaluator.is_met(wait().condition)) is False
+
+
+# --- Superseding a re-dated wait ----------------------------------------------
+
+
+def reminder(interview_at: datetime) -> PendingCheckpoint:
+    """An interview-prep reminder, keyed on the interview time it is for."""
+    return wait(
+        kind=FollowUpKind.INTERVIEW_PREP,
+        due_at=interview_at - timedelta(days=1),
+        reason=f"prepare for the interview at {interview_at.isoformat()}",
+    ).model_copy(update={"dedupe_key": f"interview_reminder:{APPLICATION_ID}:{interview_at}"})
+
+
+def test_superseding_a_wait_cancels_the_one_it_replaces(store):
+    """A moved interview gets a new reminder; the old one must not still fire."""
+    old = store.schedule(reminder(NOW + timedelta(days=3)))
+    unrelated = store.schedule(wait())
+
+    new = store.supersede(reminder(NOW + timedelta(days=9)), reason="superseded: interview moved")
+
+    assert [c.checkpoint_id for c in store.open_for_application(APPLICATION_ID)] == [
+        unrelated.checkpoint_id,
+        new.checkpoint_id,
+    ]
+    cancelled = store.get(old.checkpoint_id)
+    assert cancelled.status == PendingCheckpointStatus.CANCELLED
+    assert cancelled.closed_reason == "superseded: interview moved"
+
+
+def test_superseding_with_the_same_wait_again_changes_nothing(store):
+    """A replayed step re-proposes the same reminder, and that is not a move."""
+    first = store.supersede(reminder(NOW + timedelta(days=3)), reason="superseded")
+
+    again = store.supersede(reminder(NOW + timedelta(days=3)), reason="superseded")
+
+    assert again.checkpoint_id == first.checkpoint_id
+    assert store.get(first.checkpoint_id).status == PendingCheckpointStatus.PENDING
+    assert len(store.history_for_application(APPLICATION_ID)) == 1
+
+
+# --- Answering a condition from the database ----------------------------------
+
+
+@pytest.fixture
+def evaluated(tmp_path):
+    """A session factory and the SQL evaluator over it."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'conditions.db'}")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    return factory, SqlCheckpointConditionEvaluator(factory)
+
+
+def _add(factory, row):
+    session = factory()
+    try:
+        session.add(row)
+        session.commit()
+    finally:
+        session.close()
+
+
+def _condition(kind: ConditionKind, since: datetime | None = NOW) -> CheckpointCondition:
+    return CheckpointCondition(kind=kind, subject_id=APPLICATION_ID, since=since)
+
+
+async def test_a_recruiter_response_is_one_recorded_since_the_wait_began(evaluated):
+    factory, evaluator = evaluated
+    condition = _condition(ConditionKind.RECRUITER_RESPONSE_RECEIVED)
+    assert await evaluator.is_met(condition) is False
+
+    def message(classification: str, at: datetime) -> CommunicationEventModel:
+        return CommunicationEventModel(
+            application_id=APPLICATION_ID,
+            classification=classification,
+            provider_message_id=str(uuid4()),
+            occurred_at=at,
+        )
+
+    # Before the wait existed, about another application, or not about a job at all.
+    _add(factory, message("recruiter_response", NOW - timedelta(days=1)))
+    _add(factory, message("unrelated", NOW + timedelta(days=1)))
+    other = message("recruiter_response", NOW + timedelta(days=1))
+    other.application_id = uuid4()
+    _add(factory, other)
+    assert await evaluator.is_met(condition) is False
+
+    _add(factory, message("general_update", NOW + timedelta(days=2)))
+    assert await evaluator.is_met(condition) is True
+
+
+async def test_a_candidate_reply_is_one_that_was_actually_sent(evaluated):
+    factory, evaluator = evaluated
+    condition = _condition(ConditionKind.CANDIDATE_REPLY_SENT)
+
+    def execution(status: ToolExecutionStatus) -> ToolExecutionModel:
+        return ToolExecutionModel(
+            tool_name="google.gmail_send_message",
+            idempotency_key=f"reply-{APPLICATION_ID}-{uuid4()}",
+            status=status.value,
+            updated_at=NOW + timedelta(days=1),
+        )
+
+    # Attempted is not sent.
+    _add(factory, execution(ToolExecutionStatus.FAILED))
+    assert await evaluator.is_met(condition) is False
+
+    _add(factory, execution(ToolExecutionStatus.COMPLETED))
+    assert await evaluator.is_met(condition) is True
+
+
+async def test_an_application_is_closed_once_its_status_is_terminal(evaluated):
+    factory, evaluator = evaluated
+    condition = _condition(ConditionKind.APPLICATION_CLOSED, since=None)
+    _add(
+        factory,
+        ApplicationModel(
+            id=APPLICATION_ID,
+            job_posting_id=uuid4(),
+            user_id=uuid4(),
+            status=ApplicationStatus.INTERVIEWING.value,
+        ),
+    )
+    assert await evaluator.is_met(condition) is False
+
+    session = factory()
+    try:
+        session.query(ApplicationModel).update({"status": ApplicationStatus.REJECTED.value})
+        session.commit()
+    finally:
+        session.close()
+    assert await evaluator.is_met(condition) is True

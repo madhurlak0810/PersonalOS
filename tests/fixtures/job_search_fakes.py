@@ -21,6 +21,7 @@ from personalos.domain.checkpoints import (
     ConditionKind,
     PendingCheckpoint,
 )
+from personalos.domain.interview_scheduling import PROP_APPLICATION_ID, CalendarEvent
 from personalos.domain.job_search import (
     ActionIntent,
     ActionKind,
@@ -546,9 +547,23 @@ class FakePendingCheckpointScheduler:
 
     def __init__(self):
         self.scheduled: dict[str, PendingCheckpoint] = {}
+        #: dedupe_key -> reason, for waits a `reschedule` replaced.
+        self.cancelled: dict[str, str] = {}
 
     async def schedule(self, checkpoint: PendingCheckpoint) -> PendingCheckpoint:
         return self.scheduled.setdefault(checkpoint.dedupe_key, checkpoint)
+
+    async def reschedule(self, checkpoint: PendingCheckpoint, *, reason: str) -> PendingCheckpoint:
+        stored = await self.schedule(checkpoint)
+        for key, other in list(self.scheduled.items()):
+            if (
+                key != stored.dedupe_key
+                and other.application_id == stored.application_id
+                and other.kind == stored.kind
+            ):
+                self.cancelled[key] = reason
+                del self.scheduled[key]
+        return stored
 
     def waits(self) -> list[PendingCheckpoint]:
         """Every wait scheduled, in the order it was first seen."""
@@ -630,6 +645,117 @@ class FakeRecruiterClassifier:
             requires_reply=requires_reply,
             summary=message.subject,
         )
+
+
+# --- Calendar -----------------------------------------------------------------
+
+
+class LostResponse(RuntimeError):
+    """The calendar applied a write and the response never arrived."""
+
+
+class FakeCalendar:
+    """An in-memory calendar: the reader the graph plans against and the client
+    the calendar executor writes through, over one set of events.
+
+    One object for both on purpose. The property under test in the scheduling
+    scenarios is that a plan made after a write sees that write, which two
+    separate fakes would have to be kept in step by hand to show.
+
+    `lose_next_create_response` makes the next insert land and then raise --
+    the timeout-after-commit that makes calendar retries dangerous.
+    """
+
+    def __init__(self, events: Sequence[CalendarEvent] = ()):
+        self.events: dict[str, CalendarEvent] = {event.event_id: event for event in events}
+        self.created: list[str] = []
+        self.updated: list[str] = []
+        self.lose_next_create_response = False
+        self._next_id = 1
+
+    # Reader (the graph's `CalendarReader` port).
+
+    async def events_between(
+        self, user_id: UUID, start: datetime, end: datetime
+    ) -> Sequence[CalendarEvent]:
+        return [e for e in self.events.values() if e.starts_at < end and e.ends_at > start]
+
+    async def events_for_application(
+        self, user_id: UUID, application_id: UUID
+    ) -> Sequence[CalendarEvent]:
+        return await self.find_by_property(PROP_APPLICATION_ID, str(application_id))
+
+    # Client (the executor's `CalendarClient` port).
+
+    async def find_by_property(self, name: str, value: str) -> Sequence[CalendarEvent]:
+        return [e for e in self.events.values() if e.properties.get(name) == value]
+
+    async def get_event(self, event_id: str) -> CalendarEvent | None:
+        return self.events.get(event_id)
+
+    async def create_event(
+        self,
+        *,
+        title: str,
+        starts_at: datetime,
+        ends_at: datetime,
+        description: str,
+        properties: dict[str, str],
+    ) -> CalendarEvent:
+        event = CalendarEvent(
+            event_id=f"evt-{self._next_id}",
+            title=title,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            properties=dict(properties),
+            etag="1",
+        )
+        self._next_id += 1
+        self.events[event.event_id] = event
+        self.created.append(event.event_id)
+        if self.lose_next_create_response:
+            self.lose_next_create_response = False
+            raise LostResponse("calendar insert timed out after it was applied")
+        return event
+
+    async def update_event(
+        self,
+        event_id: str,
+        *,
+        title: str,
+        starts_at: datetime,
+        ends_at: datetime,
+        properties: dict[str, str],
+    ) -> CalendarEvent:
+        current = self.events[event_id]
+        event = current.model_copy(
+            update={
+                "title": title,
+                "starts_at": starts_at,
+                "ends_at": ends_at,
+                "properties": {**current.properties, **properties},
+                "etag": str(int(current.etag or "0") + 1),
+            }
+        )
+        self.events[event_id] = event
+        self.updated.append(event_id)
+        return event
+
+    def add(self, title: str, starts_at: datetime, ends_at: datetime) -> CalendarEvent:
+        """Book something this system did not create."""
+        event = CalendarEvent(
+            event_id=f"ext-{len(self.events) + 1}",
+            title=title,
+            starts_at=starts_at,
+            ends_at=ends_at,
+        )
+        self.events[event.event_id] = event
+        return event
+
+    def by_key(self, logical_key: str) -> CalendarEvent:
+        """The one event carrying this logical key. Fails on none, or on a duplicate."""
+        (event,) = [e for e in self.events.values() if e.logical_key == logical_key]
+        return event
 
 
 # --- Inbound recruiter mail ---------------------------------------------------
