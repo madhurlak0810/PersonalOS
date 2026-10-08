@@ -82,9 +82,10 @@ def create_app() -> FastAPI:
     )
 
     # Include routers
-    from apps.api.routes import jobs
+    from apps.api.routes import jobs, workflows
 
     app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"])
+    app.include_router(workflows.router, prefix="/v1", tags=["workflows"])
 
     register_error_handlers(app)
 

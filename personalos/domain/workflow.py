@@ -27,6 +27,7 @@ nothing about how either is stored.
 
 import hashlib
 from datetime import datetime
+from enum import Enum
 from typing import Any
 from uuid import UUID
 
@@ -89,6 +90,18 @@ def derive_thread_id(namespace: str, *parts: Any) -> str:
 JOB_SEARCH_THREAD_NAMESPACE = "job_search"
 SUPERVISOR_THREAD_NAMESPACE = "supervisor"
 RECRUITER_INBOX_THREAD_NAMESPACE = "recruiter_inbox"
+
+
+def thread_namespace(thread_id: str) -> str | None:
+    """The kind of thread a derived id names -- `job_search`, `supervisor`, ...
+
+    The only per-thread record of which graph a thread runs on. The workflow's
+    name cannot answer it: a Supervisor conversation and the Job Search run it
+    delegated to share one workflow, and so one name. `None` for an id that was
+    not derived.
+    """
+    namespace, separator, _ = thread_id.partition(":")
+    return namespace if separator and namespace else None
 
 
 def job_search_thread_id(user_id: Any, search_key: str | None = None) -> str:
@@ -236,6 +249,244 @@ class WorkflowResumeState(BaseModel):
         return self.checkpoint_id is not None and bool(self.next)
 
 
+# --- Workflow status ------------------------------------------------------------
+#
+# What `GET /v1/workflows/{id}` reports, and what the resume endpoint decides
+# against. Everything below is assembled from stored rows by
+# `personalos.persistence.workflow_status` -- no process holds it -- so any API
+# instance can answer for any workflow, including one started before it booted.
+
+
+class WorkflowStatus(str, Enum):
+    """Where one workflow stands, across all of its threads.
+
+    Wire-visible: a client matches on these strings.
+    """
+
+    #: Registered, with nothing queued and nothing run yet.
+    PENDING = "pending"
+    #: Accepted and handed to the worker; no worker has finished picking it up.
+    QUEUED = "queued"
+    #: A worker is executing one of its threads.
+    RUNNING = "running"
+    #: Parked on an interrupt -- an approval, an awaited event -- with no answer
+    #: queued. The only status the resume endpoint accepts.
+    WAITING = "waiting"
+    #: A thread raised and was left failed. Its last checkpoint is intact.
+    FAILED = "failed"
+    #: Every thread ran to the end.
+    COMPLETED = "completed"
+
+
+class WorkflowCommandKind(str, Enum):
+    """What the API asks the worker to do with a thread."""
+
+    START = "start"
+    RESUME = "resume"
+
+
+class WorkflowCommand(BaseModel):
+    """One unit of work the API hands to the worker instead of running it inline.
+
+    Carries the caller's identity rather than relying on the worker to infer
+    it: `actor_id` and `correlation_id` came off the request that queued this,
+    and the worker passes both into the run's config so every checkpoint, log
+    line and tool call it produces traces back to that request.
+
+    `graph_input` is the initial state for `START`, and the value an interrupt
+    is resumed with for `RESUME`. `interrupt_ids` names the interrupt(s) a
+    resume answers, so a second answer to the same question is refused rather
+    than queued behind the first.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    command_id: UUID
+    kind: WorkflowCommandKind
+    workflow_id: UUID
+    thread_id: str
+    actor_id: str
+    correlation_id: UUID
+    graph_input: Any = None
+    interrupt_ids: tuple[str, ...] = Field(default_factory=tuple)
+    created_at: datetime | None = None
+
+
+class PendingInterrupt(BaseModel):
+    """One question a parked thread is waiting to have answered."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    thread_id: str
+    #: The node that raised it, when the stored task path names one.
+    step: str | None = None
+    interrupt_id: str | None = None
+    #: The interrupt's payload as the graph raised it -- for an approval, the
+    #: `ApprovalRequest`s the reviewer is being asked about.
+    value: Any = None
+
+
+class RecoverableFailure(BaseModel):
+    """A failure the stored state can be resumed past.
+
+    Only failures with a checkpoint behind them are reported here: a node that
+    raised leaves the checkpoint before it intact, so the thread can be resumed
+    at that node rather than restarted.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    thread_id: str
+    step: str | None = None
+    message: str
+
+
+class WorkflowStep(BaseModel):
+    """One graph node, on the thread it ran (or will run) on."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    thread_id: str
+    step: str
+
+
+class ThreadSnapshot(BaseModel):
+    """What the stored rows say about one thread of a workflow."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    thread_id: str
+    #: Which graph the thread runs on: its id's namespace (`thread_namespace`).
+    kind: str | None = None
+    #: `workflow_runs.status`, verbatim. A thread parked at an interrupt reads
+    #: `running` here -- the runner does not mark it finished -- which is why
+    #: `interrupts` is consulted before this.
+    run_status: str
+    checkpoint_id: str | None = None
+    #: Nodes that have run, in the order each first finished.
+    completed_steps: tuple[str, ...] = Field(default_factory=tuple)
+    #: Nodes the last checkpoint says run next.
+    next_steps: tuple[str, ...] = Field(default_factory=tuple)
+    interrupts: tuple[PendingInterrupt, ...] = Field(default_factory=tuple)
+    failures: tuple[RecoverableFailure, ...] = Field(default_factory=tuple)
+    actor_id: str | None = None
+    correlation_id: UUID | None = None
+    updated_at: datetime | None = None
+
+
+class WorkflowSnapshot(BaseModel):
+    """A workflow's threads and queued commands, and the status they add up to.
+
+    The status is derived here rather than stored, because nothing could keep
+    a stored copy honest: it depends on the run rows, the checkpoints and the
+    command queue, which are written by different processes at different
+    times.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    workflow_id: UUID
+    name: str | None = None
+    threads: tuple[ThreadSnapshot, ...] = Field(default_factory=tuple)
+    #: Commands handed to the worker that it has not finished dispatching.
+    queued: tuple[WorkflowCommand, ...] = Field(default_factory=tuple)
+    created_at: datetime | None = None
+
+    @property
+    def pending_interrupts(self) -> tuple[PendingInterrupt, ...]:
+        """Interrupts still waiting on an answer nobody has queued.
+
+        An interrupt whose answer is already queued is not pending any more --
+        reporting it would invite a second answer to a question already
+        answered.
+        """
+        answered = {
+            interrupt_id
+            for command in self.queued
+            if command.kind == WorkflowCommandKind.RESUME
+            for interrupt_id in command.interrupt_ids
+        }
+        resumed_threads = {
+            command.thread_id
+            for command in self.queued
+            if command.kind == WorkflowCommandKind.RESUME and not command.interrupt_ids
+        }
+        return tuple(
+            interrupt
+            for thread in self.threads
+            if thread.thread_id not in resumed_threads
+            for interrupt in thread.interrupts
+            if interrupt.interrupt_id not in answered
+        )
+
+    @property
+    def status(self) -> WorkflowStatus:
+        """The workflow's status. Precedence is the whole rule.
+
+        An unanswered interrupt beats everything, because it is the one state a
+        human has to act on. A thread actually executing beats queued work.
+        Queued work beats a failure, because what is queued may be the retry.
+        """
+        if self.pending_interrupts:
+            return WorkflowStatus.WAITING
+        if any(thread.run_status == "running" and not thread.interrupts for thread in self.threads):
+            return WorkflowStatus.RUNNING
+        if self.queued:
+            return WorkflowStatus.QUEUED
+        if any(thread.run_status == "failed" for thread in self.threads):
+            return WorkflowStatus.FAILED
+        if self.threads and all(thread.run_status == "completed" for thread in self.threads):
+            return WorkflowStatus.COMPLETED
+        return WorkflowStatus.PENDING
+
+    @property
+    def active_thread(self) -> ThreadSnapshot | None:
+        """The thread whose position is the workflow's position.
+
+        The one waiting on input if any, else the most recently updated thread
+        that has not finished, else the most recently updated thread at all.
+        """
+        waiting = {interrupt.thread_id for interrupt in self.pending_interrupts}
+        for thread in self.threads:
+            if thread.thread_id in waiting:
+                return thread
+        unfinished = [thread for thread in self.threads if thread.run_status != "completed"]
+        candidates = unfinished or list(self.threads)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda thread: thread.updated_at or datetime.min)
+
+    @property
+    def current_step(self) -> WorkflowStep | None:
+        """The step the workflow is at: interrupted, failed in, or about to run."""
+        thread = self.active_thread
+        if thread is None:
+            return None
+        for interrupt in thread.interrupts:
+            if interrupt.step:
+                return WorkflowStep(thread_id=thread.thread_id, step=interrupt.step)
+        for failure in thread.failures:
+            if failure.step:
+                return WorkflowStep(thread_id=thread.thread_id, step=failure.step)
+        if thread.next_steps:
+            return WorkflowStep(thread_id=thread.thread_id, step=thread.next_steps[0])
+        return None
+
+    @property
+    def completed_steps(self) -> tuple[WorkflowStep, ...]:
+        """Every finished node across the workflow's threads, thread by thread."""
+        return tuple(
+            WorkflowStep(thread_id=thread.thread_id, step=step)
+            for thread in self.threads
+            for step in thread.completed_steps
+        )
+
+    @property
+    def recoverable_failures(self) -> tuple[RecoverableFailure, ...]:
+        """Every failure a resume could get past, across the workflow's threads."""
+        return tuple(failure for thread in self.threads for failure in thread.failures)
+
+
 __all__ = [
     "MAX_THREAD_ID_LENGTH",
     "JOB_SEARCH_THREAD_NAMESPACE",
@@ -243,10 +494,19 @@ __all__ = [
     "RECRUITER_INBOX_THREAD_NAMESPACE",
     "InvalidWorkflowIdentity",
     "derive_thread_id",
+    "thread_namespace",
     "job_search_thread_id",
     "recruiter_inbox_thread_id",
     "supervisor_thread_id",
     "WorkflowThread",
     "WorkflowLease",
     "WorkflowResumeState",
+    "WorkflowStatus",
+    "WorkflowCommandKind",
+    "WorkflowCommand",
+    "PendingInterrupt",
+    "RecoverableFailure",
+    "WorkflowStep",
+    "ThreadSnapshot",
+    "WorkflowSnapshot",
 ]

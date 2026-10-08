@@ -23,6 +23,7 @@ optimization, it is the thing that stops a resume from becoming a duplicate.
 """
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
 
@@ -125,10 +126,17 @@ class DurableWorkflowRunner:
         self,
         thread: WorkflowThread,
         initial_state: dict[str, Any],
+        *,
+        configurable: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Run a registered thread from its beginning, holding the workflow's lease."""
+        """Run a registered thread from its beginning, holding the workflow's lease.
+
+        `configurable` is merged into the run's config next to the thread's own
+        ids -- how the actor and correlation id of the request that asked for
+        this run reach the nodes that read them.
+        """
         with self.leases.hold(thread.workflow_id, owner=self.owner, thread_id=thread.thread_id):
-            return await self._invoke(thread, initial_state)
+            return await self._invoke(thread, initial_state, configurable)
 
     async def resume(
         self,
@@ -136,6 +144,7 @@ class DurableWorkflowRunner:
         workflow_id: UUID | None = None,
         thread_id: str | None = None,
         resume_input: Any = None,
+        configurable: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Continue a stored thread from its last checkpoint.
 
@@ -148,7 +157,7 @@ class DurableWorkflowRunner:
 
         `resume_input` is for the human-in-the-loop case -- the value an
         interrupted graph is waiting on. Left as `None`, the graph simply carries
-        on from where it stopped.
+        on from where it stopped. `configurable` is as for `start`.
         """
         thread = self._thread_to_resume(workflow_id=workflow_id, thread_id=thread_id)
 
@@ -177,13 +186,18 @@ class DurableWorkflowRunner:
             )
             # `resume_input` is `None` on an ordinary resume, which is what tells
             # LangGraph to continue the stored run instead of applying new input.
-            return await self._invoke(thread, resume_input)
+            return await self._invoke(thread, resume_input, configurable)
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    async def _invoke(self, thread: WorkflowThread, graph_input: Any) -> dict[str, Any]:
+    async def _invoke(
+        self,
+        thread: WorkflowThread,
+        graph_input: Any,
+        configurable: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Invoke the graph on a thread, keeping the run's status honest.
 
         The status is the only part of a run's progress that is visible without
@@ -194,7 +208,9 @@ class DurableWorkflowRunner:
         """
         self.registry.mark_status(thread.thread_id, RUN_STATUS_RUNNING, started=True)
         try:
-            final = await self.graph.ainvoke(graph_input, config=thread.config())
+            final = await self.graph.ainvoke(
+                graph_input, config=thread.config(**dict(configurable or {}))
+            )
         except Exception:
             self.registry.mark_status(thread.thread_id, RUN_STATUS_FAILED, finished=True)
             raise

@@ -1196,8 +1196,12 @@ class OutboxEventRepository:
             self.session.flush()
         return db_event
 
-    def claim_next(self) -> OutboxEventModel | None:
+    def claim_next(self, type: str | None = None) -> OutboxEventModel | None:
         """Claim the oldest pending outbox row for dispatch, or None if none is claimable.
+
+        `type`, when given, narrows the claim to rows of that type, so a
+        consumer that handles one kind of message cannot claim -- and then
+        strand -- a row meant for another.
 
         The caller owns the returned row's dispatch and must follow up with
         `mark_dispatched` or `mark_failed`.
@@ -1205,6 +1209,8 @@ class OutboxEventRepository:
         query = self.session.query(OutboxEventModel).filter(
             OutboxEventModel.status == OutboxEventStatus.PENDING.value
         )
+        if type is not None:
+            query = query.filter(OutboxEventModel.type == type)
         if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
             query = query.order_by(OutboxEventModel.created_at, OutboxEventModel.id).with_for_update(
                 skip_locked=True

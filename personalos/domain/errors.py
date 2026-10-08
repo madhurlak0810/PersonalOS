@@ -32,6 +32,7 @@ class ErrorCode(str, Enum):
     POLICY_DENIED = "policy_denied"
     APPROVAL_REQUIRED = "approval_required"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
+    CONFLICT = "conflict"
     TOOL_FAILURE = "tool_failure"
     RETRYABLE = "retryable"
     INTERNAL = "internal"
@@ -119,6 +120,19 @@ class IdempotencyConflict(PersonalOSError):
     default_message = "idempotency key conflict"
 
 
+class Conflict(PersonalOSError):
+    """The request is valid but contradicts the resource's current state.
+
+    Distinct from `ValidationFailed`: the same request would be accepted
+    against a resource in a different state -- resuming a workflow that is
+    parked on an approval, say, rather than one that has already finished.
+    """
+
+    code = ErrorCode.CONFLICT
+    http_status = 409
+    default_message = "request conflicts with the resource's current state"
+
+
 class ToolFailure(PersonalOSError):
     """An approved tool call reached its adapter and failed there."""
 
@@ -153,6 +167,7 @@ __all__ = [
     "PolicyDeniedError",
     "ApprovalRequiredError",
     "IdempotencyConflict",
+    "Conflict",
     "ToolFailure",
     "RetryableFailure",
     "InternalError",

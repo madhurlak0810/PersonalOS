@@ -438,6 +438,22 @@ The two entry points that use it:
   one — which ports a graph is wired to is decided where the graph is
   constructed — plus the thread registry and the lease store, and it takes the
   workflow's lease around every invocation.
+- [`apps/api/routes/workflows.py`](../apps/api/routes/workflows.py) is the v1
+  workflow lifecycle: `POST /v1/chat`, `GET /v1/workflows/{id}`,
+  `POST /v1/workflows/{id}/resume`. It runs no graph and holds no workflow
+  state: starting and resuming queue a `WorkflowCommand` in `outbox_events`
+  ([`persistence/workflow_commands.py`](../personalos/persistence/workflow_commands.py))
+  and return 202, and status is read from `workflow_runs`, `checkpoints` and
+  `checkpoint_writes` by
+  [`persistence/workflow_status.py`](../personalos/persistence/workflow_status.py)
+  without compiling a graph, so any API instance can answer for any workflow.
+  The command carries the request's `actor_id` and `correlation_id` across the
+  hand-off.
+- [`apps/worker/workflow_commands.py`](../apps/worker/workflow_commands.py) is
+  the worker half: it claims a queued command and runs it on the
+  `DurableWorkflowRunner` for the thread's kind (the namespace of its derived
+  id -- a workflow's Supervisor and Job Search threads run on different
+  graphs), with the command's identity in the run's `configurable`.
 - [`apps/worker/checkpoint_monitor.py`](../apps/worker/checkpoint_monitor.py)
   sweeps pending checkpoints. It is composition for the same reason: it holds
   the store, a condition evaluator, the thread registry and a runner, and joins

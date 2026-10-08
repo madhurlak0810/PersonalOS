@@ -169,6 +169,24 @@ class WorkflowThreadRegistry:
         finally:
             session.close()
 
+    def create_workflow(self, workflow_name: str) -> UUID:
+        """Mint a new `workflows` row for one pursuit of `workflow_name`.
+
+        `register` without a `workflow_id` reuses the first row with that name,
+        which files every caller under one shared id. A caller starting an
+        independent process -- a new conversation through the API -- mints its
+        own here and passes it to `register`, so its status and its resume are
+        answered for that process alone.
+        """
+        session = self.session_factory()
+        try:
+            workflow = WorkflowModel(name=workflow_name)
+            session.add(workflow)
+            session.commit()
+            return workflow.id
+        finally:
+            session.close()
+
     def resolve(self, thread_id: str) -> WorkflowThread | None:
         """Return the binding for a thread, or `None` if it was never registered."""
         cached = self._cache.get(thread_id)
