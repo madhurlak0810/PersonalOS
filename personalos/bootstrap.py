@@ -54,6 +54,8 @@ from personalos.persistence.pending_checkpoints import (
 from personalos.persistence.policy_log import SqlPolicyDecisionLog
 from personalos.persistence.recruiter_events import SqlRecruiterEventStore
 from personalos.persistence.repositories import JobRepository
+from personalos.persistence.workflow_commands import WorkflowCommandQueue
+from personalos.persistence.workflow_status import WorkflowStatusReader
 from personalos.policy import PolicyEngine, default_policy_engine
 from personalos.providers import (
     JOB_PROVIDERS_SERVER,
@@ -370,6 +372,31 @@ def build_durable_checkpointer(
     )
 
 
+def build_workflow_command_queue(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> WorkflowCommandQueue:
+    """Build the queue the API hands runs to and the worker claims them from."""
+    return WorkflowCommandQueue(session_factory)
+
+
+def build_workflow_status_reader(
+    session_factory: Callable[[], object] = SessionLocal,
+    registry: WorkflowThreadRegistry | None = None,
+) -> WorkflowStatusReader:
+    """Build the reader `GET /v1/workflows/{id}` answers from.
+
+    Reads checkpoints through the same saver the graphs write with, so the
+    status an API process reports is decoded exactly as a resuming worker
+    would decode it -- without the API process ever compiling a graph.
+    """
+    registry = registry or build_workflow_thread_registry(session_factory)
+    return WorkflowStatusReader(
+        session_factory,
+        build_durable_checkpointer(session_factory, registry),
+        build_workflow_command_queue(session_factory),
+    )
+
+
 def build_workflow_lease_store(
     session_factory: Callable[[], object] = SessionLocal,
     *,
@@ -612,6 +639,8 @@ __all__ = [
     "initialize_mcp_servers",
     "build_workflow_thread_registry",
     "build_durable_checkpointer",
+    "build_workflow_command_queue",
+    "build_workflow_status_reader",
     "build_workflow_lease_store",
     "build_journaled_action_executor",
     "build_tool_executor",
