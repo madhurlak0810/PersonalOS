@@ -40,6 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from personalos.bootstrap import (
     SUPERVISOR_WORKFLOW,
+    build_approval_queue,
     build_workflow_command_queue,
     build_workflow_status_reader,
     build_workflow_thread_registry,
@@ -55,6 +56,7 @@ from personalos.domain.workflow import (
     WorkflowStatus,
     thread_namespace,
 )
+from personalos.persistence.approvals import ApprovalQueue
 from personalos.persistence.checkpointer import WorkflowThreadRegistry
 from personalos.persistence.database import SessionLocal
 from personalos.persistence.workflow_commands import WorkflowCommandQueue
@@ -82,15 +84,17 @@ class WorkflowServices:
     registry: WorkflowThreadRegistry
     reader: WorkflowStatusReader
     commands: WorkflowCommandQueue
+    approvals: ApprovalQueue
 
 
 def build_workflow_services(session_factory: Callable[[], Any]) -> WorkflowServices:
-    """Wire the registry, reader and queue against one database."""
+    """Wire the registry, reader and queues against one database."""
     registry = build_workflow_thread_registry(session_factory)
     return WorkflowServices(
         registry=registry,
         reader=build_workflow_status_reader(session_factory, registry),
         commands=build_workflow_command_queue(session_factory),
+        approvals=build_approval_queue(session_factory, registry),
     )
 
 
