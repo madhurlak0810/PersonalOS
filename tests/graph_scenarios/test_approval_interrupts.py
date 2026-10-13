@@ -194,7 +194,7 @@ async def test_a_rejected_action_is_not_executed_but_the_work_is_kept():
     assert resumed["application"]["status"] == ApplicationStatus.READY_TO_APPLY.value
     assert resumed["application"]["submitted"] is False
     refusal = ApprovalRefusal.model_validate(resumed["approval_refusals"][0])
-    assert refusal.reason == RefusalReason.NOT_APPROVED
+    assert refusal.reason == RefusalReason.DENIED_BY_USER
     assert JobSearchEventType.APPLICATION_SUBMISSION_REJECTED.value in (
         ports["event_emitter"].types()
     )

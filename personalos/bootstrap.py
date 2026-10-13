@@ -35,6 +35,7 @@ from personalos.mcp.base import MCPServer
 from personalos.mcp.manager import MCPServerManager, get_mcp_manager
 from personalos.persistence.action_journal import ActionExecutorPort, JournaledActionExecutor
 from personalos.persistence.application_lifecycle import ApplicationLifecycleStore
+from personalos.persistence.approvals import ApprovalQueue
 from personalos.persistence.artifact_drafts import SqlArtifactDraftStore
 from personalos.persistence.checkpoint_conditions import SqlCheckpointConditionEvaluator
 from personalos.persistence.checkpointer import (
@@ -397,6 +398,25 @@ def build_workflow_status_reader(
     )
 
 
+def build_approval_queue(
+    session_factory: Callable[[], object] = SessionLocal,
+    registry: WorkflowThreadRegistry | None = None,
+) -> ApprovalQueue:
+    """Build the queue `GET /v1/approvals` lists and a decision is recorded through.
+
+    Shares the status reader's view of what is parked and the command queue's
+    resume path, so a decision made here resumes a workflow exactly as
+    `POST /v1/workflows/{id}/resume` would.
+    """
+    registry = registry or build_workflow_thread_registry(session_factory)
+    return ApprovalQueue(
+        session_factory,
+        build_workflow_status_reader(session_factory, registry),
+        registry,
+        build_workflow_command_queue(session_factory),
+    )
+
+
 def build_workflow_lease_store(
     session_factory: Callable[[], object] = SessionLocal,
     *,
@@ -641,6 +661,7 @@ __all__ = [
     "build_durable_checkpointer",
     "build_workflow_command_queue",
     "build_workflow_status_reader",
+    "build_approval_queue",
     "build_workflow_lease_store",
     "build_journaled_action_executor",
     "build_tool_executor",

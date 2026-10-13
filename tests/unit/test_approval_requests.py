@@ -255,9 +255,13 @@ class TestAuthorizeExecution:
         assert refusal.suspicious is False
 
     @pytest.mark.parametrize(
-        "verdict", [ApprovalVerdict.REJECTED, ApprovalVerdict.PENDING]
+        ("verdict", "reason"),
+        [
+            (ApprovalVerdict.REJECTED, RefusalReason.DENIED_BY_USER),
+            (ApprovalVerdict.PENDING, RefusalReason.NOT_APPROVED),
+        ],
     )
-    def test_anything_short_of_an_approval_is_refused(self, verdict):
+    def test_anything_short_of_an_approval_is_refused(self, verdict, reason):
         action = intent()
         request = ApprovalRequest.for_intent(action, now=NOW)
 
@@ -269,7 +273,7 @@ class TestAuthorizeExecution:
         )
 
         assert refusal is not None
-        assert refusal.reason == RefusalReason.NOT_APPROVED
+        assert refusal.reason == reason
         assert refusal.suspicious is False
 
     def test_an_unanswered_request_is_refused(self):

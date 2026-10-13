@@ -96,6 +96,29 @@ class WorkflowStatusReader:
             created_at=created_at,
         )
 
+    def interrupted_workflow_ids(self) -> list[UUID]:
+        """Workflows with a thread that has ever stopped at an interrupt.
+
+        A superset of the workflows waiting right now: an interrupt write
+        outlives its answer. It is the cheap narrowing a cross-workflow listing
+        needs before `read` decides, per workflow, what is still pending.
+        """
+        session = self.session_factory()
+        try:
+            rows = (
+                session.query(WorkflowRunModel.workflow_id)
+                .join(
+                    CheckpointWriteModel,
+                    CheckpointWriteModel.thread_id == WorkflowRunModel.thread_id,
+                )
+                .filter(CheckpointWriteModel.channel == _INTERRUPT_CHANNEL)
+                .distinct()
+                .all()
+            )
+            return [workflow_id for (workflow_id,) in rows]
+        finally:
+            session.close()
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

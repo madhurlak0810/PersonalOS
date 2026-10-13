@@ -1184,13 +1184,15 @@ class RefusalReason(str, Enum):
     A closed set so a refusal is classifiable rather than a string an operator
     has to read: `HASH_MISMATCH` and `EXPIRED` mean something went wrong
     between the request and the resume and want investigating, while
-    `NOT_APPROVED` is the ordinary outcome of a reviewer saying no.
+    `DENIED_BY_USER` is the ordinary outcome of a reviewer saying no.
     """
 
     #: The run reached the executor with no request on file for this action.
     NO_REQUEST = "no_approval_request"
-    #: No decision came back for this action, or it was not an approval.
+    #: No decision came back for this action, or it is still pending.
     NOT_APPROVED = "not_approved"
+    #: A reviewer looked at the action and said no.
+    DENIED_BY_USER = "denied_by_user"
     #: A decision that belongs to some other action or some other request.
     MISDIRECTED_DECISION = "misdirected_decision"
     #: The reviewer approved a hash the action no longer has.
@@ -1311,7 +1313,11 @@ def authorize_execution(
         return ApprovalRefusal(
             action_id=intent.action_id,
             request_id=request.request_id,
-            reason=RefusalReason.NOT_APPROVED,
+            reason=(
+                RefusalReason.DENIED_BY_USER
+                if decision.verdict == ApprovalVerdict.REJECTED
+                else RefusalReason.NOT_APPROVED
+            ),
             detail=(
                 f"action {intent.action_id} ({intent.kind.value}) was not approved: "
                 f"verdict={decision.verdict.value}"

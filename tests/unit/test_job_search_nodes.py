@@ -886,9 +886,13 @@ class TestExecuteApprovedActions:
         assert refusal.suspicious is False
 
     @pytest.mark.parametrize(
-        "verdict", [ApprovalVerdict.REJECTED, ApprovalVerdict.PENDING]
+        ("verdict", "reason"),
+        [
+            (ApprovalVerdict.REJECTED, RefusalReason.DENIED_BY_USER),
+            (ApprovalVerdict.PENDING, RefusalReason.NOT_APPROVED),
+        ],
     )
-    async def test_a_verdict_that_is_not_an_approval_yields_no_receipt(self, verdict):
+    async def test_a_verdict_that_is_not_an_approval_yields_no_receipt(self, verdict, reason):
         subgraph, ports = graph()
         intent = fakes.submit_intent()
         request = fakes.approval_request(intent)
@@ -901,7 +905,7 @@ class TestExecuteApprovedActions:
         assert ports["action_executor"].executed == []
         assert (
             ApprovalRefusal.model_validate(update["approval_refusals"][0]).reason
-            == RefusalReason.NOT_APPROVED
+            == reason
         )
 
     async def test_an_approval_bound_to_another_payload_does_not_authorize(self):

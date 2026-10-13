@@ -487,7 +487,76 @@ class WorkflowSnapshot(BaseModel):
         return tuple(failure for thread in self.threads for failure in thread.failures)
 
 
+# --- Approval queue -------------------------------------------------------------
+#
+# What `GET /v1/approvals` lists and `POST /v1/approvals/{id}/decision` answers.
+# An approval here is one request inside a parked thread's interrupt, addressed
+# by the id the graph minted for it, so a reviewer acts on an action rather than
+# on a workflow.
+
+
+class ApprovalState(str, Enum):
+    """Where one approval stands. Wire-visible."""
+
+    PENDING = "pending"
+    #: Unanswered past its expiry. It can still be denied, never approved.
+    EXPIRED = "expired"
+    APPROVED = "approved"
+    DENIED = "denied"
+
+
+class ApprovalOutcome(str, Enum):
+    """What a recorded decision was. Wire-visible, and written to the audit trail."""
+
+    APPROVED = "APPROVED"
+    DENIED_BY_USER = "DENIED_BY_USER"
+
+
+class PendingApproval(BaseModel):
+    """One unanswered request, with what a reviewer needs to decide it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    approval_id: UUID
+    workflow_id: UUID
+    thread_id: str
+    action_id: UUID
+    #: The hash a decision must echo back; see `ApprovalRequest.action_hash`.
+    action_hash: str
+    action_type: str
+    target: str
+    summary: str
+    risk_level: str
+    requested_scopes: tuple[str, ...] = Field(default_factory=tuple)
+    requested_at: datetime
+    expires_at: datetime
+    state: ApprovalState = ApprovalState.PENDING
+
+
+class RecordedApprovalDecision(BaseModel):
+    """A decision as it was recorded -- the first time, and on every repeat."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    approval_id: UUID
+    workflow_id: UUID | None = None
+    action_hash: str
+    state: ApprovalState
+    outcome: ApprovalOutcome
+    decided_by: str | None = None
+    decided_at: datetime
+    #: True once the workflow's resume is queued. False while other requests
+    #: raised by the same interrupt are still unanswered.
+    resumed: bool = False
+    #: True when this is the original outcome returned to a repeat submission.
+    replayed: bool = False
+
+
 __all__ = [
+    "ApprovalState",
+    "ApprovalOutcome",
+    "PendingApproval",
+    "RecordedApprovalDecision",
     "MAX_THREAD_ID_LENGTH",
     "JOB_SEARCH_THREAD_NAMESPACE",
     "SUPERVISOR_THREAD_NAMESPACE",
