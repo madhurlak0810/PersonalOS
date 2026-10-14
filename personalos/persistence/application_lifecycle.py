@@ -257,6 +257,31 @@ class ApplicationLifecycleStore:
             session.close()
 
 
+class StoreApplicationTransitioner:
+    """Binds `JobSearchGraph`'s `ApplicationTransitioner` port to the store.
+
+    The graph may not import persistence, so the node that applies a requested
+    transition after its effect has run reaches the lifecycle through this. It
+    is the same `transition` every other caller uses: validated against the
+    stored status, guarded, and recorded in `event_log`.
+    """
+
+    def __init__(self, store: ApplicationLifecycleStore):
+        """Wrap the store the transition is written through."""
+        self.store = store
+
+    async def transition(
+        self,
+        application_id: UUID,
+        new_status: ApplicationStatus,
+        *,
+        reason: str | None = None,
+        actor: str = "system",
+    ) -> ApplicationLifecycleState:
+        """Move the application; see `ApplicationLifecycleStore.transition`."""
+        return self.store.transition(application_id, new_status, reason=reason, actor=actor)
+
+
 def _to_state(session: Session, row: ApplicationModel) -> ApplicationLifecycleState:
     view = (
         session.query(ApplicationStatusViewModel)
@@ -275,4 +300,5 @@ def _to_state(session: Session, row: ApplicationModel) -> ApplicationLifecycleSt
 __all__ = [
     "DEFAULT_STALL_SWEEP_LIMIT",
     "ApplicationLifecycleStore",
+    "StoreApplicationTransitioner",
 ]

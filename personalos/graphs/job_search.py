@@ -46,6 +46,17 @@ blocks follow the interview whichever side moved it:
 
     START -> plan_interview_schedule -> request_approval_for_external_write -> ...
 
+And a fourth. A run invoked with `requested_transitions` is a person moving an
+application on the board in a way that also asks this system to act -- submit
+the application, tell the recruiter (`personalos.domain.applications`). The
+API validated the move and queued it; it did not apply it. The run proposes
+the effect as an `ActionIntent`, takes it through the approval triple, and
+only once the action has run does it write the status change, through the
+`ApplicationTransitioner` port:
+
+    START -> propose_requested_transitions -> request_approval_for_external_write
+          -> ... -> execute_approved_actions -> apply_requested_transitions
+
 The waits themselves are scheduled by `create_follow_up_checkpoint` through the
 `PendingCheckpointScheduler` port. What makes them survivable is that they are
 rows, not timers: a wait carries its own condition, its trigger time and an
@@ -124,12 +135,18 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 from pydantic import BaseModel
 
+from personalos.domain.applications import (
+    RequestedTransition,
+    TransitionOutcome,
+    transition_action_intent,
+)
 from personalos.domain.artifacts import content_sha256
 from personalos.domain.checkpoints import (
     DEFAULT_CHECKPOINT_GRACE,
     PendingCheckpoint,
     condition_for_kind,
 )
+from personalos.domain.errors import RetryableFailure, ValidationFailed
 from personalos.domain.interview_scheduling import (
     DEFAULT_PREP_BLOCKS,
     PAYLOAD_ENDS_AT,
@@ -190,6 +207,7 @@ from personalos.domain.job_search import (
     authorize_execution,
 )
 from personalos.domain.models import (
+    ApplicationLifecycleState,
     ApplicationStatus,
     ArtifactType,
     CommunicationEventClassification,
@@ -246,6 +264,8 @@ DRAFT_FOLLOW_UP = "draft_follow_up_for_triggered_checkpoint"
 CLASSIFY_RECRUITER_EVENTS = "classify_recruiter_events"
 RECORD_RECRUITER_EVENTS = "record_recruiter_events"
 PLAN_INTERVIEW_SCHEDULE = "plan_interview_schedule"
+PROPOSE_REQUESTED_TRANSITIONS = "propose_requested_transitions"
+APPLY_REQUESTED_TRANSITIONS = "apply_requested_transitions"
 
 #: Values of `JobSearchState["approval_stage"]`. The approval node is entered
 #: from two places (a submission, and a recruiter reply), and this is how its
@@ -254,6 +274,7 @@ PLAN_INTERVIEW_SCHEDULE = "plan_interview_schedule"
 STAGE_SUBMISSION = "external_submission"
 STAGE_RECRUITER_OUTREACH = "recruiter_outreach"
 STAGE_INTERVIEW_SCHEDULING = "interview_scheduling"
+STAGE_LIFECYCLE_TRANSITION = "lifecycle_transition"
 
 #: How far out a follow-up is scheduled when a recruiter has gone quiet, and
 #: when one is owed a reply. The quiet period is longer because the ball is in
@@ -427,6 +448,27 @@ class ApplicationStore(Protocol):
 
     async def record_follow_up(self, checkpoint: FollowUpCheckpoint) -> None:
         """Record a dated follow-up reminder for the application."""
+        ...
+
+
+class ApplicationTransitioner(Protocol):
+    """Moves an application along its lifecycle once a requested effect has run.
+
+    The implementation validates the move against the status stored in the
+    database -- not one this graph holds -- and records it as an event, so a
+    move that is no longer legal by the time the action has run is refused,
+    not forced.
+    """
+
+    async def transition(
+        self,
+        application_id: UUID,
+        new_status: ApplicationStatus,
+        *,
+        reason: str | None = None,
+        actor: str = "system",
+    ) -> ApplicationLifecycleState:
+        """Apply the move and return where the application now is."""
         ...
 
 
@@ -814,6 +856,14 @@ class JobSearchState(TypedDict, total=False):
     #: The plans the last scheduling pass produced, kept for provenance.
     interview_schedules: list[dict[str, Any]]
 
+    # Manual transitions with an external effect.
+    #: Dumped `RequestedTransition`s, supplied as *input* by
+    #: `POST /v1/applications/{id}/transition`. Their presence decides where
+    #: the run enters, like `fired_checkpoints`.
+    requested_transitions: list[dict[str, Any]]
+    #: What became of each, appended run over run.
+    transition_outcomes: list[dict[str, Any]]
+
 
 def _dump(values: Sequence[BaseModel]) -> list[dict[str, Any]]:
     """Dump a sequence of pydantic values to JSON-compatible dicts."""
@@ -867,6 +917,7 @@ class JobSearchGraph:
         recruiter_event_recorder: RecruiterEventRecorder | None = None,
         reply_drafter: RecruiterReplyDrafter | None = None,
         calendar_reader: CalendarReader | None = None,
+        application_transitioner: ApplicationTransitioner | None = None,
         prep_blocks: Sequence[PrepBlockSpec] = DEFAULT_PREP_BLOCKS,
         working_hours: WorkingHours | None = None,
         correlation_threshold: float = DEFAULT_CORRELATION_THRESHOLD,
@@ -937,6 +988,10 @@ class JobSearchGraph:
         # Interview scheduling is off without a calendar to read: a prep block
         # placed blind is as likely to land on a meeting as beside one.
         self.calendar_reader = calendar_reader
+        # Manual transitions with an effect are off without it: proposing an
+        # action whose status change nothing could then write would leave the
+        # board saying the opposite of what was done.
+        self.application_transitioner = application_transitioner
         self.prep_blocks = tuple(prep_blocks)
         self.working_hours = working_hours or WorkingHours()
         self.correlation_threshold = correlation_threshold
@@ -986,8 +1041,10 @@ class JobSearchGraph:
         graph.add_node(CLASSIFY_RECRUITER_EVENTS, self.classify_recruiter_events)
         graph.add_node(RECORD_RECRUITER_EVENTS, self.record_recruiter_events)
         graph.add_node(PLAN_INTERVIEW_SCHEDULE, self.plan_interview_schedule)
+        graph.add_node(PROPOSE_REQUESTED_TRANSITIONS, self.propose_requested_transitions)
+        graph.add_node(APPLY_REQUESTED_TRANSITIONS, self.apply_requested_transitions)
 
-        # Four ways into this graph, decided at START from the input alone.
+        # Five ways into this graph, decided at START from the input alone.
         #
         # A run handed `fired_checkpoints` is a durable wait coming due: some
         # sweep found a checkpoint whose trigger had arrived and whose
@@ -1005,6 +1062,10 @@ class JobSearchGraph:
         # the calendar. Nothing needs classifying; its prep blocks need
         # re-planning, so it enters at the node that does that.
         #
+        # A run handed `requested_transitions` is a board move that asks for
+        # an external effect. It proposes the effect and leaves by the
+        # approval triple; the move itself is written after.
+        #
         # Everything else starts at the beginning.
         graph.add_conditional_edges(
             START,
@@ -1013,6 +1074,7 @@ class JobSearchGraph:
                 DRAFT_FOLLOW_UP: DRAFT_FOLLOW_UP,
                 CLASSIFY_RECRUITER_EVENTS: CLASSIFY_RECRUITER_EVENTS,
                 PLAN_INTERVIEW_SCHEDULE: PLAN_INTERVIEW_SCHEDULE,
+                PROPOSE_REQUESTED_TRANSITIONS: PROPOSE_REQUESTED_TRANSITIONS,
                 LOAD_SEARCH_PROFILE: LOAD_SEARCH_PROFILE,
             },
         )
@@ -1058,8 +1120,13 @@ class JobSearchGraph:
         graph.add_conditional_edges(
             EXECUTE_APPROVED_ACTIONS,
             self.route_after_approval,
-            {PERSIST_APPLICATION: PERSIST_APPLICATION, END: END},
+            {
+                PERSIST_APPLICATION: PERSIST_APPLICATION,
+                APPLY_REQUESTED_TRANSITIONS: APPLY_REQUESTED_TRANSITIONS,
+                END: END,
+            },
         )
+        graph.add_edge(APPLY_REQUESTED_TRANSITIONS, END)
         graph.add_edge(PERSIST_APPLICATION, EMIT_APPLICATION_CREATED)
         graph.add_conditional_edges(
             EMIT_APPLICATION_CREATED,
@@ -1095,6 +1162,12 @@ class JobSearchGraph:
         # the same run.
         graph.add_conditional_edges(
             PLAN_INTERVIEW_SCHEDULE,
+            self.route_after_follow_up,
+            {REQUEST_APPROVAL: REQUEST_APPROVAL, END: END},
+        )
+        # So is the effect of a board move.
+        graph.add_conditional_edges(
+            PROPOSE_REQUESTED_TRANSITIONS,
             self.route_after_follow_up,
             {REQUEST_APPROVAL: REQUEST_APPROVAL, END: END},
         )
@@ -1854,6 +1927,110 @@ class JobSearchGraph:
         }
 
     # ------------------------------------------------------------------
+    # Manual transitions with an external effect
+    # ------------------------------------------------------------------
+
+    async def propose_requested_transitions(self, state: JobSearchState) -> dict[str, Any]:
+        """Propose the effect of each requested board move. Applies none of them.
+
+        The API has already checked each move against the lifecycle and put
+        its effect past the policy engine; what it could not do is run the
+        effect, and neither can this node. It turns each request into the
+        `ActionIntent` `transition_action_intent` defines -- so the hash a
+        reviewer approves is a function of the request alone -- and hands it to
+        the approval triple.
+        """
+        if self.application_transitioner is None:
+            raise JobSearchContractError(
+                "requested transitions reached a graph with no application_transitioner; "
+                "an effect whose status change could not be written must not be proposed"
+            )
+        requests = _load(RequestedTransition, state.get("requested_transitions"))
+        intents = [transition_action_intent(request) for request in requests]
+        for intent in intents:
+            logger.info(
+                "proposing %s for requested transition %s",
+                intent.kind.value,
+                intent.action_id,
+            )
+        return {
+            "pending_actions": _dump(intents),
+            "approval_stage": STAGE_LIFECYCLE_TRANSITION,
+        }
+
+    async def apply_requested_transitions(self, state: JobSearchState) -> dict[str, Any]:
+        """Write each requested move whose effect ran; record why the others did not.
+
+        A move is written only on an `ok` receipt for its action -- a reviewer
+        who said no, an action refused for drifting from its approval, or a
+        provider that failed all leave the status where it was. The write goes
+        through the `ApplicationTransitioner`, which re-validates against the
+        stored status: if the application moved while the run was parked, the
+        move is refused and the outcome says so, though the effect has by then
+        happened and is on record in its receipt.
+        """
+        requests = _load(RequestedTransition, state.get("requested_transitions"))
+        receipts = {
+            receipt.action_id: receipt
+            for receipt in _load(ActionReceipt, state.get("action_receipts"))
+        }
+        refusals = {
+            refusal.action_id: refusal
+            for refusal in _load(ApprovalRefusal, state.get("approval_refusals"))
+        }
+
+        outcomes: list[TransitionOutcome] = []
+        for request in requests:
+            receipt = receipts.get(request.request_id)
+            refusal = refusals.get(request.request_id)
+            applied, detail = False, None
+            if receipt is not None and receipt.ok:
+                try:
+                    await self.application_transitioner.transition(
+                        request.application_id,
+                        request.to_status,
+                        reason=request.reason,
+                        actor=request.requested_by,
+                    )
+                    applied = True
+                except (ValidationFailed, RetryableFailure, ValueError) as exc:
+                    logger.warning(
+                        "the effect of requested transition %s ran, but application %s "
+                        "could not then be moved to '%s': %s",
+                        request.request_id,
+                        request.application_id,
+                        request.to_status.value,
+                        exc,
+                    )
+                    detail = f"effect ran; status not changed: {exc}"
+            elif receipt is not None:
+                detail = f"effect failed: {receipt.detail or 'no detail'}"
+            elif refusal is not None:
+                detail = f"effect not run: {refusal.reason.value}"
+            else:
+                detail = "effect not run: no answer on record"
+            outcomes.append(
+                TransitionOutcome(
+                    request_id=request.request_id,
+                    application_id=request.application_id,
+                    to_status=request.to_status,
+                    applied=applied,
+                    detail=detail,
+                )
+            )
+
+        return {
+            "transition_outcomes": [
+                *(state.get("transition_outcomes") or []),
+                *_dump(outcomes),
+            ],
+            # Consumed, for the reason `fired_checkpoints` is: thread state
+            # persists between runs, and an input left in place would route the
+            # next run on this thread straight back here.
+            "requested_transitions": [],
+        }
+
+    # ------------------------------------------------------------------
     # Inbound recruiter mail
     # ------------------------------------------------------------------
 
@@ -2210,6 +2387,8 @@ class JobSearchGraph:
             return CLASSIFY_RECRUITER_EVENTS
         if state.get("calendar_changes"):
             return PLAN_INTERVIEW_SCHEDULE
+        if state.get("requested_transitions"):
+            return PROPOSE_REQUESTED_TRANSITIONS
         return LOAD_SEARCH_PROFILE
 
     def route_after_shortlist(self, state: JobSearchState) -> str:
@@ -2236,6 +2415,8 @@ class JobSearchGraph:
             return END
         if state.get("approval_stage") == STAGE_SUBMISSION:
             return PERSIST_APPLICATION
+        if state.get("approval_stage") == STAGE_LIFECYCLE_TRANSITION:
+            return APPLY_REQUESTED_TRANSITIONS
         return END
 
     def route_after_emit(self, state: JobSearchState) -> str:
@@ -2745,6 +2926,7 @@ __all__ = [
     "RecruiterMessageClassifier",
     "PendingCheckpointScheduler",
     "CalendarReader",
+    "ApplicationTransitioner",
     # Node names
     "LOAD_SEARCH_PROFILE",
     "SEARCH_PROVIDERS",
@@ -2765,7 +2947,10 @@ __all__ = [
     "CREATE_FOLLOW_UP_CHECKPOINT",
     "DRAFT_FOLLOW_UP",
     "PLAN_INTERVIEW_SCHEDULE",
+    "PROPOSE_REQUESTED_TRANSITIONS",
+    "APPLY_REQUESTED_TRANSITIONS",
     "STAGE_SUBMISSION",
     "STAGE_RECRUITER_OUTREACH",
     "STAGE_INTERVIEW_SCHEDULING",
+    "STAGE_LIFECYCLE_TRANSITION",
 ]

@@ -2061,6 +2061,116 @@ class TestPlanInterviewSchedule:
             await subgraph.plan_interview_schedule(recorded, THREAD_CONFIG)
 
 
+# --- Requested transitions -----------------------------------------------------
+
+
+def transitions_graph(statuses=None, **overrides):
+    transitioner = fakes.FakeApplicationTransitioner(statuses)
+    subgraph, ports = graph(application_transitioner=transitioner, **overrides)
+    return subgraph, {**ports, "transitioner": transitioner}
+
+
+class TestProposeRequestedTransitions:
+    async def test_proposes_each_effect_as_an_intent_and_writes_nothing(self):
+        subgraph, ports = transitions_graph()
+        request = fakes.requested_withdrawal()
+
+        update = await subgraph.propose_requested_transitions(
+            {"requested_transitions": dumped(request)}
+        )
+
+        assert set(update) == {"pending_actions", "approval_stage"}
+        assert update["approval_stage"] == jsg.STAGE_LIFECYCLE_TRANSITION
+        (intent,) = [ActionIntent.model_validate(raw) for raw in update["pending_actions"]]
+        assert intent.kind is ActionKind.SEND_RECRUITER_MESSAGE
+        assert intent.action_id == request.request_id
+        assert intent.target == "recruiter@acme.example"
+        # Proposing is all it does.
+        assert ports["transitioner"].calls == []
+        assert ports["action_executor"].executed == []
+
+    async def test_refuses_to_propose_without_a_transitioner(self):
+        subgraph, _ports = graph()
+
+        with pytest.raises(JobSearchContractError):
+            await subgraph.propose_requested_transitions(
+                {"requested_transitions": dumped(fakes.requested_withdrawal())}
+            )
+
+
+class TestApplyRequestedTransitions:
+    async def test_writes_the_move_only_on_an_ok_receipt(self):
+        request = fakes.requested_withdrawal()
+        subgraph, ports = transitions_graph({request.application_id: ApplicationStatus.APPLIED})
+
+        update = await subgraph.apply_requested_transitions(
+            {
+                "requested_transitions": dumped(request),
+                "action_receipts": dumped(ActionReceipt(action_id=request.request_id, ok=True)),
+            }
+        )
+
+        assert set(update) == {"transition_outcomes", "requested_transitions"}
+        assert update["requested_transitions"] == []
+        (outcome,) = update["transition_outcomes"]
+        assert outcome["applied"] is True
+        assert ports["transitioner"].calls == [
+            (request.application_id, ApplicationStatus.WITHDRAWN, None, "maddy")
+        ]
+
+    async def test_a_refused_action_moves_nothing(self):
+        request = fakes.requested_withdrawal()
+        subgraph, ports = transitions_graph({request.application_id: ApplicationStatus.APPLIED})
+        refusal = ApprovalRefusal(
+            action_id=request.request_id,
+            request_id=None,
+            reason=RefusalReason.DENIED_BY_USER,
+            detail="no",
+        )
+
+        update = await subgraph.apply_requested_transitions(
+            {"requested_transitions": dumped(request), "approval_refusals": dumped(refusal)}
+        )
+
+        (outcome,) = update["transition_outcomes"]
+        assert outcome["applied"] is False
+        assert ports["transitioner"].calls == []
+
+    async def test_a_move_the_lifecycle_refuses_is_recorded_not_raised(self):
+        request = fakes.requested_withdrawal()
+        subgraph, _ports = transitions_graph({request.application_id: ApplicationStatus.REJECTED})
+
+        update = await subgraph.apply_requested_transitions(
+            {
+                "requested_transitions": dumped(request),
+                "action_receipts": dumped(ActionReceipt(action_id=request.request_id, ok=True)),
+            }
+        )
+
+        (outcome,) = update["transition_outcomes"]
+        assert outcome["applied"] is False
+        assert "status not changed" in outcome["detail"]
+
+
+class TestRequestedTransitionRouting:
+    def test_requested_transitions_enter_at_their_own_node(self):
+        subgraph, _ports = transitions_graph()
+
+        assert (
+            subgraph.route_from_start({"requested_transitions": dumped(fakes.requested_withdrawal())})
+            == jsg.PROPOSE_REQUESTED_TRANSITIONS
+        )
+        assert subgraph.route_from_start({"requested_transitions": []}) == jsg.LOAD_SEARCH_PROFILE
+
+    def test_after_approval_a_transition_stage_applies_the_move(self):
+        subgraph, _ports = transitions_graph()
+
+        assert (
+            subgraph.route_after_approval({"approval_stage": jsg.STAGE_LIFECYCLE_TRANSITION})
+            == jsg.APPLY_REQUESTED_TRANSITIONS
+        )
+
+
 # --- Coverage guard -----------------------------------------------------------
 
 
@@ -2091,6 +2201,8 @@ NODE_TEST_CLASSES = {
     jsg.CLASSIFY_RECRUITER_EVENTS: TestClassifyRecruiterEvents,
     jsg.RECORD_RECRUITER_EVENTS: TestRecordRecruiterEvents,
     jsg.PLAN_INTERVIEW_SCHEDULE: TestPlanInterviewSchedule,
+    jsg.PROPOSE_REQUESTED_TRANSITIONS: TestProposeRequestedTransitions,
+    jsg.APPLY_REQUESTED_TRANSITIONS: TestApplyRequestedTransitions,
 }
 
 

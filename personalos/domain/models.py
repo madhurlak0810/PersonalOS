@@ -1,5 +1,6 @@
 """Core domain models for PersonalOS."""
 
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
@@ -477,7 +478,33 @@ class InvalidApplicationTransition(ValidationFailed, ValueError):
     Subclasses both `ValidationFailed` (reports through the shared error
     taxonomy) and `ValueError` (its original base), matching
     `InvalidIdempotencyKey` above.
+
+    `allowed_next_states`, when the raiser knows them, are carried into the
+    wire envelope: the statuses a caller may ask for instead are part of the
+    answer rather than internals, and they come from the lifecycle table, never
+    from anything the caller sent.
     """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        allowed_next_states: Iterable["ApplicationStatus"] | None = None,
+        **kwargs: Any,
+    ):
+        self.allowed_next_states: tuple[ApplicationStatus, ...] | None = (
+            None
+            if allowed_next_states is None
+            else tuple(sorted(allowed_next_states, key=lambda status: status.value))
+        )
+        super().__init__(message, **kwargs)
+
+    def to_envelope(self) -> dict[str, Any]:
+        """The shared envelope, plus the allowed next states when known."""
+        envelope: dict[str, Any] = dict(super().to_envelope())
+        if self.allowed_next_states is not None:
+            envelope["allowed_next_states"] = [status.value for status in self.allowed_next_states]
+        return envelope
 
 
 class ApplicationTransitionConflict(RetryableFailure):
@@ -533,9 +560,11 @@ def validate_application_status_transition(
     `resume_status` is the status a held application was held from; it is
     ignored unless `current` is a holding state.
     """
-    if new not in allowed_application_transitions(current, resume_status=resume_status):
+    allowed = allowed_application_transitions(current, resume_status=resume_status)
+    if new not in allowed:
         raise InvalidApplicationTransition(
-            f"cannot transition application from '{current.value}' to '{new.value}'"
+            f"cannot transition application from '{current.value}' to '{new.value}'",
+            allowed_next_states=allowed,
         )
     return new
 
