@@ -16,6 +16,7 @@ from personalos.config import settings
 from personalos.domain.credentials import CredentialExchangeFailed, CredentialRef
 from personalos.domain.workflow import (
     WorkflowThread,
+    application_transition_thread_id,
     job_search_thread_id,
     supervisor_thread_id,
 )
@@ -34,7 +35,11 @@ from personalos.mcp.adapter import MCPToolInvoker
 from personalos.mcp.base import MCPServer
 from personalos.mcp.manager import MCPServerManager, get_mcp_manager
 from personalos.persistence.action_journal import ActionExecutorPort, JournaledActionExecutor
-from personalos.persistence.application_lifecycle import ApplicationLifecycleStore
+from personalos.persistence.application_board import ApplicationBoardStore
+from personalos.persistence.application_lifecycle import (
+    ApplicationLifecycleStore,
+    StoreApplicationTransitioner,
+)
 from personalos.persistence.approvals import ApprovalQueue
 from personalos.persistence.artifact_drafts import SqlArtifactDraftStore
 from personalos.persistence.checkpoint_conditions import SqlCheckpointConditionEvaluator
@@ -520,6 +525,33 @@ def build_application_lifecycle_store(
     return ApplicationLifecycleStore(session_factory)
 
 
+def build_application_board_store(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> ApplicationBoardStore:
+    """Build the store `GET /v1/applications` reads the board and detail from.
+
+    Also how a scored match is kept for the board (`record_match`) and how a
+    board move with an external effect is recorded before its run is queued.
+    """
+    return ApplicationBoardStore(session_factory)
+
+
+def build_application_transitioner(
+    store: ApplicationLifecycleStore | None = None,
+    session_factory: Callable[[], object] = SessionLocal,
+) -> StoreApplicationTransitioner:
+    """Bind `JobSearchGraph`'s `ApplicationTransitioner` port to the lifecycle store.
+
+    Pass the result as `application_transitioner=` when constructing the
+    graph. Without it, a board move that asks for an external effect is
+    refused by the graph rather than proposed, since nothing could write the
+    status change once the effect had run.
+    """
+    return StoreApplicationTransitioner(
+        store or build_application_lifecycle_store(session_factory)
+    )
+
+
 def build_recruiter_event_store(
     session_factory: Callable[[], object] = SessionLocal,
 ) -> SqlRecruiterEventStore:
@@ -588,6 +620,33 @@ def register_job_search_thread(
         thread_id=thread_id,
         workflow_name=JOB_SEARCH_WORKFLOW,
         workflow_id=workflow_id,
+        user_id=user_id,
+        actor_id=actor_id,
+        correlation_id=correlation_id,
+    )
+
+
+def register_application_transition_thread(
+    *,
+    user_id: UUID,
+    application_id: UUID,
+    registry: WorkflowThreadRegistry,
+    actor_id: str = "system",
+    correlation_id: UUID | None = None,
+) -> WorkflowThread:
+    """Derive and register the thread board moves on one application run on.
+
+    A job-search thread with its own workflow, created on first use and reused
+    after: see `application_transition_thread_id`.
+    """
+    thread_id = application_transition_thread_id(user_id, application_id)
+    existing = registry.resolve(thread_id)
+    if existing is not None:
+        return existing
+    return registry.register(
+        thread_id=thread_id,
+        workflow_name=JOB_SEARCH_WORKFLOW,
+        workflow_id=registry.create_workflow(JOB_SEARCH_WORKFLOW),
         user_id=user_id,
         actor_id=actor_id,
         correlation_id=correlation_id,
@@ -665,6 +724,9 @@ __all__ = [
     "build_workflow_lease_store",
     "build_journaled_action_executor",
     "build_tool_executor",
+    "build_application_board_store",
+    "build_application_transitioner",
+    "register_application_transition_thread",
     "build_recruiter_event_store",
     "build_pending_checkpoint_store",
     "build_calendar_action_executor",

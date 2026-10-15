@@ -120,6 +120,18 @@ def job_search_thread_id(user_id: Any, search_key: str | None = None) -> str:
     return derive_thread_id(JOB_SEARCH_THREAD_NAMESPACE, user_id, search_key or "")
 
 
+def application_transition_thread_id(user_id: Any, application_id: Any) -> str:
+    """The thread a board move with an external effect runs on, for one application.
+
+    A job-search thread -- it runs on the job-search graph -- but its own one,
+    for the reason the inbox has its own: running it on the candidate's search
+    thread would overwrite the pending actions of a search parked at an
+    approval. One per application, so a second move on the same application
+    finds the first one's run instead of racing it.
+    """
+    return job_search_thread_id(user_id, f"application:{application_id}")
+
+
 def recruiter_inbox_thread_id(user_id: Any) -> str:
     """The thread id inbound recruiter mail for one candidate is processed on.
 
@@ -565,6 +577,7 @@ __all__ = [
     "derive_thread_id",
     "thread_namespace",
     "job_search_thread_id",
+    "application_transition_thread_id",
     "recruiter_inbox_thread_id",
     "supervisor_thread_id",
     "WorkflowThread",

@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from personalos.domain.applications import RequestedTransition, TransitionEffect
 from personalos.domain.checkpoints import (
     CheckpointCondition,
     ConditionKind,
@@ -46,6 +47,7 @@ from personalos.domain.job_search import (
     ShortlistEntry,
 )
 from personalos.domain.models import (
+    ApplicationLifecycleState,
     ApplicationStatus,
     ArtifactType,
     CommunicationEventClassification,
@@ -568,6 +570,52 @@ class FakePendingCheckpointScheduler:
     def waits(self) -> list[PendingCheckpoint]:
         """Every wait scheduled, in the order it was first seen."""
         return list(self.scheduled.values())
+
+
+class FakeApplicationTransitioner:
+    """Holds application statuses in memory and moves them as the lifecycle allows.
+
+    Validates through the same `validate_application_status_transition` the
+    real store does, so a node test cannot pass on a move the database would
+    refuse.
+    """
+
+    def __init__(self, statuses: dict[UUID, ApplicationStatus] | None = None):
+        self.statuses: dict[UUID, ApplicationStatus] = dict(statuses or {})
+        self.calls: list[tuple[UUID, ApplicationStatus, str | None, str]] = []
+
+    async def transition(
+        self,
+        application_id: UUID,
+        new_status: ApplicationStatus,
+        *,
+        reason: str | None = None,
+        actor: str = "system",
+    ) -> ApplicationLifecycleState:
+        self.calls.append((application_id, new_status, reason, actor))
+        if application_id not in self.statuses:
+            raise ValueError(f"Application {application_id} not found")
+        validate_application_status_transition(self.statuses[application_id], new_status)
+        self.statuses[application_id] = new_status
+        return ApplicationLifecycleState(
+            application_id=application_id, status=new_status, last_activity_at=NOW
+        )
+
+
+def requested_withdrawal(application_id: UUID | None = None) -> RequestedTransition:
+    """A board move to WITHDRAWN that asks for the recruiter to be told."""
+    return RequestedTransition(
+        application_id=application_id or uuid4(),
+        from_status=ApplicationStatus.APPLIED,
+        to_status=ApplicationStatus.WITHDRAWN,
+        effect=TransitionEffect.NOTIFY_RECRUITER,
+        requested_by="maddy",
+        requested_at=NOW,
+        company="Acme",
+        title="Staff Engineer",
+        recipient="recruiter@acme.example",
+        message="I'm withdrawing my application.",
+    )
 
 
 class ScriptedConditionEvaluator:

@@ -158,7 +158,10 @@ recruiter-response branch on and must be supplied together, and the pending
 checkpoint scheduler, which turns durable follow-up waits on. The inbound-mail
 entry adds three more that must be supplied together — a recruiter event
 extractor, an application directory and a recruiter event recorder — plus a
-reply drafter with a pure default. The checkpoint scheduler is
+reply drafter with a pure default. The board-transition entry adds an
+`ApplicationTransitioner`, bound to `ApplicationLifecycleStore` by
+`bootstrap.build_application_transitioner`; without it a requested transition
+is refused rather than proposed. The checkpoint scheduler is
 optional rather than defaulted because scheduling a wait no process will ever
 sweep is worse than scheduling none — the row reads, in SQL, as a follow-up
 that is coming.
@@ -202,6 +205,17 @@ run invoked with `fired_checkpoints` in its input is a durable wait coming due;
 instead of to discovery, and that node proposes an `ActionIntent` like every
 other node that wants to act. It holds no executor, so a follow-up drafted at
 3am by a sweep with no human anywhere near it still parks at the interrupt.
+
+A board move enters the same way. `POST /v1/applications/{id}/transition`
+applies a move that only records a fact (SKIPPED, a manual APPLIED) at once,
+through `ApplicationLifecycleStore.transition` -- validated, guarded, and
+evented like every other write. A move that asks for an external effect
+(`submit_application`, `notify_recruiter`) is put to the policy engine and,
+unless denied, queued as a job-search run with `requested_transitions` in its
+input. `propose_requested_transitions` turns it into an `ActionIntent`, the
+approval triple runs, and `apply_requested_transitions` writes the status
+change only on an `ok` receipt. The API never applies an effectful move
+itself.
 
 ### The intent-only boundary
 
