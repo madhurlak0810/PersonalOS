@@ -1322,6 +1322,44 @@ class CredentialModel(Base):
         }
 
 
+
+class IntegrationHealthModel(Base):
+    """ORM model for whether an integration can currently be used.
+
+    One row per provider, written when a provider refuses in a way no retry can
+    change -- revoked OAuth, a missing scope -- so a workflow failure can ask
+    the user to reconnect instead of offering a retry that would fail the same
+    way. A provider with no row has never been seen to fail like that.
+    """
+
+    __tablename__ = "integration_health"
+
+    provider = Column(String(63), primary_key=True)
+    status = Column(
+        Enum("healthy", "degraded", name="integration_health_status"),
+        nullable=False,
+        default="healthy",
+    )
+    #: Why it is degraded: `revoked_auth`, `missing_scope`, ...
+    reason = Column(String(63), nullable=True)
+    #: The provider's refusal, redacted.
+    detail = Column(Text, nullable=True)
+    workflow_id = Column(GUID(), ForeignKey("workflows.id"), nullable=True)
+    degraded_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "provider": self.provider,
+            "status": self.status,
+            "reason": self.reason,
+            "detail": self.detail,
+            "workflow_id": str(self.workflow_id) if self.workflow_id else None,
+            "degraded_at": self.degraded_at.isoformat() if self.degraded_at else None,
+            "updated_at": self.updated_at.isoformat(),
+        }
+
 # --- Transactional outbox, event log, and projections ------------------------
 #
 # `outbox_events` backs the transactional-outbox pattern: a row is written in

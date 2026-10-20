@@ -9,6 +9,13 @@ depend on (see `tests/architecture/boundaries.py`); that is what lets every
 layer report the same finite set of `error_code` values instead of each
 inventing its own strings.
 
+Every error also names a `FailureClass` -- the Phase A recovery model. The
+`ErrorCode` says what went wrong to a caller; the failure class says what can
+be done about it once a workflow step has failed: retried, reconciled first,
+reconnected, or only acknowledged. It is part of `repr()` because `repr()` is
+all of an exception that survives a checkpoint (LangGraph stores a node's
+error as its repr), and `personalos.domain.failures` reads it back from there.
+
 `to_envelope()` is deliberately narrow: `error_code`, `message`, and
 `context_id` only. The original exception message, arguments, and stack trace
 belong in the log line that reports the error (via `logger.exception` /
@@ -38,6 +45,36 @@ class ErrorCode(str, Enum):
     INTERNAL = "internal"
 
 
+class FailureClass(str, Enum):
+    """Why a workflow step failed, in terms of how it may be recovered.
+
+    Wire-visible on `GET /v1/workflows/{id}/failures`. Which of these a user
+    may retry is `personalos.domain.failures`'s rule, not a property of the
+    exception: `PersonalOSError.retryable` is about *automatic* retries.
+    """
+
+    #: The model timed out, was rate limited or was briefly unavailable.
+    MODEL_TRANSIENT = "model_transient"
+    #: The model answered, but with output that did not meet its contract.
+    MODEL_SEMANTIC = "model_semantic"
+    #: A provider timed out or was briefly unavailable.
+    PROVIDER_TRANSIENT = "provider_transient"
+    #: A provider refused in a way retrying cannot change: revoked OAuth, a
+    #: missing scope. The integration is degraded until it is reconnected.
+    PROVIDER_PERMANENT = "provider_permanent"
+    #: Another writer or worker got there first.
+    CONCURRENCY = "concurrency"
+    #: The step had already caused side effects when it failed; a retry has to
+    #: reconcile them rather than repeat them.
+    PARTIAL_SIDE_EFFECT = "partial_side_effect"
+    #: Policy refused the action. An answer, not a failure: never retried.
+    POLICY_DENIAL = "policy_denial"
+    #: A human did not answer in time.
+    HUMAN_TIMEOUT = "human_timeout"
+    #: Raised by something outside this taxonomy.
+    UNCLASSIFIED = "unclassified"
+
+
 class PersonalOSError(Exception):
     """Base for every deterministic, taxonomy-mapped error in the system.
 
@@ -52,6 +89,8 @@ class PersonalOSError(Exception):
     http_status: int = 500
     retryable: bool = False
     default_message: str = "an internal error occurred"
+    #: How a step that raised this is recovered; `None` leaves it to `code`.
+    failure_class: FailureClass | None = None
 
     def __init__(
         self,
@@ -73,9 +112,23 @@ class PersonalOSError(Exception):
             "context_id": str(self.context_id),
         }
 
+    def repr_fields(self) -> dict[str, str]:
+        """Extra `key='value'` pairs for `repr()`, before the message.
+
+        For facts recovery needs that the message is the wrong place for --
+        which provider to reconnect, say. Values must not be secret: a repr is
+        what ends up in a checkpoint.
+        """
+        return {}
+
     def __repr__(self) -> str:
+        fields = {"code": self.code.value}
+        if self.failure_class is not None:
+            fields["failure_class"] = self.failure_class.value
+        fields.update(self.repr_fields())
+        rendered = "".join(f"{key}={value!r}, " for key, value in fields.items())
         return (
-            f"{type(self).__name__}(code={self.code.value!r}, "
+            f"{type(self).__name__}({rendered}"
             f"context_id={self.context_id}, message={self.message!r})"
         )
 
@@ -102,6 +155,7 @@ class PolicyDeniedError(PersonalOSError):
     code = ErrorCode.POLICY_DENIED
     http_status = 403
     default_message = "action denied by policy"
+    failure_class = FailureClass.POLICY_DENIAL
 
 
 class ApprovalRequiredError(PersonalOSError):
@@ -110,6 +164,7 @@ class ApprovalRequiredError(PersonalOSError):
     code = ErrorCode.APPROVAL_REQUIRED
     http_status = 428
     default_message = "action requires approval"
+    failure_class = FailureClass.POLICY_DENIAL
 
 
 class IdempotencyConflict(PersonalOSError):
@@ -118,6 +173,7 @@ class IdempotencyConflict(PersonalOSError):
     code = ErrorCode.IDEMPOTENCY_CONFLICT
     http_status = 409
     default_message = "idempotency key conflict"
+    failure_class = FailureClass.CONCURRENCY
 
 
 class Conflict(PersonalOSError):
@@ -131,6 +187,7 @@ class Conflict(PersonalOSError):
     code = ErrorCode.CONFLICT
     http_status = 409
     default_message = "request conflicts with the resource's current state"
+    failure_class = FailureClass.CONCURRENCY
 
 
 class ToolFailure(PersonalOSError):
@@ -140,6 +197,7 @@ class ToolFailure(PersonalOSError):
     http_status = 502
     retryable = True
     default_message = "tool execution failed"
+    failure_class = FailureClass.PROVIDER_TRANSIENT
 
 
 class RetryableFailure(PersonalOSError):
@@ -149,6 +207,80 @@ class RetryableFailure(PersonalOSError):
     http_status = 409
     retryable = True
     default_message = "temporarily unavailable; retry later"
+
+
+class ModelTransientFailure(RetryableFailure):
+    """The model call timed out, was rate limited, or the model was unavailable."""
+
+    default_message = "the model was temporarily unavailable"
+    failure_class = FailureClass.MODEL_TRANSIENT
+
+
+class ModelSemanticFailure(ValidationFailed):
+    """The model answered with output that did not meet its contract.
+
+    Not retried automatically -- the same prompt tends to get the same answer
+    -- but a user may retry it deliberately.
+    """
+
+    default_message = "the model's output did not meet its contract"
+    failure_class = FailureClass.MODEL_SEMANTIC
+
+
+class ProviderPermanentFailure(PersonalOSError):
+    """A provider refused in a way no retry can change: revoked OAuth, a missing scope.
+
+    Never retried, automatically or otherwise: the integration is marked
+    degraded and the user is asked to reconnect it. `provider` and `reason`
+    are carried into `repr()` so that survives a checkpoint.
+    """
+
+    code = ErrorCode.TOOL_FAILURE
+    http_status = 502
+    default_message = "the provider rejected the request; reconnect the integration"
+    failure_class = FailureClass.PROVIDER_PERMANENT
+
+    #: Values for `reason`.
+    REVOKED_AUTH = "revoked_auth"
+    MISSING_SCOPE = "missing_scope"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        provider: str,
+        reason: str = REVOKED_AUTH,
+        context_id: UUID | None = None,
+        details: dict[str, Any] | None = None,
+    ):
+        self.provider = provider
+        self.reason = reason
+        super().__init__(
+            message,
+            context_id=context_id,
+            details={"provider": provider, "reason": reason, **(details or {})},
+        )
+
+    def repr_fields(self) -> dict[str, str]:
+        return {"provider": self.provider, "reason": self.reason}
+
+
+class PartialSideEffect(PersonalOSError):
+    """A step failed after some of its side effects had already taken effect."""
+
+    code = ErrorCode.TOOL_FAILURE
+    http_status = 502
+    default_message = "the step failed after some of its actions had taken effect"
+    failure_class = FailureClass.PARTIAL_SIDE_EFFECT
+
+
+class HumanTimeout(PersonalOSError):
+    """A human did not answer a request in time."""
+
+    code = ErrorCode.CONFLICT
+    http_status = 409
+    default_message = "the request expired before anyone answered it"
+    failure_class = FailureClass.HUMAN_TIMEOUT
 
 
 class InternalError(PersonalOSError):
@@ -161,6 +293,7 @@ class InternalError(PersonalOSError):
 
 __all__ = [
     "ErrorCode",
+    "FailureClass",
     "PersonalOSError",
     "ValidationFailed",
     "NotFound",
@@ -170,5 +303,10 @@ __all__ = [
     "Conflict",
     "ToolFailure",
     "RetryableFailure",
+    "ModelTransientFailure",
+    "ModelSemanticFailure",
+    "ProviderPermanentFailure",
+    "PartialSideEffect",
+    "HumanTimeout",
     "InternalError",
 ]

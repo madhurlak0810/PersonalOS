@@ -41,7 +41,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
-from personalos.domain.errors import ErrorCode, PersonalOSError
+from personalos.domain.errors import ErrorCode, FailureClass, PersonalOSError
 from personalos.domain.workflow import WorkflowLease
 from personalos.persistence.models import WorkflowLeaseModel
 
@@ -82,6 +82,7 @@ class WorkflowLeaseUnavailable(PersonalOSError):
     http_status = 409
     retryable = True
     default_message = "another worker holds the lease on this workflow"
+    failure_class = FailureClass.CONCURRENCY
 
 
 class WorkflowLeaseLost(PersonalOSError):
@@ -95,6 +96,7 @@ class WorkflowLeaseLost(PersonalOSError):
     code = ErrorCode.IDEMPOTENCY_CONFLICT
     http_status = 409
     default_message = "this worker's lease on the workflow was taken over"
+    failure_class = FailureClass.CONCURRENCY
 
 
 def default_owner() -> str:

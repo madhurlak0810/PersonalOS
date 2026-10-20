@@ -52,6 +52,7 @@ from personalos.persistence.database import SessionLocal
 from personalos.persistence.evidence import SqlEvidenceIndex, SqlEvidenceSource
 from personalos.persistence.execution_ledger import ExecutionLedger
 from personalos.persistence.idempotency import OperationStore, SqlOperationStore
+from personalos.persistence.integration_health import IntegrationHealthStore
 from personalos.persistence.job_postings import SqlPostingCatalog
 from personalos.persistence.leases import DEFAULT_LEASE_TTL_SECONDS, WorkflowLeaseStore
 from personalos.persistence.pending_checkpoints import (
@@ -62,6 +63,7 @@ from personalos.persistence.policy_log import SqlPolicyDecisionLog
 from personalos.persistence.recruiter_events import SqlRecruiterEventStore
 from personalos.persistence.repositories import JobRepository
 from personalos.persistence.workflow_commands import WorkflowCommandQueue
+from personalos.persistence.workflow_failures import WorkflowFailureStore
 from personalos.persistence.workflow_status import WorkflowStatusReader
 from personalos.policy import PolicyEngine, default_policy_engine
 from personalos.providers import (
@@ -544,6 +546,27 @@ def build_audit_trail_store(
     return AuditTrailStore(session_factory)
 
 
+def build_integration_health_store(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> IntegrationHealthStore:
+    """Build the store that records which integrations need reconnecting."""
+    return IntegrationHealthStore(session_factory)
+
+
+def build_workflow_failure_store(
+    session_factory: Callable[[], object] = SessionLocal,
+    registry: WorkflowThreadRegistry | None = None,
+) -> WorkflowFailureStore:
+    """Build the store `GET /v1/workflows/{id}/failures`, retry and dismiss read."""
+    registry = registry or build_workflow_thread_registry(session_factory)
+    return WorkflowFailureStore(
+        session_factory,
+        build_workflow_status_reader(session_factory, registry),
+        build_workflow_command_queue(session_factory),
+        build_integration_health_store(session_factory),
+    )
+
+
 def build_application_transitioner(
     store: ApplicationLifecycleStore | None = None,
     session_factory: Callable[[], object] = SessionLocal,
@@ -734,6 +757,8 @@ __all__ = [
     "build_tool_executor",
     "build_application_board_store",
     "build_audit_trail_store",
+    "build_integration_health_store",
+    "build_workflow_failure_store",
     "build_application_transitioner",
     "register_application_transition_thread",
     "build_recruiter_event_store",
