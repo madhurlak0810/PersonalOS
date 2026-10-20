@@ -42,6 +42,7 @@ from personalos.persistence.application_lifecycle import (
 )
 from personalos.persistence.approvals import ApprovalQueue
 from personalos.persistence.artifact_drafts import SqlArtifactDraftStore
+from personalos.persistence.audit_trail import AuditTrailStore
 from personalos.persistence.checkpoint_conditions import SqlCheckpointConditionEvaluator
 from personalos.persistence.checkpointer import (
     SqlAlchemyCheckpointSaver,
@@ -536,6 +537,13 @@ def build_application_board_store(
     return ApplicationBoardStore(session_factory)
 
 
+def build_audit_trail_store(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> AuditTrailStore:
+    """Build the read-only store `GET /v1/audit` and `GET /v1/workflows/{id}/audit` read."""
+    return AuditTrailStore(session_factory)
+
+
 def build_application_transitioner(
     store: ApplicationLifecycleStore | None = None,
     session_factory: Callable[[], object] = SessionLocal,
@@ -725,6 +733,7 @@ __all__ = [
     "build_journaled_action_executor",
     "build_tool_executor",
     "build_application_board_store",
+    "build_audit_trail_store",
     "build_application_transitioner",
     "register_application_transition_thread",
     "build_recruiter_event_store",
