@@ -30,7 +30,12 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from personalos.domain.errors import NotFound, RetryableFailure, ValidationFailed
+from personalos.domain.errors import (
+    FailureClass,
+    NotFound,
+    RetryableFailure,
+    ValidationFailed,
+)
 from personalos.domain.redaction import REDACTED
 
 #: URI scheme of a credential reference.
@@ -73,12 +78,14 @@ class CredentialExchangeFailed(RetryableFailure):
     """
 
     default_message = "credential exchange failed"
+    failure_class = FailureClass.PROVIDER_TRANSIENT
 
 
 class CredentialRevoked(ValidationFailed):
     """The provider rejected the stored credential outright; retrying cannot help."""
 
     default_message = "credential was revoked or is no longer valid"
+    failure_class = FailureClass.PROVIDER_PERMANENT
 
 
 @dataclass(frozen=True)

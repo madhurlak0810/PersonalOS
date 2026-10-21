@@ -29,7 +29,12 @@ from uuid import UUID
 
 from langgraph.graph.state import CompiledStateGraph
 
-from personalos.domain.errors import ErrorCode, NotFound, PersonalOSError
+from personalos.domain.errors import (
+    ErrorCode,
+    NotFound,
+    PersonalOSError,
+    ProviderPermanentFailure,
+)
 from personalos.domain.workflow import WorkflowResumeState, WorkflowThread
 from personalos.persistence.checkpointer import (
     RUN_STATUS_COMPLETED,
@@ -37,6 +42,7 @@ from personalos.persistence.checkpointer import (
     RUN_STATUS_RUNNING,
     WorkflowThreadRegistry,
 )
+from personalos.persistence.integration_health import IntegrationHealthStore
 from personalos.persistence.leases import WorkflowLeaseStore, default_owner
 
 logger = logging.getLogger(__name__)
@@ -85,8 +91,13 @@ class DurableWorkflowRunner:
         registry: WorkflowThreadRegistry,
         leases: WorkflowLeaseStore,
         owner: str | None = None,
+        integrations: IntegrationHealthStore | None = None,
     ):
-        """Wire the graph to the registry and lease store that make it resumable."""
+        """Wire the graph to the registry and lease store that make it resumable.
+
+        `integrations`, when given, is told about every provider that refused
+        a run permanently, so the failure it leaves asks for a reconnect.
+        """
         if graph is None:
             raise ValueError("DurableWorkflowRunner requires a compiled graph")
         if registry is None:
@@ -97,6 +108,7 @@ class DurableWorkflowRunner:
         self.registry = registry
         self.leases = leases
         self.owner = owner or default_owner()
+        self.integrations = integrations
 
     # ------------------------------------------------------------------
     # Inspection
@@ -211,8 +223,9 @@ class DurableWorkflowRunner:
             final = await self.graph.ainvoke(
                 graph_input, config=thread.config(**dict(configurable or {}))
             )
-        except Exception:
+        except Exception as exc:
             self.registry.mark_status(thread.thread_id, RUN_STATUS_FAILED, finished=True)
+            self._note_broken_integration(thread, exc)
             raise
 
         # A graph that stopped at an interrupt (an unanswered approval, say) has
@@ -224,6 +237,41 @@ class DurableWorkflowRunner:
         else:
             self.registry.mark_status(thread.thread_id, RUN_STATUS_COMPLETED, finished=True)
         return final
+
+    def _note_broken_integration(self, thread: WorkflowThread, error: BaseException) -> None:
+        """Mark the integration degraded when a provider refused the run permanently.
+
+        Here rather than in the executor that called the provider because a
+        permanent refusal can come from any node, and every one of them
+        unwinds through this call. The cause chain is walked because a node
+        may have wrapped the provider's error in its own.
+        """
+        if self.integrations is None:
+            return
+        seen: set[int] = set()
+        current: BaseException | None = error
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, ProviderPermanentFailure):
+                try:
+                    self.integrations.mark_degraded(
+                        current.provider,
+                        reason=current.reason,
+                        detail=current.message,
+                        workflow_id=thread.workflow_id,
+                    )
+                except Exception:
+                    logger.exception("could not mark integration '%s' degraded", current.provider)
+                else:
+                    logger.warning(
+                        "integration '%s' is degraded (%s) after thread '%s' failed; "
+                        "it needs reconnecting",
+                        current.provider,
+                        current.reason,
+                        thread.thread_id,
+                    )
+                return
+            current = current.__cause__ or current.__context__
 
     def _thread_to_resume(
         self, *, workflow_id: UUID | None, thread_id: str | None

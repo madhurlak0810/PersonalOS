@@ -25,6 +25,7 @@ at, and its `task_path` names the node that raised it; that is how
 
 import logging
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -240,13 +241,35 @@ def _failures(
 
     Recoverable by construction: the checkpoint they were recorded against is
     intact, and a resume re-runs exactly the node that raised. The error text
-    is what LangGraph stored -- already passed through the saver's redactor.
+    is what LangGraph stored: the exception's `repr()`, which is not redacted
+    on the way in (the redactor passes exceptions through), so whatever shows
+    it to a caller has to redact it on the way out.
     """
+    checkpoint_id = stored.config["configurable"]["checkpoint_id"]
+    checkpoint_at = _checkpoint_time(stored.checkpoint)
     return tuple(
-        RecoverableFailure(thread_id=thread_id, step=steps_by_task.get(task_id), message=str(value))
+        RecoverableFailure(
+            thread_id=thread_id,
+            step=steps_by_task.get(task_id),
+            message=str(value),
+            checkpoint_id=checkpoint_id,
+            task_id=task_id,
+            checkpoint_at=checkpoint_at,
+        )
         for task_id, channel, value in stored.pending_writes or ()
         if channel == _ERROR_CHANNEL
     )
+
+
+def _checkpoint_time(checkpoint: Mapping[str, Any]) -> datetime | None:
+    """A checkpoint's `ts` as naive UTC, the convention every table here uses."""
+    try:
+        ts = datetime.fromisoformat(str(checkpoint.get("ts")))
+    except ValueError:
+        return None
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+    return ts
 
 
 __all__ = ["WorkflowStatusReader"]

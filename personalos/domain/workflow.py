@@ -295,6 +295,9 @@ class WorkflowCommandKind(str, Enum):
 
     START = "start"
     RESUME = "resume"
+    #: Re-run the step a thread failed in, from the checkpoint before it.
+    #: Queued by `POST /v1/workflows/{id}/retry`, never for a waiting thread.
+    RETRY = "retry"
 
 
 class WorkflowCommand(BaseModel):
@@ -351,6 +354,12 @@ class RecoverableFailure(BaseModel):
     thread_id: str
     step: str | None = None
     message: str
+    #: The checkpoint the error was recorded against, and the task that raised
+    #: it: together, which failure this is (`personalos.domain.failures`).
+    checkpoint_id: str | None = None
+    task_id: str | None = None
+    #: When that checkpoint was written -- just before the failed step began.
+    checkpoint_at: datetime | None = None
 
 
 class WorkflowStep(BaseModel):

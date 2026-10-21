@@ -1,7 +1,7 @@
 """Runs the workflow commands the API queued: the worker half of the hand-off.
 
-The API never runs a graph. `POST /v1/chat` and `POST /v1/workflows/{id}/resume`
-write a `WorkflowCommand` to `outbox_events` and return; this module is what
+The API never runs a graph. `POST /v1/chat`, `POST /v1/workflows/{id}/resume`
+and `POST /v1/workflows/{id}/retry` write a `WorkflowCommand` to `outbox_events` and return; this module is what
 turns one of those rows into a `DurableWorkflowRunner` call, under the
 workflow's lease. The polling loop that calls `process_next` belongs to the
 worker process (Phase G); everything a single command needs is here so that
@@ -52,6 +52,14 @@ async def run_workflow_command(
     if command.kind == WorkflowCommandKind.START:
         thread = runner.registry.require(command.thread_id)
         return await runner.start(thread, command.graph_input or {}, configurable=configurable)
+    if command.kind == WorkflowCommandKind.RETRY:
+        # No input at all: LangGraph loads the checkpoint the failed step
+        # started from and re-runs only that step. Anything it had already
+        # sent is settled by `ToolExecutor` from the operation's idempotency
+        # key -- the stored receipt if it landed, reconciliation if unknown.
+        return await runner.resume(
+            thread_id=command.thread_id, resume_input=None, configurable=configurable
+        )
     # An interrupt is answered with `Command(resume=...)`; passing the value
     # bare would be read as fresh input and restart the thread instead.
     return await runner.resume(

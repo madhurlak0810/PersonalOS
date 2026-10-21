@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from personalos.domain.context import ExecutionContext
-from personalos.domain.errors import RetryableFailure, ValidationFailed
+from personalos.domain.errors import FailureClass, RetryableFailure, ValidationFailed
 
 # Minimum length for an idempotency key. Keys are supplied by callers and must
 # carry enough entropy that two unrelated operations cannot collide by accident;
@@ -514,6 +514,8 @@ class ApplicationTransitionConflict(RetryableFailure):
     writer got there first. Nothing was changed and no event was emitted;
     re-reading and deciding again is safe.
     """
+
+    failure_class = FailureClass.CONCURRENCY
 
 
 #: `event_log.aggregate_type` for an application's lifecycle events.

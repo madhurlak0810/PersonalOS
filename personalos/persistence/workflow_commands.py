@@ -114,6 +114,27 @@ class WorkflowCommandQueue:
         finally:
             session.close()
 
+    def count_keyed(self, workflow_id: UUID, kind: str, dedupe_prefix: str) -> tuple[int, int]:
+        """How many of a workflow's commands were queued under a dedupe prefix.
+
+        Returns `(ever_queued, unfinished)`. Every status counts towards the
+        first -- a command that ran and failed was still an attempt -- which
+        is how retries of one failure are counted without a table of their own.
+        """
+        prefix = f"{_key_prefix(workflow_id)}{kind}:{dedupe_prefix}"
+        session = self.session_factory()
+        try:
+            statuses = [
+                status
+                for (status,) in session.query(OutboxEventModel.status).filter(
+                    OutboxEventModel.type == WORKFLOW_COMMAND_EVENT,
+                    OutboxEventModel.dedupe_key.like(f"{prefix}%"),
+                )
+            ]
+            return len(statuses), sum(1 for status in statuses if status in _UNFINISHED)
+        finally:
+            session.close()
+
     def claim_next(self) -> ClaimedWorkflowCommand | None:
         """Claim the oldest queued command for this worker, or `None` if there is none."""
         session = self.session_factory()

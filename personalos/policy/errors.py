@@ -9,7 +9,7 @@ same `error_code` taxonomy as every other layer, while keeping the richer
 
 from typing import TYPE_CHECKING
 
-from personalos.domain.errors import ErrorCode, PersonalOSError
+from personalos.domain.errors import ErrorCode, FailureClass, PersonalOSError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from personalos.policy.intents import PolicyDecision
@@ -22,10 +22,12 @@ class PolicyError(PersonalOSError):
     same verdict, so a retry loop that swallowed one of these would only be
     hiding a decision from whoever has to act on it. Retry logic checks for
     this type rather than trusting `retryable` alone (see
-    `personalos.executor.retry`).
+    `personalos.executor.retry`). For the same reason a workflow step that
+    failed on one is shown as denied, and offers no manual retry either.
     """
 
     retryable = False
+    failure_class = FailureClass.POLICY_DENIAL
 
 
 class PolicyDenied(PolicyError):

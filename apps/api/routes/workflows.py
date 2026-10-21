@@ -47,6 +47,7 @@ from personalos.bootstrap import (
     register_supervisor_thread,
 )
 from personalos.domain.errors import Conflict, NotFound, ValidationFailed
+from personalos.domain.failures import parse_stored_error, sanitize_error
 from personalos.domain.job_search import ApprovalDecision, ApprovalVerdict
 from personalos.domain.workflow import (
     SUPERVISOR_THREAD_NAMESPACE,
@@ -262,7 +263,13 @@ class WorkflowStatusResponse(BaseModel):
             ),
             completed_steps=[StepView(**step.model_dump()) for step in snapshot.completed_steps],
             recoverable_failures=[
-                RecoverableFailureView(**failure.model_dump())
+                RecoverableFailureView(
+                    thread_id=failure.thread_id,
+                    step=failure.step,
+                    # Stored as the exception's repr, unredacted; see
+                    # `GET /v1/workflows/{id}/failures` for the full picture.
+                    message=sanitize_error(parse_stored_error(failure.message)),
+                )
                 for failure in snapshot.recoverable_failures
             ],
             queued_commands=len(snapshot.queued),
