@@ -49,6 +49,7 @@ from personalos.bootstrap import (
     build_policy_engine,
     register_application_transition_thread,
 )
+from personalos.domain.action_status import WorkflowAction, recommended_action
 from personalos.domain.applications import (
     MAX_BOARD_PAGE_SIZE,
     ApplicationCard,
@@ -206,6 +207,9 @@ class TransitionResponse(BaseModel):
     thread_id: str | None = None
     command_id: UUID | None = None
     policy_decision: Decision | None = None
+    #: When queued: the effect, as proposed. `RECOMMENDED` -- nothing has been
+    #: sent or submitted; follow `workflow_id` for its approval and receipt.
+    action: WorkflowAction | None = None
 
 
 # --- Routes ---------------------------------------------------------------------
@@ -447,6 +451,9 @@ def _queue_effectful_transition(
         thread_id=thread.thread_id,
         command_id=command.command_id,
         policy_decision=verdict.decision,
+        action=recommended_action(
+            intent, workflow_id=thread.workflow_id, thread_id=thread.thread_id
+        ),
     )
 
 

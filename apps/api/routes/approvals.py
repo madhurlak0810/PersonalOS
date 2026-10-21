@@ -11,6 +11,11 @@ Like the workflow routes, neither runs a graph and neither keeps state in this
 process: the list is read from the checkpoints, and a decision ends at the same
 `WorkflowCommandQueue.enqueue` a `POST /v1/workflows/{id}/resume` does.
 
+**A reviewer sees the action, not a summary of it.** Each item is labelled
+`action_status: AWAITING_APPROVAL` -- nothing has happened yet -- and carries
+the target, the preview (recipient, subject, body diff, attachments, whether it
+is a reply or a new thread) and the consequences of saying yes.
+
 **A decision is bound to the action it was shown.** The body must carry the
 `action_hash` the list returned; one that does not match the hash stored with
 the request is a 409, so an approval of an action that has since changed can
@@ -26,6 +31,8 @@ from fastapi import APIRouter, Depends, Header, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from apps.api.routes.workflows import WorkflowServices, get_workflow_services
+from personalos.domain.action_status import ActionStatus, consequences
+from personalos.domain.job_search import ActionKind, ActionPreview
 from personalos.domain.workflow import (
     ApprovalOutcome,
     ApprovalState,
@@ -52,9 +59,16 @@ class PendingApprovalItem(BaseModel):
     thread_id: str
     #: `pending`, or `expired` once it can no longer be approved.
     status: ApprovalState
+    action_id: UUID
+    #: Always `AWAITING_APPROVAL`: an action in this list has not happened.
+    action_status: ActionStatus
     action_type: str
     target: str
     summary: str
+    #: Recipient, subject, body diff, attachments, reply or new thread.
+    preview: ActionPreview | None = None
+    #: What approving it will do, one sentence each.
+    consequences: list[str] = Field(default_factory=list)
     risk_level: str
     requested_scopes: list[str] = Field(default_factory=list)
     #: Echo this back in the decision; it pins the decision to this action.
@@ -70,9 +84,15 @@ class PendingApprovalItem(BaseModel):
             workflow_id=approval.workflow_id,
             thread_id=approval.thread_id,
             status=approval.state,
+            action_id=approval.action_id,
+            action_status=ActionStatus.AWAITING_APPROVAL,
             action_type=approval.action_type,
             target=approval.target,
             summary=approval.summary,
+            preview=approval.preview,
+            consequences=list(
+                consequences(ActionKind(approval.action_type), approval.target, approval.preview)
+            ),
             risk_level=approval.risk_level,
             requested_scopes=list(approval.requested_scopes),
             action_hash=approval.action_hash,

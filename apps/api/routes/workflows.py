@@ -5,7 +5,9 @@ Three endpoints, none of which runs a graph:
 - `POST /v1/chat` registers (or finds) a Supervisor thread and queues a
   `start` command for it.
 - `GET /v1/workflows/{id}` reports where the workflow stands, read entirely
-  from the database.
+  from the database: the one status surface for a workflow -- its plan,
+  completed steps, every action labelled with what actually became of it,
+  pending approvals, failures and where its audit trail is.
 - `POST /v1/workflows/{id}/resume` queues the answer to the interrupt the
   workflow is parked on -- and refuses, with a 409, when it is not parked on
   one.
@@ -41,10 +43,18 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from personalos.bootstrap import (
     SUPERVISOR_WORKFLOW,
     build_approval_queue,
+    build_workflow_action_reader,
     build_workflow_command_queue,
     build_workflow_status_reader,
     build_workflow_thread_registry,
     register_supervisor_thread,
+)
+from personalos.domain.action_status import (
+    ActionStatus,
+    ShortlistItem,
+    WorkflowAction,
+    WorkflowActions,
+    audit_url,
 )
 from personalos.domain.errors import Conflict, NotFound, ValidationFailed
 from personalos.domain.failures import parse_stored_error, sanitize_error
@@ -60,6 +70,7 @@ from personalos.domain.workflow import (
 from personalos.persistence.approvals import ApprovalQueue
 from personalos.persistence.checkpointer import WorkflowThreadRegistry
 from personalos.persistence.database import SessionLocal
+from personalos.persistence.workflow_actions import WorkflowActionReader
 from personalos.persistence.workflow_commands import WorkflowCommandQueue
 from personalos.persistence.workflow_status import WorkflowStatusReader
 
@@ -86,6 +97,7 @@ class WorkflowServices:
     reader: WorkflowStatusReader
     commands: WorkflowCommandQueue
     approvals: ApprovalQueue
+    actions: WorkflowActionReader
 
 
 def build_workflow_services(session_factory: Callable[[], Any]) -> WorkflowServices:
@@ -96,6 +108,7 @@ def build_workflow_services(session_factory: Callable[[], Any]) -> WorkflowServi
         reader=build_workflow_status_reader(session_factory, registry),
         commands=build_workflow_command_queue(session_factory),
         approvals=build_approval_queue(session_factory, registry),
+        actions=build_workflow_action_reader(session_factory, registry),
     )
 
 
@@ -223,14 +236,29 @@ class ThreadView(BaseModel):
 
 
 class WorkflowStatusResponse(BaseModel):
-    """Where a workflow stands, as of the last row any process wrote."""
+    """Where a workflow stands, as of the last row any process wrote.
+
+    `actions` is what was suggested and what was done, in one list: each item's
+    `action_status` says which. Only `EXECUTED` means something happened
+    outside this system, and every `EXECUTED` item carries its receipt and its
+    audit links. `pending_approval` is the raw interrupt, kept for the resume
+    endpoint; read the `AWAITING_APPROVAL` actions for what it asks.
+    """
 
     workflow_id: UUID
     name: str | None = None
     status: WorkflowStatus
     current_step: StepView | None = None
+    #: What the workflow will run next, thread by thread.
+    plan: list[StepView] = Field(default_factory=list)
     pending_approval: PendingApprovalView | None = None
     completed_steps: list[StepView] = Field(default_factory=list)
+    actions: list[WorkflowAction] = Field(default_factory=list)
+    #: How many actions are in each status; every status is listed.
+    action_counts: dict[ActionStatus, int] = Field(default_factory=dict)
+    #: Postings the run recommended. A recommendation, not an application,
+    #: unless `action_status` says the submission for it was executed.
+    shortlist: list[ShortlistItem] = Field(default_factory=list)
     recoverable_failures: list[RecoverableFailureView] = Field(default_factory=list)
     #: Commands handed to the worker that it has not finished.
     queued_commands: int = 0
@@ -238,10 +266,15 @@ class WorkflowStatusResponse(BaseModel):
     actor_id: str | None = None
     correlation_id: UUID | None = None
     created_at: datetime | None = None
+    #: Every step of every action, intent to receipt.
+    audit_url: str
 
     @classmethod
-    def from_snapshot(cls, snapshot: WorkflowSnapshot) -> "WorkflowStatusResponse":
-        """Project the domain snapshot onto the v1 wire shape."""
+    def from_snapshot(
+        cls, snapshot: WorkflowSnapshot, actions: WorkflowActions | None = None
+    ) -> "WorkflowStatusResponse":
+        """Project the domain snapshot, and the workflow's actions, onto the v1 wire shape."""
+        actions = actions or WorkflowActions(workflow_id=snapshot.workflow_id)
         pending = snapshot.pending_interrupts
         waiting = {interrupt.thread_id for interrupt in pending}
         current = snapshot.current_step
@@ -251,6 +284,12 @@ class WorkflowStatusResponse(BaseModel):
             name=snapshot.name,
             status=snapshot.status,
             current_step=StepView(**current.model_dump()) if current else None,
+            plan=[
+                StepView(thread_id=thread.thread_id, step=step)
+                for thread in snapshot.threads
+                if thread.run_status != "completed"
+                for step in thread.next_steps
+            ],
             pending_approval=(
                 PendingApprovalView(
                     thread_id=pending[0].thread_id,
@@ -262,6 +301,9 @@ class WorkflowStatusResponse(BaseModel):
                 else None
             ),
             completed_steps=[StepView(**step.model_dump()) for step in snapshot.completed_steps],
+            actions=list(actions.actions),
+            action_counts=actions.counts(),
+            shortlist=list(actions.shortlist),
             recoverable_failures=[
                 RecoverableFailureView(
                     thread_id=failure.thread_id,
@@ -288,6 +330,7 @@ class WorkflowStatusResponse(BaseModel):
             actor_id=origin.actor_id if origin else None,
             correlation_id=origin.correlation_id if origin else None,
             created_at=snapshot.created_at,
+            audit_url=audit_url(snapshot.workflow_id),
         )
 
 
@@ -385,8 +428,9 @@ async def get_workflow(
     workflow_id: UUID,
     services: WorkflowServices = Depends(get_workflow_services),
 ):
-    """Current step, status, pending approval, completed steps and recoverable failures."""
-    return WorkflowStatusResponse.from_snapshot(_read_or_404(services, workflow_id))
+    """Plan, completed steps, labelled actions, pending approval, failures, audit link."""
+    snapshot = _read_or_404(services, workflow_id)
+    return WorkflowStatusResponse.from_snapshot(snapshot, services.actions.read(workflow_id))
 
 
 @router.post("/workflows/{workflow_id}/resume", response_model=ResumeResponse, status_code=202)

@@ -62,6 +62,7 @@ from personalos.persistence.pending_checkpoints import (
 from personalos.persistence.policy_log import SqlPolicyDecisionLog
 from personalos.persistence.recruiter_events import SqlRecruiterEventStore
 from personalos.persistence.repositories import JobRepository
+from personalos.persistence.workflow_actions import WorkflowActionReader
 from personalos.persistence.workflow_commands import WorkflowCommandQueue
 from personalos.persistence.workflow_failures import WorkflowFailureStore
 from personalos.persistence.workflow_progress import WorkflowProgressLog
@@ -404,6 +405,21 @@ def build_workflow_status_reader(
         session_factory,
         build_durable_checkpointer(session_factory, registry),
         build_workflow_command_queue(session_factory),
+    )
+
+
+def build_workflow_action_reader(
+    session_factory: Callable[[], object] = SessionLocal,
+    registry: WorkflowThreadRegistry | None = None,
+) -> WorkflowActionReader:
+    """Build the reader that labels a workflow's actions RECOMMENDED ... EXECUTED.
+
+    Decodes checkpoints through the same saver as the status reader, so an
+    action's status is read from exactly the state a resuming worker sees.
+    """
+    registry = registry or build_workflow_thread_registry(session_factory)
+    return WorkflowActionReader(
+        session_factory, build_durable_checkpointer(session_factory, registry)
     )
 
 
@@ -759,6 +775,7 @@ __all__ = [
     "build_durable_checkpointer",
     "build_workflow_command_queue",
     "build_workflow_status_reader",
+    "build_workflow_action_reader",
     "build_approval_queue",
     "build_workflow_lease_store",
     "build_journaled_action_executor",
