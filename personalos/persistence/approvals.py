@@ -437,6 +437,7 @@ def _pending(item: _OpenRequest, now: datetime) -> PendingApproval:
         requested_at=request.requested_at,
         expires_at=request.expires_at,
         state=ApprovalState.EXPIRED if request.is_expired(now) else ApprovalState.PENDING,
+        preview=request.preview,
     )
 
 

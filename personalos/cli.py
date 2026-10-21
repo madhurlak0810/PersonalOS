@@ -70,5 +70,39 @@ def stall_monitor(once: bool):
     asyncio.run(monitor.run_forever())
 
 
+@cli.command()
+@click.argument("workflow_id", type=click.UUID)
+@click.option("--json", "as_json", is_flag=True, help="Print the API response body instead.")
+def workflow_status(workflow_id, as_json: bool):
+    """Show a workflow: plan, what was done, what is only suggested, what is waiting."""
+    from apps.api.routes.workflows import WorkflowStatusResponse, get_workflow_services
+    from personalos.cli_views import render_workflow
+
+    services = get_workflow_services()
+    snapshot = services.reader.read(workflow_id)
+    if snapshot is None:
+        raise click.ClickException(f"workflow '{workflow_id}' not found")
+    view = WorkflowStatusResponse.from_snapshot(snapshot, services.actions.read(workflow_id))
+    click.echo(view.model_dump_json(indent=2) if as_json else render_workflow(view))
+
+
+@cli.command()
+@click.option("--json", "as_json", is_flag=True, help="Print the API response body instead.")
+def approvals(as_json: bool):
+    """List every action waiting for approval, with what approving it would do."""
+    from apps.api.routes.approvals import PendingApprovalItem, PendingApprovalsResponse
+    from apps.api.routes.workflows import get_workflow_services
+    from personalos.cli_views import render_approvals
+
+    items = [
+        PendingApprovalItem.from_pending(approval)
+        for approval in get_workflow_services().approvals.list_pending()
+    ]
+    if as_json:
+        click.echo(PendingApprovalsResponse(approvals=items).model_dump_json(indent=2))
+    else:
+        click.echo(render_approvals(items))
+
+
 if __name__ == "__main__":
     cli()

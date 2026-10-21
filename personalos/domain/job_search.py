@@ -969,6 +969,9 @@ PAYLOAD_SUBJECT = "subject"
 PAYLOAD_BODY = "body"
 PAYLOAD_PREVIOUS_BODY = "previous_body"
 PAYLOAD_ATTACHMENTS = "attachments"
+#: The provider id of the message a reply answers. Present only on a reply, so
+#: its absence is what makes a message a new thread.
+PAYLOAD_IN_REPLY_TO = "in_reply_to"
 
 
 def body_diff(previous: str, proposed: str) -> str:
@@ -1012,6 +1015,13 @@ class ActionPreview(_Value):
     subject: str | None = None
     body_diff: str = ""
     attachments: tuple[AttachmentPreview, ...] = ()
+    #: The message this answers, when it is a reply; `None` for a new thread.
+    in_reply_to: str | None = None
+
+    @property
+    def is_reply(self) -> bool:
+        """True when the write lands in an existing thread rather than starting one."""
+        return bool(self.in_reply_to)
 
     @classmethod
     def for_intent(cls, intent: "ActionIntent") -> "ActionPreview":
@@ -1022,6 +1032,7 @@ class ActionPreview(_Value):
         """
         payload = intent.payload
         attachments = payload.get(PAYLOAD_ATTACHMENTS) or ()
+        in_reply_to = payload.get(PAYLOAD_IN_REPLY_TO)
         return cls(
             recipient=str(payload.get(PAYLOAD_RECIPIENT) or intent.target),
             subject=payload.get(PAYLOAD_SUBJECT),
@@ -1030,6 +1041,7 @@ class ActionPreview(_Value):
                 str(payload.get(PAYLOAD_BODY) or ""),
             ),
             attachments=tuple(AttachmentPreview.model_validate(item) for item in attachments),
+            in_reply_to=str(in_reply_to) if in_reply_to else None,
         )
 
 
@@ -1567,6 +1579,7 @@ __all__ = [
     "PAYLOAD_BODY",
     "PAYLOAD_PREVIOUS_BODY",
     "PAYLOAD_ATTACHMENTS",
+    "PAYLOAD_IN_REPLY_TO",
     "body_diff",
     "AttachmentPreview",
     "ActionPreview",

@@ -34,6 +34,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from personalos.domain.errors import ValidationFailed
+from personalos.domain.job_search import ActionPreview
 
 #: Upper bound on a thread id, matching `workflow_runs.thread_id` and
 #: `checkpoints.thread_id` (`String(255)`). Enforced here rather than left to
@@ -552,6 +553,8 @@ class PendingApproval(BaseModel):
     requested_at: datetime
     expires_at: datetime
     state: ApprovalState = ApprovalState.PENDING
+    #: What the action would look like from the other side, as of the hash.
+    preview: ActionPreview | None = None
 
 
 class RecordedApprovalDecision(BaseModel):
