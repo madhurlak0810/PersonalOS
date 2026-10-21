@@ -64,6 +64,7 @@ from personalos.persistence.recruiter_events import SqlRecruiterEventStore
 from personalos.persistence.repositories import JobRepository
 from personalos.persistence.workflow_commands import WorkflowCommandQueue
 from personalos.persistence.workflow_failures import WorkflowFailureStore
+from personalos.persistence.workflow_progress import WorkflowProgressLog
 from personalos.persistence.workflow_status import WorkflowStatusReader
 from personalos.policy import PolicyEngine, default_policy_engine
 from personalos.providers import (
@@ -546,6 +547,13 @@ def build_audit_trail_store(
     return AuditTrailStore(session_factory)
 
 
+def build_workflow_progress_log(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> WorkflowProgressLog:
+    """Build the log a run's progress events go to, and `GET .../events` streams from."""
+    return WorkflowProgressLog(session_factory)
+
+
 def build_integration_health_store(
     session_factory: Callable[[], object] = SessionLocal,
 ) -> IntegrationHealthStore:
@@ -758,6 +766,7 @@ __all__ = [
     "build_application_board_store",
     "build_audit_trail_store",
     "build_integration_health_store",
+    "build_workflow_progress_log",
     "build_workflow_failure_store",
     "build_application_transitioner",
     "register_application_transition_thread",
