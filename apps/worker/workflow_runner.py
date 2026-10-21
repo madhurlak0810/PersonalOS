@@ -20,6 +20,15 @@ Every start and every resume is wrapped in a lease on the workflow
 stalled workflow would both load the same checkpoint and both run the next step,
 and that step is allowed to have side effects -- so the lease is not an
 optimization, it is the thing that stops a resume from becoming a duplicate.
+
+Every run also reports its progress -- each step starting and finishing, an
+interrupt, its answer being picked up, a failure, the end -- to the workflow's
+progress log (`personalos.persistence.workflow_progress`), which is what
+`GET /v1/workflows/{id}/events` streams. The graph is driven with `astream`
+rather than `ainvoke` for that, and collects its result exactly the way
+`ainvoke` does, so the run itself is the same run either way. Recording is
+fire-and-forget: a progress event that cannot be written is logged and
+dropped, never raised into the step it describes.
 """
 
 import logging
@@ -28,12 +37,19 @@ from typing import Any
 from uuid import UUID
 
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command
 
 from personalos.domain.errors import (
     ErrorCode,
     NotFound,
     PersonalOSError,
     ProviderPermanentFailure,
+)
+from personalos.domain.failures import classify, failure_id, parse_stored_error, sanitize_error
+from personalos.domain.progress import (
+    ProgressEventType,
+    approval_requested_data,
+    approval_resolved_data,
 )
 from personalos.domain.workflow import WorkflowResumeState, WorkflowThread
 from personalos.persistence.checkpointer import (
@@ -44,8 +60,12 @@ from personalos.persistence.checkpointer import (
 )
 from personalos.persistence.integration_health import IntegrationHealthStore
 from personalos.persistence.leases import WorkflowLeaseStore, default_owner
+from personalos.persistence.workflow_progress import WorkflowProgressLog
 
 logger = logging.getLogger(__name__)
+
+#: The key `ainvoke` reports a run's interrupts under, as LangGraph spells it.
+_INTERRUPT = "__interrupt__"
 
 
 class NothingToResume(PersonalOSError):
@@ -92,11 +112,14 @@ class DurableWorkflowRunner:
         leases: WorkflowLeaseStore,
         owner: str | None = None,
         integrations: IntegrationHealthStore | None = None,
+        progress: WorkflowProgressLog | None = None,
     ):
         """Wire the graph to the registry and lease store that make it resumable.
 
         `integrations`, when given, is told about every provider that refused
         a run permanently, so the failure it leaves asks for a reconnect.
+        `progress` is where the run's progress events go; by default, the
+        `event_log` of the registry's own database.
         """
         if graph is None:
             raise ValueError("DurableWorkflowRunner requires a compiled graph")
@@ -109,6 +132,7 @@ class DurableWorkflowRunner:
         self.leases = leases
         self.owner = owner or default_owner()
         self.integrations = integrations
+        self.progress = progress or WorkflowProgressLog(registry.session_factory)
 
     # ------------------------------------------------------------------
     # Inspection
@@ -196,6 +220,8 @@ class DurableWorkflowRunner:
                 ", ".join(state.next),
                 state.checkpoint_id,
             )
+            if isinstance(resume_input, Command) and resume_input.resume is not None:
+                await self._note_resolved(thread, state, resume_input.resume, configurable)
             # `resume_input` is `None` on an ordinary resume, which is what tells
             # LangGraph to continue the stored run instead of applying new input.
             return await self._invoke(thread, resume_input, configurable)
@@ -218,14 +244,17 @@ class DurableWorkflowRunner:
         graph raised, because a run left marked `running` by a failure is
         indistinguishable from one that is still going.
         """
+        configurable = dict(configurable or {})
+        correlation_id = configurable.get("correlation_id")
+        #: Task id -> node, for every step that started and has not finished.
+        running: dict[str, str] = {}
         self.registry.mark_status(thread.thread_id, RUN_STATUS_RUNNING, started=True)
         try:
-            final = await self.graph.ainvoke(
-                graph_input, config=thread.config(**dict(configurable or {}))
-            )
+            final = await self._stream(thread, graph_input, configurable, running)
         except Exception as exc:
             self.registry.mark_status(thread.thread_id, RUN_STATUS_FAILED, finished=True)
             self._note_broken_integration(thread, exc)
+            await self._note_failure(thread, correlation_id, running, exc)
             raise
 
         # A graph that stopped at an interrupt (an unanswered approval, say) has
@@ -236,7 +265,168 @@ class DurableWorkflowRunner:
             logger.info("thread '%s' paused at step(s) %s", thread.thread_id, ", ".join(state.next))
         else:
             self.registry.mark_status(thread.thread_id, RUN_STATUS_COMPLETED, finished=True)
+            self._emit(thread, correlation_id, ProgressEventType.WORKFLOW_COMPLETED, {})
         return final
+
+    async def _stream(
+        self,
+        thread: WorkflowThread,
+        graph_input: Any,
+        configurable: Mapping[str, Any],
+        running: dict[str, str],
+    ) -> Any:
+        """Run the graph, reporting each task, and return what `ainvoke` would.
+
+        The `updates` and `values` modes, and what is done with them, are
+        `Pregel.ainvoke`'s own (v1): the last `values` chunk is the result,
+        with any interrupts from `updates` attached under `__interrupt__`.
+        `tasks` is added only to watch: it changes nothing the graph runs.
+        """
+        correlation_id = configurable.get("correlation_id")
+        latest: Any = None
+        interrupts: list[Any] = []
+        async for mode, payload in self.graph.astream(
+            graph_input,
+            config=thread.config(**dict(configurable)),
+            stream_mode=["updates", "values", "tasks"],
+        ):
+            if mode == "values":
+                latest = payload
+            elif mode == "updates":
+                if isinstance(payload, dict) and (found := payload.get(_INTERRUPT)) is not None:
+                    interrupts.extend(found)
+            elif mode == "tasks":
+                self._note_task(thread, correlation_id, running, payload)
+        if interrupts:
+            if isinstance(latest, dict):
+                return {**latest, _INTERRUPT: interrupts}
+            return {_INTERRUPT: interrupts}
+        return latest
+
+    # ------------------------------------------------------------------
+    # Progress
+    # ------------------------------------------------------------------
+
+    def _note_task(
+        self,
+        thread: WorkflowThread,
+        correlation_id: Any,
+        running: dict[str, str],
+        task: Mapping[str, Any],
+    ) -> None:
+        """Turn one `tasks` chunk into a step or approval event."""
+        task_id, step = str(task.get("id")), str(task.get("name"))
+        if "triggers" in task:  # a task starting; a finished one carries its result
+            running[task_id] = step
+            self._emit(
+                thread,
+                correlation_id,
+                ProgressEventType.STEP_STARTED,
+                {"step": step, "task_id": task_id},
+            )
+            return
+        if task.get("error") is not None:
+            # Left in `running`: the stream raises next, and the failure event
+            # names the step from there.
+            return
+        running.pop(task_id, None)
+        raised = task.get("interrupts") or ()
+        for interrupt in raised:
+            self._emit(
+                thread,
+                correlation_id,
+                ProgressEventType.APPROVAL_REQUESTED,
+                approval_requested_data(
+                    step=step,
+                    interrupt_id=_field(interrupt, "id"),
+                    value=_field(interrupt, "value"),
+                ),
+            )
+        if not raised:
+            self._emit(
+                thread,
+                correlation_id,
+                ProgressEventType.STEP_COMPLETED,
+                {"step": step, "task_id": task_id},
+            )
+
+    async def _note_resolved(
+        self,
+        thread: WorkflowThread,
+        state: WorkflowResumeState,
+        answer: Any,
+        configurable: Mapping[str, Any] | None,
+    ) -> None:
+        """Record that the answer to the thread's interrupt is being picked up."""
+        configurable = dict(configurable or {})
+        try:
+            snapshot = await self.graph.aget_state(thread.config())
+            interrupt_ids = tuple(
+                str(interrupt.id) for interrupt in (snapshot.interrupts or ()) if interrupt.id
+            )
+        except Exception:
+            logger.exception("could not read the interrupts of thread '%s'", thread.thread_id)
+            interrupt_ids = ()
+        self._emit(
+            thread,
+            configurable.get("correlation_id"),
+            ProgressEventType.APPROVAL_RESOLVED,
+            approval_resolved_data(
+                steps=state.next,
+                interrupt_ids=interrupt_ids,
+                resume_value=answer,
+                actor_id=configurable.get("actor_id"),
+            ),
+        )
+
+    async def _note_failure(
+        self,
+        thread: WorkflowThread,
+        correlation_id: Any,
+        running: Mapping[str, str],
+        error: Exception,
+    ) -> None:
+        """Record a step's failure, under the id `GET .../failures` knows it by."""
+        try:
+            stored = parse_stored_error(repr(error))
+            checkpoint_id = (await self.inspect(thread)).checkpoint_id
+            failed = list(running.items()) or [(None, None)]
+            for task_id, step in failed:
+                self._emit(
+                    thread,
+                    correlation_id,
+                    ProgressEventType.FAILURE,
+                    {
+                        "step": step,
+                        "task_id": task_id,
+                        "failure_id": str(failure_id(thread.thread_id, checkpoint_id, task_id)),
+                        "failure_class": classify(stored).value,
+                        "message": sanitize_error(stored),
+                    },
+                )
+        except Exception:
+            logger.exception("could not record the failure of thread '%s'", thread.thread_id)
+
+    def _emit(
+        self,
+        thread: WorkflowThread,
+        correlation_id: Any,
+        kind: ProgressEventType,
+        data: dict[str, Any],
+    ) -> None:
+        """Hand one event to the progress log; whatever happens there stays there."""
+        try:
+            self.progress.record(
+                thread.workflow_id,
+                kind,
+                thread_id=thread.thread_id,
+                correlation_id=correlation_id,
+                data=data,
+            )
+        except Exception:
+            logger.exception(
+                "progress log refused %s for thread '%s'", kind.value, thread.thread_id
+            )
 
     def _note_broken_integration(self, thread: WorkflowThread, error: BaseException) -> None:
         """Mark the integration degraded when a provider refused the run permanently.
@@ -292,6 +482,13 @@ class DurableWorkflowRunner:
                 f"to say which one to resume"
             )
         return threads[0]
+
+
+def _field(value: Any, name: str) -> Any:
+    """`name` of an interrupt, whether the stream gave it as a dict or an `Interrupt`."""
+    if isinstance(value, Mapping):
+        return value.get(name)
+    return getattr(value, name, None)
 
 
 __all__ = [
