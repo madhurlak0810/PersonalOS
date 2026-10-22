@@ -47,6 +47,7 @@ EXPECTED_TABLES = {
     "policy_decisions",
     "audit_events",
     "outbox_events",
+    "consumed_events",
     "event_log",
     "application_status_view",
     "evidence_chunks",
