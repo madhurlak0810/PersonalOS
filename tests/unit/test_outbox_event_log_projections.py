@@ -85,6 +85,8 @@ def test_schema_creates_all_three_tables_with_documented_shape(tmp_path):
             "status",
             "created_at",
             "dispatched_at",
+            "claimed_at",
+            "attempts",
         }
         outbox_indexed_columns = {
             column

@@ -14,9 +14,11 @@ from uuid import UUID
 
 from personalos.config import settings
 from personalos.domain.credentials import CredentialExchangeFailed, CredentialRef
+from personalos.domain.events import EventEnvelope
 from personalos.domain.workflow import (
     WorkflowThread,
     application_transition_thread_id,
+    event_handler_thread_id,
     job_search_thread_id,
     supervisor_thread_id,
 )
@@ -49,6 +51,9 @@ from personalos.persistence.checkpointer import (
     WorkflowThreadRegistry,
 )
 from personalos.persistence.database import SessionLocal
+from personalos.persistence.event_correlation import CorrelatedWaitLookup
+from personalos.persistence.event_inbox import IdempotentConsumer
+from personalos.persistence.event_outbox import EventOutbox
 from personalos.persistence.evidence import SqlEvidenceIndex, SqlEvidenceSource
 from personalos.persistence.execution_ledger import ExecutionLedger
 from personalos.persistence.idempotency import OperationStore, SqlOperationStore
@@ -63,7 +68,7 @@ from personalos.persistence.policy_log import SqlPolicyDecisionLog
 from personalos.persistence.recruiter_events import SqlRecruiterEventStore
 from personalos.persistence.repositories import JobRepository
 from personalos.persistence.workflow_actions import WorkflowActionReader
-from personalos.persistence.workflow_commands import WorkflowCommandQueue
+from personalos.persistence.workflow_commands import WORKFLOW_COMMAND_EVENT, WorkflowCommandQueue
 from personalos.persistence.workflow_failures import WorkflowFailureStore
 from personalos.persistence.workflow_progress import WorkflowProgressLog
 from personalos.persistence.workflow_status import WorkflowStatusReader
@@ -103,6 +108,9 @@ JOB_SEARCH_WORKFLOW = "job_search"
 
 #: `workflows.name` for a Supervisor conversation.
 SUPERVISOR_WORKFLOW = "supervisor"
+
+#: `workflows.name` for the runs started by events no waiting workflow claimed.
+EVENT_HANDLER_WORKFLOW = "event_handler"
 
 
 def build_operation_store(session_factory=SessionLocal) -> OperationStore:
@@ -734,6 +742,56 @@ def register_supervisor_thread(
     )
 
 
+def build_event_outbox(session_factory: Callable[[], object] = SessionLocal) -> EventOutbox:
+    """Build the outbox event dispatchers claim from.
+
+    Leaves `workflow.command` rows to the workflow-command worker: those run
+    for as long as a graph does, under a workflow lease, and must not be
+    reclaimed when this outbox's shorter visibility timeout runs out.
+    """
+    return EventOutbox(session_factory, exclude_types=(WORKFLOW_COMMAND_EVENT,))
+
+
+def build_correlated_wait_lookup(
+    session_factory: Callable[[], object] = SessionLocal,
+    registry: WorkflowThreadRegistry | None = None,
+) -> CorrelatedWaitLookup:
+    """Build the lookup that finds the waiting workflow an event belongs to."""
+    return CorrelatedWaitLookup(
+        session_factory, build_workflow_status_reader(session_factory, registry)
+    )
+
+
+def build_idempotent_consumer(
+    consumer: str, session_factory: Callable[[], object] = SessionLocal
+) -> IdempotentConsumer:
+    """Build the inbox `consumer` records the events it has applied in."""
+    return IdempotentConsumer(session_factory, consumer)
+
+
+def register_event_handler_thread(
+    envelope: EventEnvelope, *, registry: WorkflowThreadRegistry
+) -> WorkflowThread:
+    """Derive and register the thread a new run for `envelope` goes on.
+
+    Its own workflow per event, like `register_application_transition_thread`:
+    sharing one would put every event-handler run under a single lease and
+    serialize them. Reused when the event is redelivered, since the thread id
+    is derived from its `dedupe_key`.
+    """
+    thread_id = event_handler_thread_id(envelope.type, envelope.dedupe_key)
+    existing = registry.resolve(thread_id)
+    if existing is not None:
+        return existing
+    return registry.register(
+        thread_id=thread_id,
+        workflow_name=EVENT_HANDLER_WORKFLOW,
+        workflow_id=registry.create_workflow(EVENT_HANDLER_WORKFLOW),
+        actor_id=f"event:{envelope.source}",
+        correlation_id=envelope.correlation_id or envelope.event_id,
+    )
+
+
 def build_job_search_subgraph_runner(
     compiled_subgraph,
     *,
@@ -754,6 +812,11 @@ def build_job_search_subgraph_runner(
 __all__ = [
     "JOB_SEARCH_WORKFLOW",
     "SUPERVISOR_WORKFLOW",
+    "EVENT_HANDLER_WORKFLOW",
+    "build_event_outbox",
+    "build_correlated_wait_lookup",
+    "build_idempotent_consumer",
+    "register_event_handler_thread",
     "build_operation_store",
     "register_mcp_servers",
     "build_files_mcp_server",

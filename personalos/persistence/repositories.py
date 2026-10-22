@@ -1,10 +1,12 @@
 """Repository pattern for data access."""
 
 import math
-from datetime import datetime
+from collections.abc import Sequence
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
+from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -1154,6 +1156,11 @@ class CredentialRepository:
         return db_credential
 
 
+#: How many times one `OutboxEventRepository.claim_next` call moves on to the
+#: next row after another worker claimed the one it read.
+_CLAIM_RACE_RETRIES = 8
+
+
 class OutboxEventRepository:
     """Repository for the transactional outbox.
 
@@ -1166,8 +1173,14 @@ class OutboxEventRepository:
     Postgres it takes the row with `SELECT ... FOR UPDATE SKIP LOCKED` so
     concurrent workers never block on or double-claim the same row; on any
     other dialect (SQLite in tests) it falls back to an atomic conditional
-    UPDATE keyed on the row still being PENDING, which gives the same
-    exactly-once guarantee for a single-writer database.
+    UPDATE keyed on the row still being in the state it was read in, which
+    gives the same exactly-once guarantee for a single-writer database.
+
+    A claim is a lease when the caller asks for one (`reclaim_after`): a row
+    left IN_PROGRESS longer than that by a worker that crashed before settling
+    it is claimable again. Without `reclaim_after` an IN_PROGRESS row is never
+    handed out twice, which is what the workflow-command queue relies on: its
+    commands run for as long as they run, under a lease of their own.
     """
 
     def __init__(self, session: Session):
@@ -1181,14 +1194,21 @@ class OutboxEventRepository:
         payload: dict[str, Any],
         dedupe_key: str | None = None,
         commit: bool = True,
+        id: UUID | None = None,
     ) -> OutboxEventModel:
-        """Stage an outbox row. Raises `IntegrityError` on a duplicate `dedupe_key`."""
+        """Stage an outbox row. Raises `IntegrityError` on a duplicate `dedupe_key`.
+
+        `id`, when given, is the row's primary key -- an enveloped event is
+        stored under its own `event_id`, so a log line naming either names both.
+        """
         db_event = OutboxEventModel(
             type=type,
             payload_json=redact(payload),
             dedupe_key=dedupe_key,
             status=OutboxEventStatus.PENDING.value,
         )
+        if id is not None:
+            db_event.id = id
         self.session.add(db_event)
         if commit:
             self.session.commit()
@@ -1196,48 +1216,92 @@ class OutboxEventRepository:
             self.session.flush()
         return db_event
 
-    def claim_next(self, type: str | None = None) -> OutboxEventModel | None:
-        """Claim the oldest pending outbox row for dispatch, or None if none is claimable.
+    def claim_next(
+        self,
+        type: str | None = None,
+        *,
+        exclude_types: Sequence[str] = (),
+        reclaim_after: timedelta | None = None,
+        now: datetime | None = None,
+    ) -> OutboxEventModel | None:
+        """Claim the oldest claimable outbox row for dispatch, or None if none is claimable.
 
         `type`, when given, narrows the claim to rows of that type, so a
         consumer that handles one kind of message cannot claim -- and then
-        strand -- a row meant for another.
+        strand -- a row meant for another. `exclude_types` is the converse,
+        for a general dispatcher sharing the table with a dedicated consumer.
+
+        `reclaim_after` makes IN_PROGRESS rows whose claim is older than that
+        claimable too (see the class docstring). Each claim stamps
+        `claimed_at` and increments `attempts`.
 
         The caller owns the returned row's dispatch and must follow up with
         `mark_dispatched` or `mark_failed`.
         """
-        query = self.session.query(OutboxEventModel).filter(
-            OutboxEventModel.status == OutboxEventStatus.PENDING.value
-        )
+        now = now or datetime.utcnow()
+        claimable = OutboxEventModel.status == OutboxEventStatus.PENDING.value
+        if reclaim_after is not None:
+            claimable = or_(
+                claimable,
+                and_(
+                    OutboxEventModel.status == OutboxEventStatus.IN_PROGRESS.value,
+                    or_(
+                        OutboxEventModel.claimed_at.is_(None),
+                        OutboxEventModel.claimed_at <= now - reclaim_after,
+                    ),
+                ),
+            )
+        query = self.session.query(OutboxEventModel).filter(claimable)
         if type is not None:
             query = query.filter(OutboxEventModel.type == type)
+        if exclude_types:
+            query = query.filter(OutboxEventModel.type.notin_(list(exclude_types)))
+        query = query.order_by(OutboxEventModel.created_at, OutboxEventModel.id)
         if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
-            query = query.order_by(OutboxEventModel.created_at, OutboxEventModel.id).with_for_update(
-                skip_locked=True
-            )
-        else:
-            query = query.order_by(OutboxEventModel.created_at, OutboxEventModel.id)
-        candidate = query.first()
-        if candidate is None:
-            return None
+            query = query.with_for_update(skip_locked=True)
 
-        updated = (
-            self.session.query(OutboxEventModel)
-            .filter(
-                OutboxEventModel.id == candidate.id,
-                OutboxEventModel.status == OutboxEventStatus.PENDING.value,
+        # A lost race means another worker took *that* row, not that nothing is
+        # left, so look again -- a bounded number of times, to stay a single
+        # poll under contention rather than a spin.
+        for _ in range(_CLAIM_RACE_RETRIES + 1):
+            candidate = query.first()
+            if candidate is None:
+                # End the read transaction, so a long-polling worker holds no
+                # snapshot open between polls.
+                self.session.commit()
+                return None
+
+            # Compare-and-set on the state just read: under SKIP LOCKED it can
+            # only succeed, and without it (SQLite) it is what excludes a
+            # second claimer that read the same row before this one's write
+            # landed.
+            same_claim = (
+                OutboxEventModel.claimed_at.is_(None)
+                if candidate.claimed_at is None
+                else OutboxEventModel.claimed_at == candidate.claimed_at
             )
-            .update(
-                {OutboxEventModel.status: OutboxEventStatus.IN_PROGRESS.value},
-                synchronize_session=False,
+            updated = (
+                self.session.query(OutboxEventModel)
+                .filter(
+                    OutboxEventModel.id == candidate.id,
+                    OutboxEventModel.status == candidate.status,
+                    same_claim,
+                )
+                .update(
+                    {
+                        OutboxEventModel.status: OutboxEventStatus.IN_PROGRESS.value,
+                        OutboxEventModel.claimed_at: now,
+                        OutboxEventModel.attempts: OutboxEventModel.attempts + 1,
+                    },
+                    synchronize_session=False,
+                )
             )
-        )
-        self.session.commit()
-        if updated == 0:
-            # Lost the race: another worker claimed this row first.
-            return None
-        self.session.refresh(candidate)
-        return candidate
+            self.session.commit()
+            if updated == 1:
+                self.session.refresh(candidate)
+                return candidate
+        # Lost every race this poll; the caller polls again.
+        return None
 
     def mark_dispatched(self, outbox_event_id: UUID) -> OutboxEventModel:
         """Record that a claimed row was successfully dispatched."""

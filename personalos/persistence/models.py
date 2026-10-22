@@ -1405,6 +1405,12 @@ class OutboxEventModel(Base):
     )
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     dispatched_at = Column(DateTime, nullable=True)
+    # When the current claim was taken, and how many claims there have been.
+    # `claimed_at` doubles as the claim's token: a claim older than the
+    # dispatcher's visibility timeout is presumed dead (its worker crashed
+    # between claiming and settling) and the row is handed out again.
+    claimed_at = Column(DateTime, nullable=True)
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (Index("ix_outbox_events_status", "status"),)
 
@@ -1418,7 +1424,37 @@ class OutboxEventModel(Base):
             "status": self.status,
             "created_at": self.created_at.isoformat(),
             "dispatched_at": self.dispatched_at.isoformat() if self.dispatched_at else None,
+            "claimed_at": self.claimed_at.isoformat() if self.claimed_at else None,
+            "attempts": self.attempts,
         }
+
+
+class ConsumedEventModel(Base):
+    """ORM model for one event a consumer has already applied: its inbox.
+
+    The other half of at-least-once delivery. The outbox may hand the same
+    event out more than once -- a worker that crashed after acting but before
+    acknowledging is indistinguishable from one that crashed before acting --
+    so each consumer records the `dedupe_key` of every event it applied, in
+    the same transaction as the effect. The unique `(consumer, dedupe_key)`
+    constraint is what makes a second delivery a no-op: it cannot commit an
+    effect without also inserting a row that already exists.
+    """
+
+    __tablename__ = "consumed_events"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    consumer = Column(String(100), nullable=False)
+    dedupe_key = Column(String(255), nullable=False)
+    event_id = Column(GUID(), nullable=False)
+    event_type = Column(String(255), nullable=False)
+    consumed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "consumer", "dedupe_key", name="uq_consumed_events_consumer_dedupe_key"
+        ),
+    )
 
 
 class EventLogModel(Base):

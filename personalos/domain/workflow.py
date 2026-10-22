@@ -91,6 +91,7 @@ def derive_thread_id(namespace: str, *parts: Any) -> str:
 JOB_SEARCH_THREAD_NAMESPACE = "job_search"
 SUPERVISOR_THREAD_NAMESPACE = "supervisor"
 RECRUITER_INBOX_THREAD_NAMESPACE = "recruiter_inbox"
+EVENT_HANDLER_THREAD_NAMESPACE = "event_handler"
 
 
 def thread_namespace(thread_id: str) -> str | None:
@@ -146,6 +147,16 @@ def recruiter_inbox_thread_id(user_id: Any) -> str:
 def supervisor_thread_id(conversation_key: Any) -> str:
     """The thread id for one Supervisor conversation."""
     return derive_thread_id(SUPERVISOR_THREAD_NAMESPACE, conversation_key)
+
+
+def event_handler_thread_id(event_type: str, dedupe_key: str) -> str:
+    """The thread an event no waiting workflow claimed is handled on.
+
+    One per event *fact* -- derived from its `dedupe_key`, not its delivery's
+    `event_id` -- so a redelivered event finds the run its first delivery
+    started instead of starting a second one.
+    """
+    return derive_thread_id(EVENT_HANDLER_THREAD_NAMESPACE, event_type, dedupe_key)
 
 
 class WorkflowThread(BaseModel):
@@ -585,6 +596,7 @@ __all__ = [
     "JOB_SEARCH_THREAD_NAMESPACE",
     "SUPERVISOR_THREAD_NAMESPACE",
     "RECRUITER_INBOX_THREAD_NAMESPACE",
+    "EVENT_HANDLER_THREAD_NAMESPACE",
     "InvalidWorkflowIdentity",
     "derive_thread_id",
     "thread_namespace",
@@ -592,6 +604,7 @@ __all__ = [
     "application_transition_thread_id",
     "recruiter_inbox_thread_id",
     "supervisor_thread_id",
+    "event_handler_thread_id",
     "WorkflowThread",
     "WorkflowLease",
     "WorkflowResumeState",
