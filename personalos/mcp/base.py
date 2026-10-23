@@ -165,9 +165,7 @@ class MCPServer(ABC):
                 request.target, schema, handler, intent, request.context
             )
 
-        logger.info(
-            f"Executing tool '{tool_name}' on {self.name} ({request.context.as_log_str()})"
-        )
+        logger.info(f"Executing tool '{tool_name}' on {self.name} ({request.context.as_log_str()})")
         try:
             result = handler(**intent.model_dump())
             # Awaits any awaitable rather than testing the handler itself, so
@@ -187,9 +185,7 @@ class MCPServer(ABC):
                 f"Error executing '{tool_name}': {error} ({request.context.as_log_str()})",
                 exc_info=True,
             )
-            return ToolCallResult.failed(
-                request.target, ToolCallErrorCode.EXECUTION_ERROR, error
-            )
+            return ToolCallResult.failed(request.target, ToolCallErrorCode.EXECUTION_ERROR, error)
 
     async def _execute_mutating(
         self,
@@ -213,8 +209,7 @@ class MCPServer(ABC):
         idempotency_key = intent.idempotency_key
 
         logger.info(
-            f"Executing mutating tool '{target.tool}' on {self.name} "
-            f"({context.as_log_str()})"
+            f"Executing mutating tool '{target.tool}' on {self.name} ({context.as_log_str()})"
         )
         try:
             result, replayed = await self._guard.run(
@@ -225,14 +220,12 @@ class MCPServer(ABC):
             )
         except InvalidIdempotencyKey as e:
             logger.warning(
-                f"Idempotency check rejected '{target.tool}': {str(e)} "
-                f"({context.as_log_str()})"
+                f"Idempotency check rejected '{target.tool}': {str(e)} ({context.as_log_str()})"
             )
             return ToolCallResult.failed(target, ToolCallErrorCode.VALIDATION_ERROR, str(e))
         except IdempotencyError as e:
             logger.warning(
-                f"Idempotency check rejected '{target.tool}': {str(e)} "
-                f"({context.as_log_str()})"
+                f"Idempotency check rejected '{target.tool}': {str(e)} ({context.as_log_str()})"
             )
             return ToolCallResult.failed(target, ToolCallErrorCode.IDEMPOTENCY_CONFLICT, str(e))
         except Exception as e:

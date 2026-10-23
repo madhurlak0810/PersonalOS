@@ -128,8 +128,7 @@ class ApprovalGrant(BaseModel):
     def matches(self, intent: ToolIntent) -> bool:
         """True when this grant was issued for exactly this intent."""
         return (
-            self.intent_id == intent.intent_id
-            and self.intent_fingerprint == intent.fingerprint()
+            self.intent_id == intent.intent_id and self.intent_fingerprint == intent.fingerprint()
         )
 
 

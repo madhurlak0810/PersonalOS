@@ -159,9 +159,7 @@ def test_application_status_update_rejects_invalid_transition(tmp_path):
         assert application.status == ApplicationStatus.DISCOVERED.value
 
         with pytest.raises(InvalidApplicationTransition):
-            ApplicationRepository(session).update_status(
-                application.id, ApplicationStatus.OFFER
-            )
+            ApplicationRepository(session).update_status(application.id, ApplicationStatus.OFFER)
 
         # The rejected attempt left the row untouched.
         refetched = ApplicationRepository(session).get_by_id(application.id)
@@ -239,9 +237,7 @@ def test_artifact_version_requires_evidence(tmp_path):
             artifact_type="resume",
             evidence=[{"type": "resume_section", "ref": "experience.personalos"}],
         )
-        assert artifact.evidence == [
-            {"type": "resume_section", "ref": "experience.personalos"}
-        ]
+        assert artifact.evidence == [{"type": "resume_section", "ref": "experience.personalos"}]
     finally:
         session.close()
         engine.dispose()

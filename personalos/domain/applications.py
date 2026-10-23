@@ -236,8 +236,7 @@ def transition_action_intent(request: RequestedTransition) -> ActionIntent:
     else:
         target = request.recipient or ""
         summary = (
-            f"Tell {request.recipient} the application for {role} is now "
-            f"{request.to_status.value}"
+            f"Tell {request.recipient} the application for {role} is now {request.to_status.value}"
         )
         payload = {
             "application_id": str(request.application_id),

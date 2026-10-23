@@ -194,7 +194,7 @@ def anthropic_intent_classifier(
         from langchain_anthropic import ChatAnthropic
     except ImportError as exc:  # pragma: no cover - depends on optional extra
         raise ImportError(
-            "anthropic_intent_classifier requires the 'llm' extra: " "pip install 'personalos[llm]'"
+            "anthropic_intent_classifier requires the 'llm' extra: pip install 'personalos[llm]'"
         ) from exc
 
     return StructuredLLMIntentClassifier(ChatAnthropic(model=model, **model_kwargs))

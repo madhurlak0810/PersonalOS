@@ -8,6 +8,7 @@ from personalos.domain.models import Job, JobStatus
 @pytest.fixture
 def mock_session():
     """Mock database session."""
+
     # This is a placeholder - in a real test, you'd use SQLite or a test DB
     class MockSession:
         pass

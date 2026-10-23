@@ -903,10 +903,7 @@ class TestExecuteApprovedActions:
 
         assert update["action_receipts"] == []
         assert ports["action_executor"].executed == []
-        assert (
-            ApprovalRefusal.model_validate(update["approval_refusals"][0]).reason
-            == reason
-        )
+        assert ApprovalRefusal.model_validate(update["approval_refusals"][0]).reason == reason
 
     async def test_an_approval_bound_to_another_payload_does_not_authorize(self):
         subgraph, ports = graph()
@@ -1442,9 +1439,7 @@ class TestDraftFollowUp:
         event = EmittedEvent.model_validate(update["emitted_events"][-1])
         assert event.type == JobSearchEventType.FOLLOW_UP_TRIGGERED
         assert event.dedupe_key == f"follow_up_triggered:{wait.checkpoint_id}"
-        assert ports["event_emitter"].types() == [
-            JobSearchEventType.FOLLOW_UP_TRIGGERED.value
-        ]
+        assert ports["event_emitter"].types() == [JobSearchEventType.FOLLOW_UP_TRIGGERED.value]
 
     async def test_a_wait_for_another_application_is_refused(self):
         """The draft is written from this thread's state, so the two must agree.
@@ -1456,9 +1451,7 @@ class TestDraftFollowUp:
         stranger = _pending_wait().model_copy(update={"application_id": uuid4()})
 
         with pytest.raises(JobSearchContractError, match="but thread state holds"):
-            await subgraph.draft_follow_up(
-                {**APPLIED_STATE, "fired_checkpoints": dumped(stranger)}
-            )
+            await subgraph.draft_follow_up({**APPLIED_STATE, "fired_checkpoints": dumped(stranger)})
 
     async def test_it_requires_an_application_to_follow_up_on(self):
         """Ordered like every other node that reads a value it did not compute."""
@@ -1603,8 +1596,7 @@ class TestRouters:
         )
 
         assert (
-            subgraph.route_after_follow_up({"pending_actions": dumped(reply)})
-            == REQUEST_APPROVAL
+            subgraph.route_after_follow_up({"pending_actions": dumped(reply)}) == REQUEST_APPROVAL
         )
         assert subgraph.route_after_follow_up({"pending_actions": []}) == END
 
@@ -1653,7 +1645,9 @@ class TestClassifyRecruiterEvents:
     async def test_a_message_matching_only_on_company_name_is_not_linked(self):
         subgraph, _ports = inbound_graph()
         message = fakes.inbound_message(
-            subject="Hello from Acme", body="We have an update.", thread_id=None,
+            subject="Hello from Acme",
+            body="We have an update.",
+            thread_id=None,
             from_address="someone@mail.test",
         )
 
@@ -1767,7 +1761,9 @@ class TestRecordRecruiterEvents:
     async def test_a_low_confidence_match_goes_to_review_and_moves_nothing(self):
         subgraph, ports = inbound_graph()
         message = fakes.inbound_message(
-            subject="Hello from Acme", body="We would like to interview you.", thread_id=None,
+            subject="Hello from Acme",
+            body="We would like to interview you.",
+            thread_id=None,
             from_address="someone@mail.test",
         )
 
@@ -1957,9 +1953,7 @@ class TestPlanInterviewSchedule:
         assert reminder.trigger_at.isoformat() == first_prep
         assert reminder.expires_at == INTERVIEW_AT
         assert reminder.condition.params["interview_starts_at"] == INTERVIEW_AT.isoformat()
-        assert [raw["dedupe_key"] for raw in update["pending_checkpoints"]] == [
-            reminder.dedupe_key
-        ]
+        assert [raw["dedupe_key"] for raw in update["pending_checkpoints"]] == [reminder.dedupe_key]
 
     async def test_a_reply_drafted_in_the_same_run_is_carried_to_approval_too(self):
         subgraph, _ports = scheduling_graph(
@@ -1983,9 +1977,9 @@ class TestPlanInterviewSchedule:
 
         update = await subgraph.plan_interview_schedule(await _invited(subgraph), THREAD_CONFIG)
 
-        assert JobSearchEventType.INTERVIEW_SCHEDULE_CONFLICT.value in ports[
-            "event_emitter"
-        ].types()
+        assert (
+            JobSearchEventType.INTERVIEW_SCHEDULE_CONFLICT.value in ports["event_emitter"].types()
+        )
         conflict = EmittedEvent.model_validate(update["emitted_events"][-1])
         assert conflict.payload["conflicts"][0]["kind"] == "interview_overlap"
 
@@ -2157,7 +2151,9 @@ class TestRequestedTransitionRouting:
         subgraph, _ports = transitions_graph()
 
         assert (
-            subgraph.route_from_start({"requested_transitions": dumped(fakes.requested_withdrawal())})
+            subgraph.route_from_start(
+                {"requested_transitions": dumped(fakes.requested_withdrawal())}
+            )
             == jsg.PROPOSE_REQUESTED_TRANSITIONS
         )
         assert subgraph.route_from_start({"requested_transitions": []}) == jsg.LOAD_SEARCH_PROFILE

@@ -225,9 +225,7 @@ def test_an_action_object_without_a_status_is_not_valid(model):
 def test_a_response_missing_the_action_status_fails_validation():
     action = derive(
         {"pending_actions": dump([reply_draft()])},
-    )[
-        0
-    ].model_dump(mode="json")
+    )[0].model_dump(mode="json")
     body = {
         "workflow_id": str(WORKFLOW_ID),
         "status": "waiting",

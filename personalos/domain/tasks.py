@@ -57,7 +57,7 @@ class TaskDAG(BaseModel):
             raise InvalidTaskDAG("a task DAG must contain at least one task")
         if len(tasks) > MAX_TASKS_PER_DAG:
             raise InvalidTaskDAG(
-                f"task DAG has {len(tasks)} tasks, exceeding the bound of " f"{MAX_TASKS_PER_DAG}"
+                f"task DAG has {len(tasks)} tasks, exceeding the bound of {MAX_TASKS_PER_DAG}"
             )
         ids = [task.id for task in tasks]
         if len(ids) != len(set(ids)):

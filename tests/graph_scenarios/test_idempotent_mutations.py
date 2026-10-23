@@ -149,10 +149,7 @@ def test_retrying_a_succeeded_submission_returns_its_receipt_without_submitting_
 
     assert log.count(durable.EVENT_EXTERNAL_SUBMISSION) == 1, "the application was submitted twice"
     assert second["application"]["status"] == ApplicationStatus.APPLIED.value
-    assert (
-        second["application"]["external_reference"]
-        == first["application"]["external_reference"]
-    )
+    assert second["application"]["external_reference"] == first["application"]["external_reference"]
     (first_receipt,) = first["action_receipts"]
     (second_receipt,) = second["action_receipts"]
     assert second_receipt["ok"] is True

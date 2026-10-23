@@ -36,9 +36,7 @@ def validate_idempotency_key(key: Any) -> str:
     if key is None:
         raise InvalidIdempotencyKey("idempotency_key is required for mutating operations")
     if not isinstance(key, str):
-        raise InvalidIdempotencyKey(
-            f"idempotency_key must be a string, got {type(key).__name__}"
-        )
+        raise InvalidIdempotencyKey(f"idempotency_key must be a string, got {type(key).__name__}")
 
     normalized = key.strip()
     if len(normalized) < IDEMPOTENCY_KEY_MIN_LENGTH:
@@ -380,9 +378,7 @@ class ApplicationStatus(str, Enum):
 #: go from one depends on where it was held *from*, which this table cannot
 #: know. See `allowed_application_transitions`.
 ALLOWED_APPLICATION_TRANSITIONS: dict[ApplicationStatus, frozenset[ApplicationStatus]] = {
-    ApplicationStatus.DISCOVERED: frozenset(
-        {ApplicationStatus.SAVED, ApplicationStatus.SKIPPED}
-    ),
+    ApplicationStatus.DISCOVERED: frozenset({ApplicationStatus.SAVED, ApplicationStatus.SKIPPED}),
     ApplicationStatus.SAVED: frozenset(
         {
             ApplicationStatus.PREPARING,
@@ -671,9 +667,7 @@ def validate_evidence_links(evidence: list[dict[str, Any]]) -> list[dict[str, An
     candidate's own record.
     """
     if not evidence:
-        raise InvalidEvidenceLinkage(
-            "artifact version must cite at least one evidence source"
-        )
+        raise InvalidEvidenceLinkage("artifact version must cite at least one evidence source")
     for item in evidence:
         if not isinstance(item, dict) or not item.get("type") or not item.get("ref"):
             raise InvalidEvidenceLinkage(

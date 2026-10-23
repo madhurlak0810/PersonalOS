@@ -231,9 +231,7 @@ async def test_a_policy_that_holds_drafts_for_approval_stores_nothing(world):
     )
 
     with pytest.raises(ApprovalRequired):
-        await _builder(world, _honest_writer(ids), policy=strict).build(
-            _entry(), fakes.profile()
-        )
+        await _builder(world, _honest_writer(ids), policy=strict).build(_entry(), fakes.profile())
 
     assert _rows(factory, ArtifactVersionModel) == []
 

@@ -611,9 +611,7 @@ def build_application_transitioner(
     refused by the graph rather than proposed, since nothing could write the
     status change once the effect had run.
     """
-    return StoreApplicationTransitioner(
-        store or build_application_lifecycle_store(session_factory)
-    )
+    return StoreApplicationTransitioner(store or build_application_lifecycle_store(session_factory))
 
 
 def build_recruiter_event_store(

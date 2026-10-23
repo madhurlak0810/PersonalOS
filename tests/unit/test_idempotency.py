@@ -1,4 +1,4 @@
-﻿"""Tests for idempotency guardrails on mutating operations."""
+"""Tests for idempotency guardrails on mutating operations."""
 
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
@@ -212,9 +212,7 @@ def test_concurrent_claims_yield_single_owner(sqlite_session_factory):
 
     session = sqlite_session_factory()
     try:
-        rows = session.query(OperationModel).filter(
-            OperationModel.idempotency_key == key
-        ).count()
+        rows = session.query(OperationModel).filter(OperationModel.idempotency_key == key).count()
     finally:
         session.close()
     assert rows == 1
@@ -459,9 +457,7 @@ async def test_mutating_tool_requires_operation_store():
     """Without a store there is no dedup, so the call is refused."""
     server = _TestServer(operation_store=None)
 
-    result = await server.execute(
-        _request("do_mutate", job_id="job_1", idempotency_key=new_key())
-    )
+    result = await server.execute(_request("do_mutate", job_id="job_1", idempotency_key=new_key()))
 
     assert result.ok is False
     assert result.error.code == ToolCallErrorCode.MISSING_OPERATION_STORE
@@ -568,7 +564,9 @@ async def test_missing_required_field_is_typed_validation_error():
     """A read-only tool called without its required field fails typed, not by exception."""
     server = _TestServer(InMemoryOperationStore())
 
-    result = await server.execute(ToolCallRequest(target=ActionTarget(server="test", tool="do_read"), params={}))
+    result = await server.execute(
+        ToolCallRequest(target=ActionTarget(server="test", tool="do_read"), params={})
+    )
 
     assert result.ok is False
     assert result.error.code == ToolCallErrorCode.VALIDATION_ERROR
@@ -596,4 +594,3 @@ async def test_wrong_field_type_is_typed_validation_error():
     assert result.ok is False
     assert result.error.code == ToolCallErrorCode.VALIDATION_ERROR
     assert server.read_handler.calls == 0
-

@@ -84,8 +84,7 @@ class JobSearchExecutor:
         try:
             # Step 1: Prepare search parameters
             logger.info(
-                f"Step 1: Preparing search for keywords={job.keywords}, "
-                f"locations={job.locations}"
+                f"Step 1: Preparing search for keywords={job.keywords}, locations={job.locations}"
             )
             state = AgentState(
                 agent_id=agent_id,

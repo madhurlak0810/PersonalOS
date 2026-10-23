@@ -64,9 +64,7 @@ class StalledApplicationMonitor:
         if store is None:
             raise ValueError("StalledApplicationMonitor requires an ApplicationLifecycleStore")
         window = (
-            window
-            if window is not None
-            else timedelta(days=settings.application_stall_window_days)
+            window if window is not None else timedelta(days=settings.application_stall_window_days)
         )
         if window <= timedelta(0):
             raise ValueError("the stall window must be positive")

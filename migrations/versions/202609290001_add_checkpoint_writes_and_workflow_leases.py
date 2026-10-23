@@ -25,8 +25,8 @@ Create Date: 2026-09-29
 
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 from personalos.persistence.models import GUID
 

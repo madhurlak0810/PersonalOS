@@ -139,7 +139,9 @@ def test_permission_class_tightens_the_intent_path_too():
     with pytest.raises(ApprovalRequired):
         engine.authorize(send)
     with pytest.raises(PolicyDenied):
-        engine.authorize(ToolIntent(server="google", tool="update_credentials", requested_by="test"))
+        engine.authorize(
+            ToolIntent(server="google", tool="update_credentials", requested_by="test")
+        )
 
 
 # ----------------------------------------------------------------------
@@ -178,8 +180,12 @@ def test_evaluate_writes_a_policy_decisions_row(tmp_path):
     engine = default_policy_engine(decision_log=SqlPolicyDecisionLog(factory))
 
     engine.evaluate(
-        "user:1", workflow_id, "google.gmail_send_message", ARGS_HASH,
-        ["communications:send"], SYSTEM,
+        "user:1",
+        workflow_id,
+        "google.gmail_send_message",
+        ARGS_HASH,
+        ["communications:send"],
+        SYSTEM,
     )
     # A run that never registered a workflow is still recorded, unlinked.
     engine.evaluate("user:1", uuid4(), "google.update_credentials", ARGS_HASH, [], SYSTEM)
@@ -257,9 +263,7 @@ async def test_tool_does_not_run_when_the_decision_cannot_be_recorded():
             raise RuntimeError("database unavailable")
 
     invoker = _OrderInvoker(RecordingLog())
-    gateway = PolicyEnforcingToolGateway(
-        default_policy_engine(decision_log=_BrokenLog()), invoker
-    )
+    gateway = PolicyEnforcingToolGateway(default_policy_engine(decision_log=_BrokenLog()), invoker)
 
     with pytest.raises(RuntimeError):
         await gateway.dispatch(search_intent())

@@ -253,9 +253,7 @@ class FilesMCPServer(MCPServer):
         target = self.sandbox.resolve(path)
         data = _decode_content(content, encoding)
         if len(data) > self.max_bytes:
-            raise ValidationFailed(
-                f"content is {len(data)} bytes; the limit is {self.max_bytes}"
-            )
+            raise ValidationFailed(f"content is {len(data)} bytes; the limit is {self.max_bytes}")
 
         with self._write_lock:
             current = self._read_bytes(target, path)
@@ -303,9 +301,7 @@ class FilesMCPServer(MCPServer):
         target = self.sandbox.resolve(path)
         data = _decode_content(content, encoding)
         if len(data) > self.max_bytes:
-            raise ValidationFailed(
-                f"content is {len(data)} bytes; the limit is {self.max_bytes}"
-            )
+            raise ValidationFailed(f"content is {len(data)} bytes; the limit is {self.max_bytes}")
 
         with self._write_lock:
             current = self._read_bytes(target, path)
@@ -403,8 +399,7 @@ class FilesMCPServer(MCPServer):
                     os.link(tmp_name, target)
                 except FileExistsError as e:
                     raise StaleWrite(
-                        f"file {requested!r} was created by another writer; "
-                        f"read it before writing"
+                        f"file {requested!r} was created by another writer; read it before writing"
                     ) from e
             else:
                 os.replace(tmp_name, target)

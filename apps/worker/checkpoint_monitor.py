@@ -237,9 +237,7 @@ class PendingCheckpointMonitor:
     ) -> None:
         """Re-evaluate one checkpoint's condition and apply the outcome."""
         condition_met = await self.evaluator.is_met(checkpoint.condition)
-        outcome = decide_checkpoint(
-            checkpoint=checkpoint, condition_met=condition_met, now=now
-        )
+        outcome = decide_checkpoint(checkpoint=checkpoint, condition_met=condition_met, now=now)
 
         if outcome is CheckpointOutcome.WAIT:  # pragma: no cover - `due` filters these out
             buckets.waiting.append(checkpoint.checkpoint_id)
@@ -319,9 +317,7 @@ class PendingCheckpointMonitor:
             self.store.close(
                 checkpoint,
                 PendingCheckpointStatus.CANCELLED,
-                reason=(
-                    f"thread '{checkpoint.thread_id}' has no stored state to follow up on"
-                ),
+                reason=(f"thread '{checkpoint.thread_id}' has no stored state to follow up on"),
                 now=now,
             )
             logger.error(

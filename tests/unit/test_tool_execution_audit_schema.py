@@ -67,9 +67,7 @@ def test_schema_creates_all_three_tables_with_documented_indexes(tmp_path):
 
         for table in ("policy_decisions", "audit_events"):
             indexed_columns = {
-                column
-                for index in inspector.get_indexes(table)
-                for column in index["column_names"]
+                column for index in inspector.get_indexes(table) for column in index["column_names"]
             }
             assert "workflow_id" in indexed_columns
     finally:
@@ -119,14 +117,10 @@ def test_tool_execution_idempotency_key_is_unique(tmp_path):
     """The schema itself rejects a duplicate idempotency_key insert."""
     session, engine = _open(tmp_path / "audit.db")
     try:
-        session.add(
-            ToolExecutionModel(tool_name="jobs.apply", idempotency_key="dup-key")
-        )
+        session.add(ToolExecutionModel(tool_name="jobs.apply", idempotency_key="dup-key"))
         session.commit()
 
-        session.add(
-            ToolExecutionModel(tool_name="jobs.withdraw", idempotency_key="dup-key")
-        )
+        session.add(ToolExecutionModel(tool_name="jobs.withdraw", idempotency_key="dup-key"))
         with pytest.raises(IntegrityError):
             session.commit()
     finally:

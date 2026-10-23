@@ -162,9 +162,7 @@ class PathSandbox:
     def _refuse_denied_parts(self, requested: str, parts: tuple[str, ...]) -> None:
         for part in parts:
             if self._is_denied(part):
-                raise PathNotAllowed(
-                    f"path {requested!r} is inside a denied directory ({part!r})"
-                )
+                raise PathNotAllowed(f"path {requested!r} is inside a denied directory ({part!r})")
 
 
 __all__ = ["DEFAULT_DENIED_NAMES", "PathNotAllowed", "PathSandbox", "StaleWrite"]

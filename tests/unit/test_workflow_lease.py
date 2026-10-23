@@ -312,9 +312,7 @@ def test_the_lease_table_declares_its_uniqueness_exactly_once():
 
     from personalos.persistence.models import WorkflowLeaseModel
 
-    ddl = str(
-        CreateTable(WorkflowLeaseModel.__table__).compile(dialect=postgresql.dialect())
-    )
+    ddl = str(CreateTable(WorkflowLeaseModel.__table__).compile(dialect=postgresql.dialect()))
 
     assert ddl.count("UNIQUE") == 1, ddl
     assert "CONSTRAINT uq_workflow_leases_workflow_id UNIQUE (workflow_id)" in ddl

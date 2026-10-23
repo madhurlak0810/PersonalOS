@@ -404,8 +404,7 @@ async def chat(
         )
     )
     logger.info(
-        "queued start command %s for thread '%s' of workflow %s "
-        "(actor_id=%s, correlation_id=%s)",
+        "queued start command %s for thread '%s' of workflow %s (actor_id=%s, correlation_id=%s)",
         command.command_id,
         thread.thread_id,
         thread.workflow_id,
@@ -500,8 +499,7 @@ async def resume_workflow(
         dedupe=thread.checkpoint_id,
     )
     logger.info(
-        "queued resume command %s for thread '%s' of workflow %s "
-        "(actor_id=%s, correlation_id=%s)",
+        "queued resume command %s for thread '%s' of workflow %s (actor_id=%s, correlation_id=%s)",
         command.command_id,
         thread.thread_id,
         workflow_id,
