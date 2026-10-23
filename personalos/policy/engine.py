@@ -161,8 +161,7 @@ class PolicyEngine:
             principal, workflow_id, tool, args_hash, decision, requested_scopes
         )
         logger.info(
-            "policy %s %s (rule=%s, origin=%s, requested_by=%s, principal=%s, "
-            "workflow_id=%s): %s",
+            "policy %s %s (rule=%s, origin=%s, requested_by=%s, principal=%s, workflow_id=%s): %s",
             decision.value,
             tool,
             rule,
@@ -228,8 +227,7 @@ class PolicyEngine:
             decision=self.default_decision,
             rule="default",
             reason=(
-                f"no rule allowed '{intent.tool_ref}'; "
-                f"default is {self.default_decision.value}"
+                f"no rule allowed '{intent.tool_ref}'; default is {self.default_decision.value}"
             ),
         )
 

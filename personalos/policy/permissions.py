@@ -148,16 +148,10 @@ DEFAULT_TOOL_PERMISSIONS: Mapping[str, ToolPermission] = MappingProxyType(
         ),
         # DESTRUCTIVE
         "files.delete_file": _permission(PermissionClass.DESTRUCTIVE, {"artifacts:delete"}),
-        "files.overwrite_document": _permission(
-            PermissionClass.DESTRUCTIVE, {"artifacts:write"}
-        ),
+        "files.overwrite_document": _permission(PermissionClass.DESTRUCTIVE, {"artifacts:write"}),
         # SENSITIVE
-        "google.update_credentials": _permission(
-            PermissionClass.SENSITIVE, {"credentials:write"}
-        ),
-        "google.change_permissions": _permission(
-            PermissionClass.SENSITIVE, {"permissions:write"}
-        ),
+        "google.update_credentials": _permission(PermissionClass.SENSITIVE, {"credentials:write"}),
+        "google.change_permissions": _permission(PermissionClass.SENSITIVE, {"permissions:write"}),
     }
 )
 

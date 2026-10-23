@@ -163,10 +163,7 @@ class TestActionHash:
 
         assert action.fingerprint() != intent(payload={"dedupe_key": "other"}).fingerprint()
         assert action.fingerprint() != intent(target="https://elsewhere.test").fingerprint()
-        assert (
-            action.fingerprint()
-            != intent(kind=ActionKind.SEND_RECRUITER_MESSAGE).fingerprint()
-        )
+        assert action.fingerprint() != intent(kind=ActionKind.SEND_RECRUITER_MESSAGE).fingerprint()
 
     def test_it_ignores_who_proposed_it_and_when(self):
         """Re-proposing the same submission must hash the same, or nothing dedupes."""
@@ -195,9 +192,7 @@ class TestAuthorizeExecution:
         request = ApprovalRequest.for_intent(action, now=NOW)
 
         assert (
-            authorize_execution(
-                intent=action, request=request, decision=approved(request), now=NOW
-            )
+            authorize_execution(intent=action, request=request, decision=approved(request), now=NOW)
             is None
         )
 
@@ -215,9 +210,7 @@ class TestAuthorizeExecution:
             update={"payload": {"dedupe_key": "someone-else|role|xyz"}}
         )
 
-        refusal = authorize_execution(
-            intent=mutated, request=request, decision=decision, now=NOW
-        )
+        refusal = authorize_execution(intent=mutated, request=request, decision=decision, now=NOW)
 
         assert refusal is not None
         assert refusal.reason == RefusalReason.HASH_MISMATCH
@@ -280,17 +273,13 @@ class TestAuthorizeExecution:
         action = intent()
         request = ApprovalRequest.for_intent(action, now=NOW)
 
-        refusal = authorize_execution(
-            intent=action, request=request, decision=None, now=NOW
-        )
+        refusal = authorize_execution(intent=action, request=request, decision=None, now=NOW)
 
         assert refusal is not None and refusal.reason == RefusalReason.NOT_APPROVED
 
     def test_an_action_that_was_never_requested_is_refused(self):
         """No request means no recorded hash, so there is nothing to check against."""
-        refusal = authorize_execution(
-            intent=intent(), request=None, decision=None, now=NOW
-        )
+        refusal = authorize_execution(intent=intent(), request=None, decision=None, now=NOW)
 
         assert refusal is not None
         assert refusal.reason == RefusalReason.NO_REQUEST

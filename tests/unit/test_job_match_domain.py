@@ -142,9 +142,7 @@ class TestGroundAssessment:
     def test_a_claim_with_no_real_citation_becomes_a_gap(self, evidence_id):
         grounded = ground_assessment(
             SemanticAssessment(
-                matched_requirements=(
-                    ClaimedMatch(requirement="rust", evidence_id=evidence_id),
-                )
+                matched_requirements=(ClaimedMatch(requirement="rust", evidence_id=evidence_id),)
             ),
             fx.EVIDENCE,
         )

@@ -14,10 +14,13 @@ handlers are idempotent on the envelope's `dedupe_key`
 (`IdempotentConsumer`, or `EventRouter`'s deduplicated commands), which is the
 other half of the bargain and the one that makes an event *apply* once.
 
-A handler that raises is not retried on the spot: the row is left claimed and
-comes back when its lease expires, until `EventOutbox.max_attempts`. A
-malformed event (`ValidationFailed`) is given up on at once; delivering it
-again would fail the same way.
+A handler that raises is not retried on the spot: `EventOutbox.fail` puts the
+row back in line after an exponential, jittered backoff (or the error's
+`Retry-After`), and dead-letters it once the retry policy is spent. A
+malformed event (`ValidationFailed`) is quarantined at once; delivering it
+again would fail the same way. A dispatcher that is cancelled or killed
+mid-delivery settles nothing: the row's lease runs out and another dispatcher
+picks it up.
 
 `run` is the polling loop the worker process drives: deliver while there is
 work, sleep `idle_seconds` when there is none, stop when told.
@@ -42,7 +45,6 @@ from personalos.bootstrap import (
     build_workflow_thread_registry,
     register_event_handler_thread,
 )
-from personalos.domain.errors import ValidationFailed
 from personalos.domain.events import EventEnvelope, EventType
 from personalos.persistence.database import SessionLocal
 from personalos.persistence.event_outbox import EventOutbox
@@ -86,22 +88,16 @@ class OutboxDispatcher:
                 )
             else:
                 await handler(envelope)
-        except ValidationFailed:
-            logger.exception(
-                "event %s (%s) is malformed and will not be redelivered",
-                envelope.event_id,
-                envelope.type,
-            )
-            self.outbox.nack(claimed, permanent=True)
-            return True
-        except Exception:
+        except Exception as error:
+            # Not `BaseException`: a cancelled or killed dispatcher must leave
+            # the claim alone, for its lease to lapse and the row to come back.
             logger.exception(
                 "delivering event %s (%s) failed on attempt %d",
                 envelope.event_id,
                 envelope.type,
                 claimed.attempt,
             )
-            self.outbox.nack(claimed)
+            self.outbox.fail(claimed, error)
             return True
         self.outbox.ack(claimed)
         return True

@@ -196,18 +196,20 @@ class JobsMCPServer(MCPServer):
             for j, location in enumerate(locations):
                 for k in range(min(5, limit)):
                     job_id = f"job_{i}_{j}_{k}"
-                    results.append({
-                        "id": job_id,
-                        "title": f"{keyword} Position in {location}",
-                        "company": f"Company {k + 1}",
-                        "location": location,
-                        "job_type": job_type or "full-time",
-                        "salary": f"${60000 + k * 10000}-${80000 + k * 10000}",
-                        "posting_date": "2026-08-30",
-                        "url": f"https://example.com/jobs/{job_id}",
-                        "description_snippet": f"Looking for a {keyword} professional in {location}",
-                        "relevance_score": 0.85 - (k * 0.05),
-                    })
+                    results.append(
+                        {
+                            "id": job_id,
+                            "title": f"{keyword} Position in {location}",
+                            "company": f"Company {k + 1}",
+                            "location": location,
+                            "job_type": job_type or "full-time",
+                            "salary": f"${60000 + k * 10000}-${80000 + k * 10000}",
+                            "posting_date": "2026-08-30",
+                            "url": f"https://example.com/jobs/{job_id}",
+                            "description_snippet": f"Looking for a {keyword} professional in {location}",
+                            "relevance_score": 0.85 - (k * 0.05),
+                        }
+                    )
 
         logger.info(f"Found {len(results)} job listings")
         return {
@@ -220,9 +222,7 @@ class JobsMCPServer(MCPServer):
             },
         }
 
-    async def _scrape_job_details(
-        self, job_id: str, job_url: str | None = None
-    ) -> dict[str, Any]:
+    async def _scrape_job_details(self, job_id: str, job_url: str | None = None) -> dict[str, Any]:
         """Scrape detailed information from a job posting."""
         logger.info(f"Scraping job details: job_id={job_id}, url={job_url}")
 
@@ -290,17 +290,11 @@ class JobsMCPServer(MCPServer):
 
         # Filter by remote
         if remote_only:
-            filtered = [
-                j for j in filtered if j.get("location", "").lower() == "remote"
-            ]
+            filtered = [j for j in filtered if j.get("location", "").lower() == "remote"]
 
         # Filter by experience level
         if experience_level:
-            filtered = [
-                j
-                for j in filtered
-                if j.get("experience_level", "") == experience_level
-            ]
+            filtered = [j for j in filtered if j.get("experience_level", "") == experience_level]
 
         # Filter by salary (mock parsing)
         if salary_min or salary_max:
@@ -310,9 +304,7 @@ class JobsMCPServer(MCPServer):
             ]
 
         # Rank by relevance score
-        filtered_ranked = sorted(
-            filtered, key=lambda x: x.get("relevance_score", 0), reverse=True
-        )
+        filtered_ranked = sorted(filtered, key=lambda x: x.get("relevance_score", 0), reverse=True)
 
         logger.info(f"Filtered to {len(filtered_ranked)} jobs")
         return {

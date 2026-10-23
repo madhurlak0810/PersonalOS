@@ -134,7 +134,11 @@ def test_sensitive_keys_are_dropped_without_inspecting_the_value(redactor: Redac
     }
 
     assert redactor.redact(payload) == {
-        "headers": {"Authorization": REDACTED, "Set-Cookie": REDACTED, "Accept": "application/json"},
+        "headers": {
+            "Authorization": REDACTED,
+            "Set-Cookie": REDACTED,
+            "Accept": "application/json",
+        },
         "refresh_token": REDACTED,
         "nested": [{"client_secret": REDACTED, "keep": 1}],
     }
@@ -217,7 +221,9 @@ def test_a_registered_secret_is_removed_wherever_it_appears(redactor: Redactor):
     redactor.register_secret(OPAQUE)
 
     assert redactor.redact_text(text) == f"provider echoed {REDACTED} back in a sentence"
-    assert redactor.redact({"deep": [{"x": f"<<{OPAQUE}>>"}]}) == {"deep": [{"x": f"<<{REDACTED}>>"}]}
+    assert redactor.redact({"deep": [{"x": f"<<{OPAQUE}>>"}]}) == {
+        "deep": [{"x": f"<<{REDACTED}>>"}]
+    }
 
 
 def test_a_short_value_is_not_registered(redactor: Redactor):

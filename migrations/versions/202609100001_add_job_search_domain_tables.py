@@ -22,8 +22,8 @@ Create Date: 2026-09-10
 
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 from personalos.persistence.models import GUID
 
@@ -80,9 +80,7 @@ def upgrade() -> None:
     op.create_table(
         "applications",
         sa.Column("id", GUID(), primary_key=True),
-        sa.Column(
-            "job_posting_id", GUID(), sa.ForeignKey("job_postings.id"), nullable=False
-        ),
+        sa.Column("job_posting_id", GUID(), sa.ForeignKey("job_postings.id"), nullable=False),
         sa.Column("user_id", GUID(), sa.ForeignKey("users.id"), nullable=False),
         sa.Column(
             "candidate_profile_id",
@@ -113,9 +111,7 @@ def upgrade() -> None:
         sa.Column("applied_at", sa.DateTime(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
-        sa.UniqueConstraint(
-            "job_posting_id", "user_id", name="uq_applications_job_posting_user"
-        ),
+        sa.UniqueConstraint("job_posting_id", "user_id", name="uq_applications_job_posting_user"),
     )
     op.create_index("ix_applications_user_id", "applications", ["user_id"])
     op.create_index("ix_applications_status", "applications", ["status"])
@@ -123,9 +119,7 @@ def upgrade() -> None:
     op.create_table(
         "artifact_versions",
         sa.Column("id", GUID(), primary_key=True),
-        sa.Column(
-            "application_id", GUID(), sa.ForeignKey("applications.id"), nullable=False
-        ),
+        sa.Column("application_id", GUID(), sa.ForeignKey("applications.id"), nullable=False),
         sa.Column(
             "artifact_type",
             sa.Enum("resume", "cover_letter", name="artifact_type"),
@@ -148,9 +142,7 @@ def upgrade() -> None:
             name="uq_artifact_versions_app_type_version",
         ),
     )
-    op.create_index(
-        "ix_artifact_versions_application_id", "artifact_versions", ["application_id"]
-    )
+    op.create_index("ix_artifact_versions_application_id", "artifact_versions", ["application_id"])
 
 
 def downgrade() -> None:

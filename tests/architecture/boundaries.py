@@ -58,9 +58,7 @@ LAYERS: tuple[Layer, ...] = (
         name="policy",
         modules=("personalos.policy",),
         allows=("domain",),
-        responsibility=(
-            "decides whether an intent may run; performs no I/O and never executes"
-        ),
+        responsibility=("decides whether an intent may run; performs no I/O and never executes"),
     ),
     Layer(
         name="persistence",
@@ -100,8 +98,7 @@ LAYERS: tuple[Layer, ...] = (
         modules=("personalos.tools",),
         allows=("domain", "policy"),
         responsibility=(
-            "defines the tool boundary: the gateway that turns approved intents into "
-            "adapter calls"
+            "defines the tool boundary: the gateway that turns approved intents into adapter calls"
         ),
     ),
     Layer(
@@ -153,17 +150,14 @@ LAYERS: tuple[Layer, ...] = (
             "config",
             "secrets",
         ),
-        responsibility=(
-            "runs approved intents step by step; cannot reach a tool adapter directly"
-        ),
+        responsibility=("runs approved intents step by step; cannot reach a tool adapter directly"),
     ),
     Layer(
         name="graphs",
         modules=("personalos.graphs",),
         allows=("domain", "policy", "executor", "events", "state", "models", "config"),
         responsibility=(
-            "orchestrates which step happens next; delegates all side effects to "
-            "executors"
+            "orchestrates which step happens next; delegates all side effects to executors"
         ),
     ),
 )
@@ -362,13 +356,11 @@ def violations(scan: Scan | None = None) -> list[str]:
         for ban in FORBIDDEN_IMPORTS:
             if source.name != ban.layer:
                 continue
-            if (
-                edge.target_module == ban.module_prefix
-                or edge.target_module.startswith(ban.module_prefix + ".")
+            if edge.target_module == ban.module_prefix or edge.target_module.startswith(
+                ban.module_prefix + "."
             ):
                 problems.append(
-                    f"{edge}: '{ban.layer}' may not import '{ban.module_prefix}'. "
-                    f"{ban.reason}"
+                    f"{edge}: '{ban.layer}' may not import '{ban.module_prefix}'. {ban.reason}"
                 )
 
     return problems

@@ -540,8 +540,6 @@ def test_the_stall_window_comes_from_configuration(monkeypatch):
         monitor = StalledApplicationMonitor(store=ApplicationLifecycleStore(factory))
         assert monitor.window == timedelta(days=3)
         with pytest.raises(ValueError):
-            StalledApplicationMonitor(
-                store=ApplicationLifecycleStore(factory), window=timedelta(0)
-            )
+            StalledApplicationMonitor(store=ApplicationLifecycleStore(factory), window=timedelta(0))
     finally:
         engine.dispose()

@@ -287,8 +287,7 @@ class PendingCheckpoint(BaseModel):
         return cls(
             application_id=application_id,
             kind=kind,
-            condition=condition
-            or condition_for_kind(kind, application_id, since=created_at),
+            condition=condition or condition_for_kind(kind, application_id, since=created_at),
             reason=reason,
             thread_id=thread_id,
             workflow_id=workflow_id,
@@ -322,12 +321,9 @@ class PendingCheckpoint(BaseModel):
         """
         if status == PendingCheckpointStatus.PENDING:
             raise CheckpointContractError(
-                "closing a checkpoint requires a terminal status; PENDING is where it "
-                "started"
+                "closing a checkpoint requires a terminal status; PENDING is where it started"
             )
-        return self.model_copy(
-            update={"status": status, "closed_at": at, "closed_reason": reason}
-        )
+        return self.model_copy(update={"status": status, "closed_at": at, "closed_reason": reason})
 
 
 #: Which resolution makes each kind of follow-up unnecessary. A table rather
@@ -363,9 +359,7 @@ def condition_for_kind(
             f"'{getattr(kind, 'value', kind)}'; every durable wait must say what "
             f"would make it unnecessary"
         ) from exc
-    return CheckpointCondition(
-        kind=condition_kind, subject_id=application_id, since=since
-    )
+    return CheckpointCondition(kind=condition_kind, subject_id=application_id, since=since)
 
 
 def follow_up_dedupe_key(application_id: UUID, kind: FollowUpKind) -> str:

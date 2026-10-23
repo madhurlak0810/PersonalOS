@@ -90,7 +90,9 @@ class RecordingGateway(ToolGateway):
         self.payloads = payloads or {}
         self.intents: list[ToolIntent] = []
 
-    async def dispatch(self, intent: ToolIntent, approval: ApprovalGrant | None = None) -> ToolResult:
+    async def dispatch(
+        self, intent: ToolIntent, approval: ApprovalGrant | None = None
+    ) -> ToolResult:
         approved = self.policy.authorize(intent, approval)
         self.intents.append(intent)
         payload = self.payloads.get(intent.tool, {"success": True, "result": {}})

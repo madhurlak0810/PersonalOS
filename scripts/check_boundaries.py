@@ -47,8 +47,7 @@ def main() -> int:
     problems.extend(intent_boundary_violations(collect_facts()))
 
     print(
-        f"checked {len(scan.files)} files, {len(scan.edges)} internal imports, "
-        f"{len(LAYERS)} layers"
+        f"checked {len(scan.files)} files, {len(scan.edges)} internal imports, {len(LAYERS)} layers"
     )
 
     if problems:

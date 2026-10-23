@@ -112,7 +112,9 @@ def _broker() -> CredentialBroker:
     store = InMemorySecretStore()
     store.put(GMAIL, SecretValue(REFRESH_TOKEN))
     store.put(BOARD, SecretValue(BOARD_API_KEY))
-    return CredentialBroker(store, {"google": FakeGoogleExchanger(), "greenhouse": ApiKeyExchanger()})
+    return CredentialBroker(
+        store, {"google": FakeGoogleExchanger(), "greenhouse": ApiKeyExchanger()}
+    )
 
 
 class LeakyProviderError(RuntimeError):
@@ -194,7 +196,9 @@ def test_a_full_graph_checkpoint_contains_no_credential_value(tmp_path):
 
     # The database knows the credentials exist -- by reference.
     session = factory()
-    CredentialRepository(session).create(ref=GMAIL, kind="oauth_refresh_token", scopes=["gmail.send"])
+    CredentialRepository(session).create(
+        ref=GMAIL, kind="oauth_refresh_token", scopes=["gmail.send"]
+    )
     CredentialRepository(session).create(ref=BOARD, kind="api_key")
     session.close()
 
@@ -207,9 +211,7 @@ def test_a_full_graph_checkpoint_contains_no_credential_value(tmp_path):
         evidence_checker=fakes.FakeEvidenceChecker(),
         packet_builder=fakes.FakePacketBuilder(),
         approval_gate=fakes.FakeApprovalGate(),
-        action_executor=JournaledActionExecutor(
-            submitter, factory, workflow_id=thread.workflow_id
-        ),
+        action_executor=JournaledActionExecutor(submitter, factory, workflow_id=thread.workflow_id),
         application_store=fakes.FakeApplicationStore(),
         event_emitter=fakes.FakeEventEmitter(),
         checkpointer=saver,

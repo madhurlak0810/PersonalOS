@@ -52,6 +52,7 @@ from personalos.persistence.checkpointer import (
 )
 from personalos.persistence.database import SessionLocal
 from personalos.persistence.event_correlation import CorrelatedWaitLookup
+from personalos.persistence.event_failures import EventFailureStore
 from personalos.persistence.event_inbox import IdempotentConsumer
 from personalos.persistence.event_outbox import EventOutbox
 from personalos.persistence.evidence import SqlEvidenceIndex, SqlEvidenceSource
@@ -610,9 +611,7 @@ def build_application_transitioner(
     refused by the graph rather than proposed, since nothing could write the
     status change once the effect had run.
     """
-    return StoreApplicationTransitioner(
-        store or build_application_lifecycle_store(session_factory)
-    )
+    return StoreApplicationTransitioner(store or build_application_lifecycle_store(session_factory))
 
 
 def build_recruiter_event_store(
@@ -752,6 +751,13 @@ def build_event_outbox(session_factory: Callable[[], object] = SessionLocal) -> 
     return EventOutbox(session_factory, exclude_types=(WORKFLOW_COMMAND_EVENT,))
 
 
+def build_event_failure_store(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> EventFailureStore:
+    """Build the store the failures endpoints list and retry parked outbox events through."""
+    return EventFailureStore(session_factory, build_event_outbox(session_factory))
+
+
 def build_correlated_wait_lookup(
     session_factory: Callable[[], object] = SessionLocal,
     registry: WorkflowThreadRegistry | None = None,
@@ -814,6 +820,7 @@ __all__ = [
     "SUPERVISOR_WORKFLOW",
     "EVENT_HANDLER_WORKFLOW",
     "build_event_outbox",
+    "build_event_failure_store",
     "build_correlated_wait_lookup",
     "build_idempotent_consumer",
     "register_event_handler_thread",

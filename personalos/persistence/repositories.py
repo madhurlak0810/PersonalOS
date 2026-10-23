@@ -471,9 +471,7 @@ class JobPostingRepository:
     def get_by_id(self, job_posting_id: UUID) -> JobPostingModel | None:
         """Get a job posting by ID."""
         return (
-            self.session.query(JobPostingModel)
-            .filter(JobPostingModel.id == job_posting_id)
-            .first()
+            self.session.query(JobPostingModel).filter(JobPostingModel.id == job_posting_id).first()
         )
 
     def get_by_dedupe_key(self, dedupe_key: str) -> JobPostingModel | None:
@@ -854,9 +852,7 @@ class ToolExecutionRepository:
         self._finish(commit)
         return db_execution
 
-    def fail(
-        self, idempotency_key: str, error: str, *, commit: bool = True
-    ) -> ToolExecutionModel:
+    def fail(self, idempotency_key: str, error: str, *, commit: bool = True) -> ToolExecutionModel:
         """Record a failed outcome."""
         db_execution = self._require_row(idempotency_key)
         db_execution.status = ToolExecutionStatus.FAILED.value
@@ -1232,14 +1228,19 @@ class OutboxEventRepository:
         for a general dispatcher sharing the table with a dedicated consumer.
 
         `reclaim_after` makes IN_PROGRESS rows whose claim is older than that
-        claimable too (see the class docstring). Each claim stamps
-        `claimed_at` and increments `attempts`.
+        claimable too (see the class docstring). A PENDING row whose
+        `available_at` is still in the future is backing off after a failed
+        delivery and is not claimable yet. Each claim stamps `claimed_at` and
+        increments `attempts`.
 
         The caller owns the returned row's dispatch and must follow up with
         `mark_dispatched` or `mark_failed`.
         """
         now = now or datetime.utcnow()
-        claimable = OutboxEventModel.status == OutboxEventStatus.PENDING.value
+        claimable = and_(
+            OutboxEventModel.status == OutboxEventStatus.PENDING.value,
+            or_(OutboxEventModel.available_at.is_(None), OutboxEventModel.available_at <= now),
+        )
         if reclaim_after is not None:
             claimable = or_(
                 claimable,
@@ -1327,9 +1328,11 @@ class OutboxEventRepository:
         )
 
     def _require_row(self, outbox_event_id: UUID) -> OutboxEventModel:
-        db_event = self.session.query(OutboxEventModel).filter(
-            OutboxEventModel.id == outbox_event_id
-        ).first()
+        db_event = (
+            self.session.query(OutboxEventModel)
+            .filter(OutboxEventModel.id == outbox_event_id)
+            .first()
+        )
         if not db_event:
             raise ValueError(f"Outbox event {outbox_event_id} not found")
         return db_event
@@ -1505,13 +1508,10 @@ class EvidenceChunkRepository:
         if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
             distance = EvidenceChunkModel.embedding.cosine_distance(query_embedding)
             rows = query.add_columns(distance).order_by(distance).limit(top_k).all()
-            return [
-                (chunk, 1 - dist) for chunk, dist in rows if (1 - dist) >= min_similarity
-            ]
+            return [(chunk, 1 - dist) for chunk, dist in rows if (1 - dist) >= min_similarity]
 
         scored = [
-            (chunk, _cosine_similarity(query_embedding, chunk.embedding))
-            for chunk in query.all()
+            (chunk, _cosine_similarity(query_embedding, chunk.embedding)) for chunk in query.all()
         ]
         scored = [pair for pair in scored if pair[1] >= min_similarity]
         scored.sort(key=lambda pair: pair[1], reverse=True)
@@ -1575,9 +1575,7 @@ class JobPostingEmbeddingRepository:
         if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
             distance = JobPostingEmbeddingModel.embedding.cosine_distance(query_embedding)
             rows = query.add_columns(distance).order_by(distance).limit(top_k).all()
-            return [
-                (posting, 1 - dist) for posting, dist in rows if (1 - dist) >= min_similarity
-            ]
+            return [(posting, 1 - dist) for posting, dist in rows if (1 - dist) >= min_similarity]
 
         scored = [
             (posting, _cosine_similarity(query_embedding, posting.embedding))
@@ -1638,9 +1636,7 @@ class MessageEmbeddingRepository:
         if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
             distance = MessageEmbeddingModel.embedding.cosine_distance(query_embedding)
             rows = query.add_columns(distance).order_by(distance).limit(top_k).all()
-            return [
-                (message, 1 - dist) for message, dist in rows if (1 - dist) >= min_similarity
-            ]
+            return [(message, 1 - dist) for message, dist in rows if (1 - dist) >= min_similarity]
 
         scored = [
             (message, _cosine_similarity(query_embedding, message.embedding))

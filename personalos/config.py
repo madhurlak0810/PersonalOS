@@ -102,7 +102,7 @@ class Settings(BaseSettings):
         """
         prefix = "postgresql://"
         if value.startswith(prefix):
-            return f"postgresql+{POSTGRES_DRIVER}://{value[len(prefix):]}"
+            return f"postgresql+{POSTGRES_DRIVER}://{value[len(prefix) :]}"
         return value
 
     class Config:

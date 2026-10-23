@@ -207,9 +207,9 @@ async def test_retrying_a_succeeded_operation_returns_the_original_receipt(tmp_p
     # A restarted process: new executor, new sessions, and a re-proposed intent
     # with a new action id but the same idempotency key.
     retry = _intent()
-    second = await build_tool_executor(
-        provider, session_factory(tmp_path / "exec.db")
-    ).execute(retry, _decision(retry))
+    second = await build_tool_executor(provider, session_factory(tmp_path / "exec.db")).execute(
+        retry, _decision(retry)
+    )
 
     assert len(provider.calls) == 1, "the application was submitted twice"
     assert second.ok is True

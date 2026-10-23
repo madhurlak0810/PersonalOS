@@ -172,9 +172,7 @@ async def test_an_unanswered_approval_pauses_the_run_at_the_interrupt():
     assert ports["event_emitter"].events == []
     assert final.get("application") is None
     assert final.get("approvals") is None
-    assert [interrupt.value["stage"] for interrupt in final["__interrupt__"]] == [
-        STAGE_SUBMISSION
-    ]
+    assert [interrupt.value["stage"] for interrupt in final["__interrupt__"]] == [STAGE_SUBMISSION]
 
 
 async def test_an_approval_bound_to_a_different_payload_does_not_authorize_the_action():

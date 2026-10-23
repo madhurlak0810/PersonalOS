@@ -113,7 +113,9 @@ class JobModel(Base):
     id = Column(GUID(), primary_key=True, default=uuid4)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
-    status = Column(Enum("pending", "running", "completed", "failed", "cancelled", name="job_status"))
+    status = Column(
+        Enum("pending", "running", "completed", "failed", "cancelled", name="job_status")
+    )
     keywords = Column(JSON, nullable=False, default=[])
     locations = Column(JSON, nullable=False, default=[])
     salary_min = Column(String, nullable=True)
@@ -448,7 +450,10 @@ class CheckpointModel(Base):
         Index("ix_checkpoints_workflow_id", "workflow_id"),
         Index("ix_checkpoints_thread_id", "thread_id"),
         UniqueConstraint(
-            "thread_id", "checkpoint_ns", "checkpoint_id", name="uq_checkpoints_thread_ns_checkpoint"
+            "thread_id",
+            "checkpoint_ns",
+            "checkpoint_id",
+            name="uq_checkpoints_thread_ns_checkpoint",
         ),
     )
 
@@ -684,9 +689,7 @@ class PendingCheckpointModel(Base):
             "workflow_id": str(self.workflow_id) if self.workflow_id else None,
             "condition_kind": self.condition_kind,
             "condition_subject_id": str(self.condition_subject_id),
-            "condition_since": (
-                self.condition_since.isoformat() if self.condition_since else None
-            ),
+            "condition_since": (self.condition_since.isoformat() if self.condition_since else None),
             "condition_params": self.condition_params,
             "trigger_at": self.trigger_at.isoformat(),
             "expires_at": self.expires_at.isoformat(),
@@ -839,9 +842,7 @@ class CandidateProfileModel(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (
-        UniqueConstraint(
-            "user_id", "profile_version", name="uq_candidate_profiles_user_version"
-        ),
+        UniqueConstraint("user_id", "profile_version", name="uq_candidate_profiles_user_version"),
         Index("ix_candidate_profiles_user_id", "user_id"),
     )
 
@@ -908,9 +909,7 @@ class ApplicationModel(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (
-        UniqueConstraint(
-            "job_posting_id", "user_id", name="uq_applications_job_posting_user"
-        ),
+        UniqueConstraint("job_posting_id", "user_id", name="uq_applications_job_posting_user"),
         Index("ix_applications_user_id", "user_id"),
         Index("ix_applications_status", "status"),
         # The stall check's index: "still in play, quiet the longest first".
@@ -952,9 +951,7 @@ class ArtifactVersionModel(Base):
 
     id = Column(GUID(), primary_key=True, default=uuid4)
     application_id = Column(GUID(), ForeignKey("applications.id"), nullable=False)
-    artifact_type = Column(
-        Enum("resume", "cover_letter", name="artifact_type"), nullable=False
-    )
+    artifact_type = Column(Enum("resume", "cover_letter", name="artifact_type"), nullable=False)
     version = Column(Integer, nullable=False, default=1)
     doc_id = Column(String(255), nullable=True)
     content = Column(Text, nullable=True)
@@ -1063,9 +1060,7 @@ class CommitmentModel(Base):
     __tablename__ = "commitments"
 
     id = Column(GUID(), primary_key=True, default=uuid4)
-    communication_event_id = Column(
-        GUID(), ForeignKey("communication_events.id"), nullable=False
-    )
+    communication_event_id = Column(GUID(), ForeignKey("communication_events.id"), nullable=False)
     application_id = Column(GUID(), ForeignKey("applications.id"), nullable=False)
     actor = Column(Enum("user", "external_person", name="commitment_actor"), nullable=False)
     action = Column(Text, nullable=False)
@@ -1155,9 +1150,7 @@ class ToolExecutionModel(Base):
             "idempotency_key": self.idempotency_key,
             "status": self.status,
             "request_fingerprint": self.request_fingerprint,
-            "policy_decision_id": str(self.policy_decision_id)
-            if self.policy_decision_id
-            else None,
+            "policy_decision_id": str(self.policy_decision_id) if self.policy_decision_id else None,
             "approval_ref": self.approval_ref,
             "approved_by": self.approved_by,
             "attempts": self.attempts,
@@ -1250,9 +1243,7 @@ class AuditEventModel(Base):
             "action": self.action,
             "target_ref": self.target_ref,
             "policy_decision": self.policy_decision,
-            "policy_decision_id": str(self.policy_decision_id)
-            if self.policy_decision_id
-            else None,
+            "policy_decision_id": str(self.policy_decision_id) if self.policy_decision_id else None,
             "operation_id": str(self.operation_id) if self.operation_id else None,
             "approval_ref": self.approval_ref,
             "result": self.result,
@@ -1300,7 +1291,9 @@ class CredentialModel(Base):
 
     __table_args__ = (
         UniqueConstraint("credential_ref", name="uq_credentials_credential_ref"),
-        CheckConstraint("substr(credential_ref, 1, 7) = 'cred://'", name="ck_credentials_ref_is_reference"),
+        CheckConstraint(
+            "substr(credential_ref, 1, 7) = 'cred://'", name="ck_credentials_ref_is_reference"
+        ),
         Index("ix_credentials_user_id", "user_id"),
     )
 
@@ -1320,7 +1313,6 @@ class CredentialModel(Base):
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
-
 
 
 class IntegrationHealthModel(Base):
@@ -1359,6 +1351,7 @@ class IntegrationHealthModel(Base):
             "degraded_at": self.degraded_at.isoformat() if self.degraded_at else None,
             "updated_at": self.updated_at.isoformat(),
         }
+
 
 # --- Transactional outbox, event log, and projections ------------------------
 #
@@ -1399,7 +1392,15 @@ class OutboxEventModel(Base):
     payload_json = Column(JSON, nullable=False, default={})
     dedupe_key = Column(String(255), nullable=True, unique=True)
     status = Column(
-        Enum("pending", "in_progress", "dispatched", "failed", name="outbox_event_status"),
+        Enum(
+            "pending",
+            "in_progress",
+            "dispatched",
+            "failed",
+            "dead_letter",
+            "quarantined",
+            name="outbox_event_status",
+        ),
         nullable=False,
         default="pending",
     )
@@ -1411,8 +1412,24 @@ class OutboxEventModel(Base):
     # between claiming and settling) and the row is handed out again.
     claimed_at = Column(DateTime, nullable=True)
     attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    # Not claimable before this time: the backoff after a failed delivery.
+    # NULL means at once.
+    available_at = Column(DateTime, nullable=True)
+    # The last delivery failure, redacted and truncated; kept through a
+    # successful retry so the history is not lost with the row's status.
+    last_error = Column(Text, nullable=True)
+    # When the row was dead-lettered or quarantined.
+    failed_at = Column(DateTime, nullable=True)
+    # The workflow a dead-lettered event belongs to, when it could be told,
+    # so `GET /v1/workflows/{id}/failures` can list it. Only ever set to a
+    # registered workflow, but not a foreign key: it is a pointer for that
+    # view, and must not stop a workflow's rows from being cleaned up.
+    workflow_id = Column(GUID(), nullable=True)
 
-    __table_args__ = (Index("ix_outbox_events_status", "status"),)
+    __table_args__ = (
+        Index("ix_outbox_events_status", "status"),
+        Index("ix_outbox_events_workflow_id", "workflow_id"),
+    )
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -1426,6 +1443,10 @@ class OutboxEventModel(Base):
             "dispatched_at": self.dispatched_at.isoformat() if self.dispatched_at else None,
             "claimed_at": self.claimed_at.isoformat() if self.claimed_at else None,
             "attempts": self.attempts,
+            "available_at": self.available_at.isoformat() if self.available_at else None,
+            "last_error": self.last_error,
+            "failed_at": self.failed_at.isoformat() if self.failed_at else None,
+            "workflow_id": str(self.workflow_id) if self.workflow_id else None,
         }
 
 
@@ -1451,9 +1472,7 @@ class ConsumedEventModel(Base):
     consumed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (
-        UniqueConstraint(
-            "consumer", "dedupe_key", name="uq_consumed_events_consumer_dedupe_key"
-        ),
+        UniqueConstraint("consumer", "dedupe_key", name="uq_consumed_events_consumer_dedupe_key"),
     )
 
 

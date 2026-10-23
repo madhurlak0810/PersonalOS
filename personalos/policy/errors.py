@@ -39,8 +39,7 @@ class PolicyDenied(PolicyError):
     def __init__(self, decision: "PolicyDecision"):
         self.decision = decision
         super().__init__(
-            f"policy denied intent '{decision.tool_ref}' "
-            f"(rule={decision.rule}): {decision.reason}",
+            f"policy denied intent '{decision.tool_ref}' (rule={decision.rule}): {decision.reason}",
             details={"rule": decision.rule, "tool_ref": decision.tool_ref},
         )
 

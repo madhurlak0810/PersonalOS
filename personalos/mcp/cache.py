@@ -134,8 +134,8 @@ async def cached(cache: Cache | None = None, ttl: int = 3600) -> Callable:
                 return cached_value
 
             # Execute function
-            result = await func(*args, **kwargs) if hasattr(func, "__await__") else func(
-                *args, **kwargs
+            result = (
+                await func(*args, **kwargs) if hasattr(func, "__await__") else func(*args, **kwargs)
             )
 
             # Store in cache

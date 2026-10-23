@@ -98,10 +98,15 @@ class PersonalOSError(Exception):
         *,
         context_id: UUID | None = None,
         details: dict[str, Any] | None = None,
+        retry_after: float | None = None,
     ):
         self.message = message or self.default_message
         self.context_id = context_id or uuid4()
         self.details = details or {}
+        #: Seconds the provider asked to be left alone for (its `Retry-After`),
+        #: when it said. An automatic retry never comes sooner; see
+        #: `personalos.domain.retry_policy`.
+        self.retry_after = retry_after
         super().__init__(self.message)
 
     def to_envelope(self) -> dict[str, str]:

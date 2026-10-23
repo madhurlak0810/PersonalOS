@@ -995,17 +995,11 @@ schema = ToolSchema(
     parameters={
         "type": "object",
         "properties": {
-            "keywords": {
-                "type": "array",
-                "items": {"type": "string"}
-            },
-            "locations": {
-                "type": "array",
-                "items": {"type": "string"}
-            }
-        }
+            "keywords": {"type": "array", "items": {"type": "string"}},
+            "locations": {"type": "array", "items": {"type": "string"}},
+        },
     },
-    required=["keywords", "locations"]
+    required=["keywords", "locations"],
 )
 ```
 
@@ -1046,10 +1040,7 @@ manager.register_server(JobsMCPServer())
 
 # Execute tool
 result = await manager.execute_tool(
-    tool_name="search_jobs",
-    server_name="jobs",
-    keywords=["Python"],
-    locations=["Remote"]
+    tool_name="search_jobs", server_name="jobs", keywords=["Python"], locations=["Remote"]
 )
 
 # Get all tools
@@ -1070,7 +1061,7 @@ result = await manager.execute_tool(
     keywords=["Python", "FastAPI"],
     locations=["Remote", "NYC"],
     job_type="full-time",
-    limit=50
+    limit=50,
 )
 
 # Response format:
@@ -1086,10 +1077,10 @@ result = await manager.execute_tool(
                 "location": "Remote",
                 "salary": "$120,000 - $160,000",
                 "url": "https://example.com/jobs/job_123",
-                "relevance_score": 0.95
+                "relevance_score": 0.95,
             }
-        ]
-    }
+        ],
+    },
 }
 ```
 
@@ -1097,10 +1088,7 @@ result = await manager.execute_tool(
 
 ```python
 result = await manager.execute_tool(
-    "scrape_job_details",
-    "jobs",
-    job_id="job_123",
-    job_url="https://example.com/jobs/job_123"
+    "scrape_job_details", "jobs", job_id="job_123", job_url="https://example.com/jobs/job_123"
 )
 
 # Response format:
@@ -1114,8 +1102,8 @@ result = await manager.execute_tool(
         "benefits": ["Health insurance", "Remote", "401k"],
         "skills": ["Python", "FastAPI", "Docker"],
         "experience_level": "senior",
-        "difficulty_match": 0.92
-    }
+        "difficulty_match": 0.92,
+    },
 }
 ```
 
@@ -1129,18 +1117,13 @@ result = await manager.execute_tool(
     salary_min=100000,
     salary_max=150000,
     experience_level="senior",
-    remote_only=True
+    remote_only=True,
 )
 
 # Response format:
 {
     "success": true,
-    "result": {
-        "total_filtered": 15,
-        "total_input": 50,
-        "jobs": [...],
-        "filters_applied": {...}
-    }
+    "result": {"total_filtered": 15, "total_input": 50, "jobs": [...], "filters_applied": {...}},
 }
 ```
 
@@ -1151,7 +1134,7 @@ result = await manager.execute_tool(
     "save_favorite_job",
     "jobs",
     job_id="job_123",
-    notes="Interesting opportunity with good benefits"
+    notes="Interesting opportunity with good benefits",
 )
 
 # Response format:
@@ -1160,8 +1143,8 @@ result = await manager.execute_tool(
     "result": {
         "job_id": "job_123",
         "notes": "Interesting opportunity with good benefits",
-        "saved_at": "2026-08-30T12:00:00Z"
-    }
+        "saved_at": "2026-08-30T12:00:00Z",
+    },
 }
 ```
 
@@ -1172,6 +1155,7 @@ result = await manager.execute_tool(
 ```python
 from personalos.mcp.base import MCPServer, ToolSchema
 from personalos.mcp.manager import get_mcp_manager
+
 
 class CustomMCPServer(MCPServer):
     def __init__(self):
@@ -1186,17 +1170,11 @@ class CustomMCPServer(MCPServer):
             parameters={
                 "type": "object",
                 "properties": {
-                    "param1": {
-                        "type": "string",
-                        "description": "First parameter"
-                    },
-                    "param2": {
-                        "type": "integer",
-                        "description": "Second parameter"
-                    }
-                }
+                    "param1": {"type": "string", "description": "First parameter"},
+                    "param2": {"type": "integer", "description": "Second parameter"},
+                },
             },
-            required=["param1"]
+            required=["param1"],
         )
         self.register_tool(tool_schema, self._my_tool)
 
@@ -1204,6 +1182,7 @@ class CustomMCPServer(MCPServer):
         """Implement tool logic."""
         # Your implementation here
         return {"result": f"Processed {param1} with {param2}"}
+
 
 # Register globally
 manager = get_mcp_manager()
@@ -1218,38 +1197,31 @@ The `JobSearchExecutor` uses MCP servers internally:
 async def run_job_search(self, job: Job):
     # Step 1: Prepare parameters
     # ...
-    
+
     # Step 2: Search via MCP
     search_result = await self.mcp_manager.execute_tool(
-        "search_jobs",
-        "jobs",
-        keywords=job.keywords,
-        locations=job.locations,
-        job_type=job.job_type
+        "search_jobs", "jobs", keywords=job.keywords, locations=job.locations, job_type=job.job_type
     )
-    
+
     # Step 3: Scrape details for top 20 (parallel)
     scrape_tasks = []
     for job_item in search_result["result"]["jobs"][:20]:
         task = self.mcp_manager.execute_tool(
-            "scrape_job_details",
-            "jobs",
-            job_id=job_item["id"],
-            job_url=job_item["url"]
+            "scrape_job_details", "jobs", job_id=job_item["id"], job_url=job_item["url"]
         )
         scrape_tasks.append(task)
-    
+
     detailed_results = await asyncio.gather(*scrape_tasks)
-    
+
     # Step 4: Filter via MCP
     filtered = await self.mcp_manager.execute_tool(
         "filter_jobs",
         "jobs",
         jobs=[r["result"] for r in detailed_results],
         salary_min=job.salary_min,
-        salary_max=job.salary_max
+        salary_max=job.salary_max,
     )
-    
+
     return filtered[:10]
 ```
 
@@ -1310,11 +1282,11 @@ schema = ToolSchema(
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 100,
-                "description": "Parameter description"
+                "description": "Parameter description",
             }
-        }
+        },
     },
-    required=["param"]
+    required=["param"],
 )
 ```
 

@@ -136,9 +136,7 @@ class PendingCheckpointStore:
         """
         if status == PendingCheckpointStatus.PENDING:
             raise ValueError("close requires a terminal status; 'pending' is not one")
-        checkpoint_id = (
-            checkpoint if isinstance(checkpoint, UUID) else checkpoint.checkpoint_id
-        )
+        checkpoint_id = checkpoint if isinstance(checkpoint, UUID) else checkpoint.checkpoint_id
         now = now or self.clock()
         session = self.session_factory()
         try:
@@ -262,9 +260,7 @@ class PendingCheckpointStore:
         return [
             checkpoint_id
             for checkpoint_id in candidates
-            if self.close(
-                checkpoint_id, PendingCheckpointStatus.RESOLVED, reason=reason, now=now
-            )
+            if self.close(checkpoint_id, PendingCheckpointStatus.RESOLVED, reason=reason, now=now)
         ]
 
     # ------------------------------------------------------------------

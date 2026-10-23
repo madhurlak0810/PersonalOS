@@ -69,7 +69,9 @@ from tests.fixtures import job_search_fakes as fakes
 from tests.fixtures.durable_workflow import session_factory
 
 OLD_RESUME = "# Resume\n\n- Built Python APIs at Acme Corp\n- Operated Kafka pipelines\n"
-NEW_RESUME = "# Resume\n\n- Built Python APIs on Postgres at Acme Corp\n- Operated Kafka pipelines\n"
+NEW_RESUME = (
+    "# Resume\n\n- Built Python APIs on Postgres at Acme Corp\n- Operated Kafka pipelines\n"
+)
 
 
 class SpyProvider:
@@ -128,9 +130,7 @@ def _draft_action(kind: ActionKind) -> ActionIntent:
 # --- Send / submit -----------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "kind", [ActionKind.SUBMIT_APPLICATION, ActionKind.SEND_RECRUITER_MESSAGE]
-)
+@pytest.mark.parametrize("kind", [ActionKind.SUBMIT_APPLICATION, ActionKind.SEND_RECRUITER_MESSAGE])
 @pytest.mark.parametrize("answer", ["none", "pending", "rejected"])
 async def test_sending_or_submitting_a_draft_without_an_approval_is_denied_by_policy(
     tmp_path, kind, answer
@@ -166,7 +166,12 @@ def test_no_origin_gets_an_external_write_or_overwrite_unattended(tool):
 
     for origin in IntentOrigin:
         verdict = engine.evaluate(
-            "graph:job_search", None, tool, "0" * 64, scopes, Provenance(origin=origin, requested_by="t")
+            "graph:job_search",
+            None,
+            tool,
+            "0" * 64,
+            scopes,
+            Provenance(origin=origin, requested_by="t"),
         )
         assert verdict == Decision.REQUIRE_APPROVAL
 
@@ -390,7 +395,12 @@ def test_auto_approving_draft_writes_never_extends_to_replacing_a_file():
         return ToolIntent(
             server="files",
             tool="write_file",
-            arguments={"path": "draft.md", "content": "x", "idempotency_key": "write-1234", **extra},
+            arguments={
+                "path": "draft.md",
+                "content": "x",
+                "idempotency_key": "write-1234",
+                **extra,
+            },
             mutating=True,
             requested_by="test:write",
         )

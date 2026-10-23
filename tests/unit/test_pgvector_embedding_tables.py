@@ -63,9 +63,7 @@ def _make_application(session):
         description_hash="a" * 64,
         dedupe_key=f"acme:staff-engineer:{id(session)}",
     )
-    application = ApplicationRepository(session).create(
-        job_posting_id=posting.id, user_id=user.id
-    )
+    application = ApplicationRepository(session).create(job_posting_id=posting.id, user_id=user.id)
     return user, posting, application
 
 

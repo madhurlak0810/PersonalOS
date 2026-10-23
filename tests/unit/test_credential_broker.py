@@ -131,7 +131,9 @@ def test_secret_values_compare_by_content_and_are_unhashable():
 
 
 def test_an_access_token_shows_its_provenance_but_not_its_value():
-    token = AccessToken(GMAIL, SecretValue(ACCESS_TOKEN), NOW + timedelta(minutes=5), ("gmail.send",))
+    token = AccessToken(
+        GMAIL, SecretValue(ACCESS_TOKEN), NOW + timedelta(minutes=5), ("gmail.send",)
+    )
 
     assert ACCESS_TOKEN not in repr(token)
     assert "cred://google/alice@example.com" in repr(token) or "alice@example.com" in repr(token)
@@ -169,7 +171,9 @@ def test_the_keyring_store_files_secrets_by_reference():
     assert store.get(GMAIL) is None
     store.put(GMAIL, SecretValue(REFRESH_TOKEN))
 
-    assert backend.entries == {("personalos-test", "cred://google/alice@example.com"): REFRESH_TOKEN}
+    assert backend.entries == {
+        ("personalos-test", "cred://google/alice@example.com"): REFRESH_TOKEN
+    }
     assert store.get(GMAIL).reveal() == REFRESH_TOKEN
 
     store.delete(GMAIL)

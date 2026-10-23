@@ -256,9 +256,7 @@ class IdempotencyGuard:
 
         if not claimed:
             if record.is_replayable:
-                logger.info(
-                    f"Replaying prior result for '{operation}' (idempotency_key={key})"
-                )
+                logger.info(f"Replaying prior result for '{operation}' (idempotency_key={key})")
                 return record.result, True
             raise OperationInProgress(
                 f"operation '{operation}' with idempotency_key '{key}' is already "

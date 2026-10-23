@@ -23,6 +23,17 @@ the last case is the only one, which is the rule
 `personalos.persistence.action_journal` documents: a duplicate application
 cannot be taken back, a missed one can be resubmitted deliberately.
 
+**A failed call is retried only as far as its retry policy allows**
+(`personalos.executor.retry.retry_policy_for`). Sends and submissions get no
+blind retry at all: one that timed out may have landed. A calendar write gets
+one, and only after the provider has confirmed the failed attempt did not take
+effect -- if it says the write landed, that receipt is recorded instead. A
+retry backs off exponentially with jitter and honors a `Retry-After`. Each
+retry is a fresh claim on the same `tool_executions` row, so `attempts` counts
+provider calls. Once the budget is spent the failure is recorded together with
+a `tool.operation.failed` event, so recovery and escalation are driven by the
+outbox rather than by whoever happened to catch the exception.
+
 An `in_progress` row found on entry is treated as an abandoned attempt, not a
 live one. That rests on the workflow lease (`personalos.persistence.leases`),
 which keeps two workers off the same run.
@@ -36,18 +47,24 @@ This satisfies the graph's `ActionExecutor` port, so it is bound in the
 composition root in place of the bare provider adapter it wraps.
 """
 
+import asyncio
 import logging
-from collections.abc import Mapping
+import random
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
 from typing import Protocol
 from uuid import UUID
 
-from personalos.domain.errors import IdempotencyConflict
+from personalos.domain.errors import ErrorCode, FailureClass, IdempotencyConflict, PersonalOSError
+from personalos.domain.events import EventType
+from personalos.domain.failures import describe_exception
 from personalos.domain.job_search import ActionIntent, ActionKind, ActionReceipt, ApprovalDecision
 from personalos.domain.models import ToolExecutionStatus
 from personalos.domain.redaction import redact
+from personalos.domain.retry_policy import RetryPolicy, retry_after_seconds
+from personalos.executor.retry import is_retryable, retry_policy_for
 from personalos.persistence.execution_ledger import (
     AuditEntry,
     DomainEvent,
@@ -135,8 +152,15 @@ class ToolExecutor:
         *,
         reconciler: ProviderReconciler | None = None,
         action_tools: Mapping[ActionKind, str] = ACTION_TOOLS,
+        retry_policies: Callable[[str], RetryPolicy] = retry_policy_for,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        rand: Callable[[], float] = random.random,
     ):
-        """Wrap `inner`, authorizing through `policy` and recording through `ledger`."""
+        """Wrap `inner`, authorizing through `policy` and recording through `ledger`.
+
+        `retry_policies` maps a tool to its automatic-retry budget; `sleep` and
+        `rand` are the backoff's clock and jitter.
+        """
         if inner is None:
             raise ValueError("ToolExecutor requires an inner ActionExecutor")
         if policy is None:
@@ -149,6 +173,9 @@ class ToolExecutor:
         self.ledger = ledger
         self.reconciler = reconciler
         self.action_tools = action_tools
+        self.retry_policies = retry_policies
+        self.sleep = sleep
+        self.rand = rand
 
     @property
     def workflow_id(self) -> UUID | None:
@@ -173,7 +200,7 @@ class ToolExecutor:
             authorization=authorization,
         )
         if claimed:
-            return await self._run(intent, decision, tool)
+            return await self._run(intent, decision, tool, authorization)
 
         stored_fingerprint = record.get("request_fingerprint")
         if stored_fingerprint and stored_fingerprint != intent.fingerprint():
@@ -229,20 +256,151 @@ class ToolExecutor:
             approved_by=decision.decided_by if approved else None,
         )
 
-    async def _run(self, intent: ActionIntent, decision: ApprovalDecision, tool: str):
-        """Call the provider for a claimed key and commit what came back."""
+    async def _run(
+        self,
+        intent: ActionIntent,
+        decision: ApprovalDecision,
+        tool: str,
+        authorization: ExecutionAuthorization,
+        *,
+        attempt: int = 1,
+    ) -> ActionReceipt:
+        """Call the provider for a claimed key, retrying as policy allows, and commit the outcome.
+
+        `attempt` is which attempt at the action this call is: a re-execution
+        after reconciliation has already used the first.
+        """
         audit = self._audit_entry(intent, tool)
-        try:
-            receipt = await self.inner.execute(intent, decision)
-        except Exception as exc:
-            self.ledger.record_failure(intent.idempotency_key, str(exc), audit=audit)
-            raise
+        policy = self.retry_policies(tool)
+        while True:
+            try:
+                receipt = await self.inner.execute(intent, decision)
+                break
+            except Exception as exc:
+                if not (policy.allows_retry(attempt) and is_retryable(exc)):
+                    self._record_failure(intent, tool, exc, audit, policy)
+                    raise
+                settled = await self._prepare_retry(intent, tool, authorization, policy, exc)
+                if isinstance(settled, ActionReceipt):
+                    return settled
+                if not settled:
+                    self._record_failure(intent, tool, exc, audit, policy)
+                    raise
+                delay = policy.delay(attempt, retry_after=retry_after_seconds(exc), rand=self.rand)
+                logger.warning(
+                    "action %s (%s) failed on attempt %d of %d; retrying in %.2fs: %s",
+                    intent.action_id,
+                    intent.kind.value,
+                    attempt,
+                    policy.max_attempts,
+                    delay,
+                    describe_exception(exc),
+                )
+                await self.sleep(delay)
+                if not self.ledger.reclaim(intent.idempotency_key, authorization):
+                    # Another attempt took the key over while this one waited;
+                    # its outcome, not this one's, is the action's.
+                    raise
+                attempt += 1
 
         # Redacted once, here, so the stored receipt and the returned one are
         # the same value: a replay must hand back exactly what this attempt did.
         receipt = redact(receipt)
         self._record(intent, receipt, audit)
         return receipt
+
+    async def _prepare_retry(
+        self,
+        intent: ActionIntent,
+        tool: str,
+        authorization: ExecutionAuthorization,
+        policy: RetryPolicy,
+        error: Exception,
+    ) -> ActionReceipt | bool:
+        """Make a failed attempt safe to repeat. True to retry, False not to, or the receipt.
+
+        The row goes to `unknown` -- the failed call may have landed -- which
+        is what `reclaim` takes back. A policy that requires reconciliation
+        asks the provider first: a write it reports applied is recorded and
+        returned, and only one it positively reports not applied is retried.
+        """
+        self.ledger.mark_unknown(intent.idempotency_key)
+        if not policy.requires_reconciliation:
+            return True
+        if self.reconciler is None:
+            logger.warning(
+                "action %s (%s) failed and has no reconciler to confirm it did not land; "
+                "not retrying: %s",
+                intent.action_id,
+                intent.kind.value,
+                describe_exception(error),
+            )
+            return False
+        try:
+            reconciliation = await self.reconciler.reconcile(intent)
+        except Exception:
+            logger.exception(
+                "reconciling failed action %s (%s) before its retry failed; not retrying",
+                intent.action_id,
+                intent.kind.value,
+            )
+            return False
+        if reconciliation.outcome == ReconcileOutcome.APPLIED and reconciliation.receipt:
+            receipt = redact(
+                reconciliation.receipt.model_copy(update={"action_id": intent.action_id})
+            )
+            logger.info(
+                "action %s (%s) failed but was found at the provider; recording its receipt "
+                "instead of retrying",
+                intent.action_id,
+                intent.kind.value,
+            )
+            self._record(intent, receipt, self._audit_entry(intent, tool))
+            return receipt
+        if reconciliation.outcome == ReconcileOutcome.NOT_APPLIED:
+            return True
+        logger.warning(
+            "action %s (%s) failed and the provider could not confirm either way; not retrying",
+            intent.action_id,
+            intent.kind.value,
+        )
+        return False
+
+    def _record_failure(
+        self,
+        intent: ActionIntent,
+        tool: str,
+        error: Exception,
+        audit: AuditEntry,
+        policy: RetryPolicy,
+    ) -> None:
+        """Commit the failure with its `tool.operation.failed` event."""
+        if isinstance(error, PersonalOSError):
+            code = error.code.value
+            failure_class = (error.failure_class or FailureClass.UNCLASSIFIED).value
+        else:
+            code = ErrorCode.INTERNAL.value
+            failure_class = FailureClass.UNCLASSIFIED.value
+        self.ledger.record_failure(
+            intent.idempotency_key,
+            str(error),
+            audit=audit,
+            event=DomainEvent(
+                type=EventType.TOOL_OPERATION_FAILED,
+                payload={
+                    "kind": intent.kind.value,
+                    "tool": tool,
+                    "target": intent.target,
+                    "idempotency_key": intent.idempotency_key,
+                    "workflow_id": str(self.workflow_id) if self.workflow_id else None,
+                    "operation_class": policy.operation_class.value,
+                    "failure_class": failure_class,
+                    "error_code": code,
+                    "retryable": is_retryable(error),
+                    "error": describe_exception(error),
+                },
+            ),
+        )
 
     async def _resolve_in_doubt(
         self,
@@ -289,7 +447,8 @@ class ToolExecutor:
                     intent.action_id,
                     intent.kind.value,
                 )
-                return await self._run(intent, decision, tool)
+                # The reconciled re-execution is this action's second attempt.
+                return await self._run(intent, decision, tool, authorization, attempt=2)
             return self._in_doubt(intent, record, "another attempt took it over")
 
         return self._in_doubt(intent, record, "the provider could not confirm either way")

@@ -1394,7 +1394,7 @@ class JobSearchGraph:
             kind=ActionKind.SUBMIT_APPLICATION,
             target=target,
             summary=(
-                f"Submit an application to {packet.posting.company} " f"for {packet.posting.title}"
+                f"Submit an application to {packet.posting.company} for {packet.posting.title}"
             ),
             payload={
                 "dedupe_key": packet.dedupe_key,
@@ -1453,22 +1453,18 @@ class JobSearchGraph:
         intents = _load(ActionIntent, state.get("pending_actions"))
         now = self.clock()
         requests = [
-            ApprovalRequest.for_intent(intent, now=now, ttl=self.approval_ttl)
-            for intent in intents
+            ApprovalRequest.for_intent(intent, now=now, ttl=self.approval_ttl) for intent in intents
         ]
         for request in requests:
             logger.info(
-                "approval requested for action %s (%s, risk=%s) on target '%s'; "
-                "expires %s",
+                "approval requested for action %s (%s, risk=%s) on target '%s'; expires %s",
                 request.action_id,
                 request.kind.value,
                 request.risk.value,
                 request.target,
                 request.expires_at.isoformat(),
             )
-        return {
-            "approval_requests": [*(state.get("approval_requests") or []), *_dump(requests)]
-        }
+        return {"approval_requests": [*(state.get("approval_requests") or []), *_dump(requests)]}
 
     async def approval_checkpoint(self, state: JobSearchState) -> dict[str, Any]:
         """Park the run until every proposed external write has an answer.
@@ -1750,7 +1746,7 @@ class JobSearchGraph:
                             "classification": response.classification.value,
                         },
                         idempotency_key=(
-                            f"reply-{application.application_id}-" f"{response.provider_message_id}"
+                            f"reply-{application.application_id}-{response.provider_message_id}"
                         )[:255],
                         requested_by=f"graph:job_search#{HANDLE_RECRUITER_RESPONSE}",
                     )
@@ -2333,9 +2329,7 @@ class JobSearchGraph:
             trigger_at=remind_at,
             # A prep reminder is worthless once the interview has started.
             expires_at=plan.interview_starts_at,
-            dedupe_key=interview_reminder_dedupe_key(
-                plan.application_id, plan.interview_starts_at
-            ),
+            dedupe_key=interview_reminder_dedupe_key(plan.application_id, plan.interview_starts_at),
         )
 
     def _durable_wait(

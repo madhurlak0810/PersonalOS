@@ -166,8 +166,7 @@ class CalendarActionExecutor:
         existing = await _created_by(self.client, intent)
         if existing is not None:
             logger.info(
-                "calendar event %s already exists for idempotency key '%s'; not creating "
-                "another",
+                "calendar event %s already exists for idempotency key '%s'; not creating another",
                 existing.event_id,
                 intent.idempotency_key,
             )

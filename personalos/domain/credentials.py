@@ -207,9 +207,7 @@ class AccessToken:
 class AccessTokenProvider(Protocol):
     """Port: turn a credential reference into a token, at the moment of use."""
 
-    async def exchange(
-        self, ref: "CredentialRef | str", scopes: Sequence[str] = ()
-    ) -> AccessToken:
+    async def exchange(self, ref: "CredentialRef | str", scopes: Sequence[str] = ()) -> AccessToken:
         """Mint a short-lived token for `ref`, limited to `scopes`."""
         ...
 
