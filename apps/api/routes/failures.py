@@ -24,6 +24,19 @@ response lists each such operation and which of the two will happen to it.
 OAuth, a missing scope) marks the integration degraded and asks for a
 reconnect. A step that has failed `MAX_FAILURE_ATTEMPTS` times can only be
 dismissed. Each of these is a 409 from the retry endpoint, never a no-op.
+
+**Events the worker gave up on are failures too.** An outbox event that used
+up its automatic retries is dead-lettered, and one whose payload does not meet
+the event schema is quarantined without a retry. Both keep their last error,
+redacted, and are listed:
+
+- under `event_failures` in `GET /v1/workflows/{id}/failures`, when the
+  event belongs to that workflow;
+- all together at `GET /v1/failures/events`.
+
+`POST /v1/failures/events/{failure_id}/retry` puts one back in line with a
+fresh attempt budget. Delivery is idempotent on the event's `dedupe_key`, so
+retrying an event that was in fact applied applies nothing twice.
 """
 
 import logging
@@ -37,12 +50,14 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from personalos.bootstrap import (
+    build_event_failure_store,
     build_workflow_command_queue,
     build_workflow_failure_store,
     build_workflow_thread_registry,
 )
 from personalos.domain.errors import Conflict, NotFound
 from personalos.domain.failures import (
+    EventFailure,
     FailedOperation,
     FailureStatus,
     WorkflowFailure,
@@ -54,6 +69,7 @@ from personalos.domain.workflow import (
     WorkflowStatus,
 )
 from personalos.persistence.database import SessionLocal
+from personalos.persistence.event_failures import DEFAULT_LIMIT, EventFailureStore
 from personalos.persistence.workflow_commands import WorkflowCommandQueue
 from personalos.persistence.workflow_failures import WorkflowFailureStore, retry_dedupe
 
@@ -74,14 +90,16 @@ class FailureServices:
 
     store: WorkflowFailureStore
     commands: WorkflowCommandQueue
+    events: EventFailureStore
 
 
 def build_failure_services(session_factory: Callable[[], Any]) -> FailureServices:
-    """Wire the failure store and command queue against one database."""
+    """Wire the failure stores and command queue against one database."""
     registry = build_workflow_thread_registry(session_factory)
     return FailureServices(
         store=build_workflow_failure_store(session_factory, registry),
         commands=build_workflow_command_queue(session_factory),
+        events=build_event_failure_store(session_factory),
     )
 
 
@@ -103,6 +121,8 @@ class WorkflowFailuresResponse(BaseModel):
     workflow_id: UUID
     status: WorkflowStatus
     failures: list[WorkflowFailure] = Field(default_factory=list)
+    #: The workflow's events the worker gave up delivering.
+    event_failures: list[EventFailure] = Field(default_factory=list)
 
 
 class FailureSelection(BaseModel):
@@ -129,6 +149,22 @@ class RetryResponse(BaseModel):
     #: re-run returns instead of sending again.
     operations: list[FailedOperation] = Field(default_factory=list)
     correlation_id: UUID
+    actor_id: str
+
+
+class EventFailuresResponse(BaseModel):
+    """Every outbox event the worker gave up delivering, newest first."""
+
+    failures: list[EventFailure] = Field(default_factory=list)
+
+
+class EventRetryResponse(BaseModel):
+    """A parked event, back in line."""
+
+    failure_id: UUID
+    event_type: str
+    workflow_id: UUID | None = None
+    status: FailureStatus
     actor_id: str
 
 
@@ -194,6 +230,55 @@ async def list_failures(
         workflow_id=workflow_id,
         status=snapshot.status,
         failures=services.store.failures(snapshot, include_dismissed=include_dismissed),
+        event_failures=services.events.failures(workflow_id=workflow_id),
+    )
+
+
+@router.get("/failures/events", response_model=EventFailuresResponse)
+async def list_event_failures(
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=500),
+    services: FailureServices = Depends(get_failure_services),
+):
+    """Every dead-lettered or quarantined event, with its last error, newest first."""
+    return EventFailuresResponse(failures=services.events.failures(limit=limit))
+
+
+@router.post(
+    "/failures/events/{failure_id}/retry", response_model=EventRetryResponse, status_code=202
+)
+async def retry_event_failure(
+    failure_id: UUID,
+    services: FailureServices = Depends(get_failure_services),
+    x_actor_id: str | None = Header(default=None, alias="X-Actor-Id"),
+):
+    """Put a dead-lettered or quarantined event back in line, with a fresh attempt budget.
+
+    A 404 when there is no such event, and a 409 when it is not parked --
+    pending, being delivered, or delivered.
+    """
+    actor_id = x_actor_id or _DEFAULT_ACTOR
+    row = services.events.retry(failure_id, actor=actor_id)
+    if row is None:
+        if services.events.exists(failure_id):
+            raise Conflict(
+                f"event {failure_id} is not dead-lettered or quarantined; only a parked "
+                f"event can be retried",
+                details={"failure_id": str(failure_id)},
+            )
+        raise NotFound(f"no event failure '{failure_id}'", details={"failure_id": str(failure_id)})
+    logger.info(
+        "event %s (%s) requeued by %s (workflow %s)",
+        failure_id,
+        row.type,
+        actor_id,
+        row.workflow_id,
+    )
+    return EventRetryResponse(
+        failure_id=failure_id,
+        event_type=row.type,
+        workflow_id=row.workflow_id,
+        status=FailureStatus.RETRY_QUEUED,
+        actor_id=actor_id,
     )
 
 
@@ -322,6 +407,8 @@ __all__ = [
     "get_failure_services",
     "FailureSelection",
     "WorkflowFailuresResponse",
+    "EventFailuresResponse",
+    "EventRetryResponse",
     "RetryResponse",
     "DismissResponse",
 ]

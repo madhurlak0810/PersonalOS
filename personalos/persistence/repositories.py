@@ -1232,14 +1232,19 @@ class OutboxEventRepository:
         for a general dispatcher sharing the table with a dedicated consumer.
 
         `reclaim_after` makes IN_PROGRESS rows whose claim is older than that
-        claimable too (see the class docstring). Each claim stamps
-        `claimed_at` and increments `attempts`.
+        claimable too (see the class docstring). A PENDING row whose
+        `available_at` is still in the future is backing off after a failed
+        delivery and is not claimable yet. Each claim stamps `claimed_at` and
+        increments `attempts`.
 
         The caller owns the returned row's dispatch and must follow up with
         `mark_dispatched` or `mark_failed`.
         """
         now = now or datetime.utcnow()
-        claimable = OutboxEventModel.status == OutboxEventStatus.PENDING.value
+        claimable = and_(
+            OutboxEventModel.status == OutboxEventStatus.PENDING.value,
+            or_(OutboxEventModel.available_at.is_(None), OutboxEventModel.available_at <= now),
+        )
         if reclaim_after is not None:
             claimable = or_(
                 claimable,

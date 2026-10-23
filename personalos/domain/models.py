@@ -748,12 +748,21 @@ class OutboxEventStatus(str, Enum):
     to IN_PROGRESS) before dispatching it elsewhere, mirroring
     `ToolExecutionStatus`'s claim/complete/fail shape so exactly one worker
     ever owns a given row at a time.
+
+    A row whose delivery keeps failing goes back to PENDING with a later
+    `available_at` until its retry budget is spent, and then to DEAD_LETTER. A
+    row no delivery could ever succeed with -- its payload does not meet the
+    event schema -- goes straight to QUARANTINED. Both keep their last error
+    and wait for an operator to retry them (`EventOutbox.requeue`). FAILED is
+    what rows given up on before dead-lettering existed were left in.
     """
 
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     DISPATCHED = "dispatched"
     FAILED = "failed"
+    DEAD_LETTER = "dead_letter"
+    QUARANTINED = "quarantined"
 
 
 class EvidenceSourceType(str, Enum):

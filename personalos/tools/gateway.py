@@ -71,6 +71,9 @@ class ToolResult(BaseModel):
     #: classify the failure that precisely. `None` for a success, and for a
     #: failure the adapter reported only as an opaque string.
     error_code: str | None = None
+    #: Seconds the provider asked callers to wait before trying again (its
+    #: `Retry-After`), when the adapter reported one with a failure.
+    retry_after: float | None = None
     replayed: bool = False
     rule: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -93,6 +96,7 @@ class ToolResult(BaseModel):
             result=redact(payload.get("result")),
             error=redact_text(error) if isinstance(error, str) else error,
             error_code=payload.get("error_code"),
+            retry_after=_retry_after(payload.get("retry_after")),
             replayed=bool(payload.get("replayed", False)),
             rule=approved.decision.rule,
         )
@@ -111,21 +115,34 @@ class ToolResult(BaseModel):
                 raise exc_cls(
                     f"tool '{self.tool_ref}' failed: {self.error or 'unknown error'}",
                     details={"tool_ref": self.tool_ref},
+                    retry_after=self.retry_after,
                 )
-            raise ToolExecutionError(self.tool_ref, self.error or "unknown error")
+            raise ToolExecutionError(
+                self.tool_ref, self.error or "unknown error", retry_after=self.retry_after
+            )
         return self.result
 
 
 class ToolExecutionError(ToolFailure):
     """An approved tool call failed inside the adapter with no finer classification."""
 
-    def __init__(self, tool_ref: str, error: str):
+    def __init__(self, tool_ref: str, error: str, *, retry_after: float | None = None):
         self.tool_ref = tool_ref
         self.error = error
         super().__init__(
             f"tool '{tool_ref}' failed: {error}",
             details={"tool_ref": tool_ref, "error": error},
+            retry_after=retry_after,
         )
+
+
+def _retry_after(value: Any) -> float | None:
+    """An adapter's `retry_after`, as non-negative seconds, or `None`."""
+    try:
+        seconds = float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds is not None and seconds >= 0 else None
 
 
 @runtime_checkable

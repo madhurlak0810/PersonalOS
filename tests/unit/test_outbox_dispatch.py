@@ -527,7 +527,7 @@ def test_crash_before_effect_is_redelivered_and_applied_once(factory, clock):
     assert _row(factory, envelope.event_id).status == OutboxEventStatus.DISPATCHED.value
 
 
-def test_failing_handler_retries_after_the_lease_then_gives_up(factory, clock):
+def test_failing_handler_backs_off_then_dead_letters(factory, clock):
     envelope = _envelope()
     outbox = _outbox(factory, clock, max_attempts=2)
     outbox.publish(envelope)
@@ -539,17 +539,22 @@ def test_failing_handler_retries_after_the_lease_then_gives_up(factory, clock):
 
     dispatcher = OutboxDispatcher(outbox, {}, default=broken)
     assert asyncio.run(dispatcher.process_next()) is True
-    # Not retried on the spot: the lease spaces retries out.
+    # Not retried on the spot: the row is back in line, after a backoff.
     assert asyncio.run(dispatcher.process_next()) is False
-    assert _row(factory, envelope.event_id).status == OutboxEventStatus.IN_PROGRESS.value
+    row = _row(factory, envelope.event_id)
+    assert row.status == OutboxEventStatus.PENDING.value
+    assert row.available_at > clock.now
+    assert row.last_error == "RuntimeError: downstream is down"
 
-    clock.advance(TIMEOUT + timedelta(seconds=1))
+    clock.now = row.available_at
     assert asyncio.run(dispatcher.process_next()) is True
     assert len(calls) == 2
-    assert _row(factory, envelope.event_id).status == OutboxEventStatus.FAILED.value
+    row = _row(factory, envelope.event_id)
+    assert row.status == OutboxEventStatus.DEAD_LETTER.value
+    assert row.failed_at == clock.now
 
 
-def test_malformed_event_fails_at_once(factory, clock):
+def test_malformed_event_is_quarantined_at_once(factory, clock):
     application_id = _make_application(factory)
     outbox = _outbox(factory, clock)
     bad = _transition_request(application_id, dedupe_key="move:bad").model_copy(
@@ -560,7 +565,7 @@ def test_malformed_event_fails_at_once(factory, clock):
         outbox, {EventType.APPLICATION_TRANSITION_REQUESTED: _transition_handler(factory)}
     )
     assert asyncio.run(dispatcher.process_next()) is True
-    assert _row(factory, bad.event_id).status == OutboxEventStatus.FAILED.value
+    assert _row(factory, bad.event_id).status == OutboxEventStatus.QUARANTINED.value
 
 
 # --- Routing: resume the waiting workflow, or start a run ------------------------------

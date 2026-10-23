@@ -1399,7 +1399,15 @@ class OutboxEventModel(Base):
     payload_json = Column(JSON, nullable=False, default={})
     dedupe_key = Column(String(255), nullable=True, unique=True)
     status = Column(
-        Enum("pending", "in_progress", "dispatched", "failed", name="outbox_event_status"),
+        Enum(
+            "pending",
+            "in_progress",
+            "dispatched",
+            "failed",
+            "dead_letter",
+            "quarantined",
+            name="outbox_event_status",
+        ),
         nullable=False,
         default="pending",
     )
@@ -1411,8 +1419,24 @@ class OutboxEventModel(Base):
     # between claiming and settling) and the row is handed out again.
     claimed_at = Column(DateTime, nullable=True)
     attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    # Not claimable before this time: the backoff after a failed delivery.
+    # NULL means at once.
+    available_at = Column(DateTime, nullable=True)
+    # The last delivery failure, redacted and truncated; kept through a
+    # successful retry so the history is not lost with the row's status.
+    last_error = Column(Text, nullable=True)
+    # When the row was dead-lettered or quarantined.
+    failed_at = Column(DateTime, nullable=True)
+    # The workflow a dead-lettered event belongs to, when it could be told,
+    # so `GET /v1/workflows/{id}/failures` can list it. Only ever set to a
+    # registered workflow, but not a foreign key: it is a pointer for that
+    # view, and must not stop a workflow's rows from being cleaned up.
+    workflow_id = Column(GUID(), nullable=True)
 
-    __table_args__ = (Index("ix_outbox_events_status", "status"),)
+    __table_args__ = (
+        Index("ix_outbox_events_status", "status"),
+        Index("ix_outbox_events_workflow_id", "workflow_id"),
+    )
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -1426,6 +1450,10 @@ class OutboxEventModel(Base):
             "dispatched_at": self.dispatched_at.isoformat() if self.dispatched_at else None,
             "claimed_at": self.claimed_at.isoformat() if self.claimed_at else None,
             "attempts": self.attempts,
+            "available_at": self.available_at.isoformat() if self.available_at else None,
+            "last_error": self.last_error,
+            "failed_at": self.failed_at.isoformat() if self.failed_at else None,
+            "workflow_id": str(self.workflow_id) if self.workflow_id else None,
         }
 
 
