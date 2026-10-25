@@ -27,12 +27,15 @@ run, and what to do about one whose outcome is unknown, is
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from personalos.domain.events import EventEnvelope
 from personalos.domain.models import AuditEventResult
+from personalos.persistence.event_outbox import stage_event
 from personalos.persistence.repositories import (
     AuditEventRepository,
     OutboxEventRepository,
@@ -68,9 +71,13 @@ class AuditEntry:
     target_ref: str
 
 
+#: `EventEnvelope.source` of the events the ledger stages for failures.
+FAILURE_EVENT_SOURCE = "tool_executor"
+
+
 @dataclass(frozen=True)
 class DomainEvent:
-    """An event to enqueue in the outbox alongside a successful outcome."""
+    """An event to enqueue in the outbox alongside an outcome."""
 
     type: str
     payload: dict[str, Any]
@@ -155,12 +162,40 @@ class ExecutionLedger:
         finally:
             session.close()
 
-    def record_failure(self, idempotency_key: str, error: str, *, audit: AuditEntry) -> None:
-        """Commit a call that raised, with the audit row saying so."""
+    def record_failure(
+        self,
+        idempotency_key: str,
+        error: str,
+        *,
+        audit: AuditEntry,
+        event: DomainEvent | None = None,
+    ) -> None:
+        """Commit a call that raised, with the audit row and `event` saying so.
+
+        `event` is staged as an enveloped outbox event in the same commit,
+        about the execution (`tool_execution:<operation id>`) and keyed on its
+        attempt, so a later attempt that fails again announces that too.
+        """
         session = self.session_factory()
         try:
             execution = ToolExecutionRepository(session).fail(idempotency_key, error, commit=False)
             self._audit(session, execution, audit, AuditEventResult.FAILURE)
+            if event is not None:
+                stage_event(
+                    session,
+                    EventEnvelope(
+                        type=event.type,
+                        source=FAILURE_EVENT_SOURCE,
+                        occurred_at=datetime.utcnow(),
+                        subject_ref=f"tool_execution:{execution.operation_id}",
+                        dedupe_key=f"{event.type}:{execution.operation_id}:{execution.attempts}",
+                        payload={
+                            **event.payload,
+                            "operation_id": str(execution.operation_id),
+                            "attempts": execution.attempts,
+                        },
+                    ),
+                )
             session.commit()
         except Exception:
             session.rollback()
@@ -232,4 +267,10 @@ class ExecutionLedger:
         return self.workflow_id
 
 
-__all__ = ["AuditEntry", "DomainEvent", "ExecutionAuthorization", "ExecutionLedger"]
+__all__ = [
+    "FAILURE_EVENT_SOURCE",
+    "AuditEntry",
+    "DomainEvent",
+    "ExecutionAuthorization",
+    "ExecutionLedger",
+]

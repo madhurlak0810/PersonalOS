@@ -149,8 +149,7 @@ def _targets_from(scan: Scan, layer_name: str) -> set:
     return {
         edge.target_module
         for edge in scan.edges
-        if (layer_for_module(edge.source_module) or LAYERS_BY_NAME["domain"]).name
-        == layer_name
+        if (layer_for_module(edge.source_module) or LAYERS_BY_NAME["domain"]).name == layer_name
     }
 
 
@@ -158,9 +157,7 @@ def test_executor_never_imports_a_tool_adapter(scan: Scan):
     """Executors reach tools only through the gateway port."""
     banned_prefixes = ("personalos.mcp", "mcp_servers", "personalos.tools.registry")
     offenders = [
-        target
-        for target in _targets_from(scan, "executor")
-        if target.startswith(banned_prefixes)
+        target for target in _targets_from(scan, "executor") if target.startswith(banned_prefixes)
     ]
     assert not offenders, f"executor imports tool adapters directly: {offenders}"
 
@@ -174,9 +171,7 @@ def test_orchestration_never_imports_tools_or_storage(scan: Scan):
         "personalos.persistence",
     )
     offenders = [
-        target
-        for target in _targets_from(scan, "graphs")
-        if target.startswith(banned_prefixes)
+        target for target in _targets_from(scan, "graphs") if target.startswith(banned_prefixes)
     ]
     assert not offenders, f"graphs bypass the executor: {offenders}"
 
@@ -219,8 +214,7 @@ def test_only_the_policy_layer_can_mint_approvals():
             if needle in text:
                 offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()} ({needle})")
     assert not offenders, (
-        "approvals may only be minted inside the policy layer; found references in: "
-        f"{offenders}"
+        f"approvals may only be minted inside the policy layer; found references in: {offenders}"
     )
 
 

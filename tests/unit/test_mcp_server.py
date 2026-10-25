@@ -128,8 +128,12 @@ async def test_save_favorite_job_is_idempotent():
     server = JobsMCPServer()
     key = str(uuid4())
 
-    first = await server.execute(request("save_favorite_job", job_id="job_123", idempotency_key=key))
-    second = await server.execute(request("save_favorite_job", job_id="job_123", idempotency_key=key))
+    first = await server.execute(
+        request("save_favorite_job", job_id="job_123", idempotency_key=key)
+    )
+    second = await server.execute(
+        request("save_favorite_job", job_id="job_123", idempotency_key=key)
+    )
 
     assert first.ok is True
     assert second.ok is True

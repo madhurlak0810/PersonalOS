@@ -243,9 +243,7 @@ async def test_a_wait_whose_condition_resolved_during_the_wait_is_closed_silentl
     """
     # By the trigger, a reply has landed. The evaluator is what knows that; the
     # checkpoint only knows which question to ask.
-    evaluator = fakes.ScriptedConditionEvaluator(
-        {ConditionKind.RECRUITER_RESPONSE_RECEIVED: True}
-    )
+    evaluator = fakes.ScriptedConditionEvaluator({ConditionKind.RECRUITER_RESPONSE_RECEIVED: True})
     deployment = await applied(tmp_path, evaluator=evaluator)
     wait = deployment.store.open_for_application(fakes.APPLICATION_ID)[0]
     events_before = list(deployment.events)
@@ -319,9 +317,7 @@ async def test_a_wait_still_unmet_at_its_trigger_fires_and_resumes_the_follow_up
     world without a human, and that is structural -- the draft node has no
     executor and no edge to one.
     """
-    evaluator = fakes.ScriptedConditionEvaluator(
-        {ConditionKind.RECRUITER_RESPONSE_RECEIVED: False}
-    )
+    evaluator = fakes.ScriptedConditionEvaluator({ConditionKind.RECRUITER_RESPONSE_RECEIVED: False})
     deployment = await applied(tmp_path, evaluator=evaluator)
     wait = deployment.store.open_for_application(fakes.APPLICATION_ID)[0]
     searches_before = deployment.searches
@@ -341,18 +337,14 @@ async def test_a_wait_still_unmet_at_its_trigger_fires_and_resumes_the_follow_up
     assert state.next == (APPROVAL_CHECKPOINT,)
     assert LOAD_SEARCH_PROFILE not in state.next
 
-    requests = [
-        ApprovalRequest.model_validate(raw) for raw in state.values["approval_requests"]
-    ]
+    requests = [ApprovalRequest.model_validate(raw) for raw in state.values["approval_requests"]]
     follow_ups = [r for r in requests if r.kind == ActionKind.SEND_RECRUITER_MESSAGE]
     assert len(follow_ups) == 1
-    assert str(wait.checkpoint_id) in state.values["pending_actions"][0]["payload"][
-        "checkpoint_id"
-    ]
+    assert str(wait.checkpoint_id) in state.values["pending_actions"][0]["payload"]["checkpoint_id"]
     # Nothing was sent: the only action ever executed is the original submission.
-    assert [
-        intent.kind for intent, _ in deployment.ports["action_executor"].executed
-    ] == [ActionKind.SUBMIT_APPLICATION]
+    assert [intent.kind for intent, _ in deployment.ports["action_executor"].executed] == [
+        ActionKind.SUBMIT_APPLICATION
+    ]
 
     # And the run picked up where the thread was, rather than starting over.
     assert deployment.searches == searches_before
@@ -366,9 +358,7 @@ async def test_a_fired_wait_is_not_fired_again_by_the_next_sweep(tmp_path):
     same time; here it is checked in the shape a single monitor on a schedule
     actually runs -- sweep, sweep again a minute later.
     """
-    evaluator = fakes.ScriptedConditionEvaluator(
-        {ConditionKind.RECRUITER_RESPONSE_RECEIVED: False}
-    )
+    evaluator = fakes.ScriptedConditionEvaluator({ConditionKind.RECRUITER_RESPONSE_RECEIVED: False})
     deployment = await applied(tmp_path, evaluator=evaluator)
 
     first = await deployment.monitor.sweep(now=AT_TRIGGER)
@@ -387,9 +377,7 @@ async def test_a_wait_whose_thread_is_parked_on_an_approval_is_deferred(tmp_path
     is held back rather than fired -- and because it stays pending, its own
     expiry is what eventually settles it if the answer never comes.
     """
-    evaluator = fakes.ScriptedConditionEvaluator(
-        {ConditionKind.RECRUITER_RESPONSE_RECEIVED: False}
-    )
+    evaluator = fakes.ScriptedConditionEvaluator({ConditionKind.RECRUITER_RESPONSE_RECEIVED: False})
     deployment = await applied(tmp_path, evaluator=evaluator)
     await deployment.monitor.sweep(now=AT_TRIGGER)
     assert (await deployment.runner.inspect(deployment.thread)).next == (APPROVAL_CHECKPOINT,)
@@ -428,9 +416,7 @@ async def test_a_wait_nobody_swept_in_time_is_marked_expired_not_left_pending(tm
     follow-up is stale. It is recorded as `expired`, with the reason, rather
     than sent late or left `pending` for a sweep that will now never help it.
     """
-    evaluator = fakes.ScriptedConditionEvaluator(
-        {ConditionKind.RECRUITER_RESPONSE_RECEIVED: False}
-    )
+    evaluator = fakes.ScriptedConditionEvaluator({ConditionKind.RECRUITER_RESPONSE_RECEIVED: False})
     deployment = await applied(tmp_path, evaluator=evaluator)
     wait = deployment.store.open_for_application(fakes.APPLICATION_ID)[0]
 
@@ -458,9 +444,7 @@ async def test_an_expired_wait_whose_condition_came_true_is_resolved_not_expired
     as `resolved`: the follow-up was not missed, it stopped being wanted.
     Reporting it as `expired` would send an operator looking for an outage.
     """
-    evaluator = fakes.ScriptedConditionEvaluator(
-        {ConditionKind.RECRUITER_RESPONSE_RECEIVED: True}
-    )
+    evaluator = fakes.ScriptedConditionEvaluator({ConditionKind.RECRUITER_RESPONSE_RECEIVED: True})
     deployment = await applied(tmp_path, evaluator=evaluator)
     wait = deployment.store.open_for_application(fakes.APPLICATION_ID)[0]
 
@@ -547,9 +531,7 @@ async def test_a_fired_checkpoint_does_not_reroute_the_next_ordinary_run(tmp_pat
     await deployment.runner.start(
         deployment.thread, {"fired_checkpoints": [wait.model_dump(mode="json")]}
     )
-    assert (await deployment.runner.inspect(deployment.thread)).values[
-        "fired_checkpoints"
-    ] == []
+    assert (await deployment.runner.inspect(deployment.thread)).values["fired_checkpoints"] == []
 
     searches_before = deployment.searches
     await deployment.runner.start(

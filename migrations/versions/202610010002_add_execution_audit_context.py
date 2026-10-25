@@ -21,8 +21,8 @@ Create Date: 2026-10-01
 
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 from personalos.persistence.models import GUID
 
@@ -69,9 +69,7 @@ def upgrade() -> None:
     op.add_column(
         "tool_executions", sa.Column("approval_ref", sa.String(length=255), nullable=True)
     )
-    op.add_column(
-        "tool_executions", sa.Column("approved_by", sa.String(length=255), nullable=True)
-    )
+    op.add_column("tool_executions", sa.Column("approved_by", sa.String(length=255), nullable=True))
     op.add_column(
         "tool_executions",
         sa.Column("attempts", sa.Integer(), nullable=False, server_default="1"),

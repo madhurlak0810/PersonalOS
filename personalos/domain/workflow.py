@@ -187,7 +187,7 @@ class WorkflowThread(BaseModel):
             raise InvalidWorkflowIdentity("thread_id must not be blank")
         if len(value) > MAX_THREAD_ID_LENGTH:
             raise InvalidWorkflowIdentity(
-                f"thread_id is {len(value)} characters; the maximum is " f"{MAX_THREAD_ID_LENGTH}"
+                f"thread_id is {len(value)} characters; the maximum is {MAX_THREAD_ID_LENGTH}"
             )
         return value
 

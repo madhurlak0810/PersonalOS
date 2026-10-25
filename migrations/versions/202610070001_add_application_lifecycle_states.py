@@ -22,8 +22,8 @@ Create Date: 2026-10-07
 
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "202610070001"
@@ -94,9 +94,7 @@ def _rebuild_status_type(values: tuple[str, ...]) -> None:
 def upgrade() -> None:
     _rebuild_status_type(_NEW_STATUSES)
 
-    op.add_column(
-        "applications", sa.Column("resume_status", sa.String(length=32), nullable=True)
-    )
+    op.add_column("applications", sa.Column("resume_status", sa.String(length=32), nullable=True))
     op.add_column("applications", sa.Column("last_activity_at", sa.DateTime(), nullable=True))
     op.execute("UPDATE applications SET last_activity_at = updated_at")
     op.create_index(

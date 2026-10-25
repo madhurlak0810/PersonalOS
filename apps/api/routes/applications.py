@@ -429,8 +429,7 @@ def _queue_effectful_transition(
         )
     )
     logger.info(
-        "queued %s for application %s (%s -> %s) by %s on thread '%s' "
-        "(command_id=%s, policy=%s)",
+        "queued %s for application %s (%s -> %s) by %s on thread '%s' (command_id=%s, policy=%s)",
         request.effect.value,
         application_id,
         card.status.value,

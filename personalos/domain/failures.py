@@ -25,6 +25,11 @@ checkpoint it was recorded against, and the task that raised it. A retry
 re-runs that task at that checkpoint, so a retry that fails again overwrites
 the same error and keeps the same id -- which is what lets attempts be counted.
 
+An outbox event the worker gave up delivering -- dead-lettered after its
+retries, or quarantined as malformed -- is an `EventFailure`: always open to a
+retry by hand, since what stopped it (a broken handler, a bad producer) is
+fixed outside the event, and delivery is idempotent on its `dedupe_key`.
+
 Pure values, like the rest of `domain`; nothing here reads or writes.
 """
 
@@ -38,7 +43,7 @@ from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from personalos.domain.errors import ErrorCode, FailureClass
+from personalos.domain.errors import ErrorCode, FailureClass, PersonalOSError
 from personalos.domain.redaction import redact, redact_text
 
 #: Total attempts a failed step may have, the first one included.
@@ -258,6 +263,13 @@ def sanitize_error(error: StoredError) -> str:
     return text
 
 
+def describe_exception(error: BaseException) -> str:
+    """A live exception as `sanitize_error` would show its stored repr."""
+    if isinstance(error, PersonalOSError):
+        return sanitize_error(parse_stored_error(repr(error)))
+    return sanitize_error(StoredError(error_type=type(error).__name__, message=str(error)))
+
+
 def operation_recovery(status: str) -> OperationRecovery:
     """What a retry does about an operation in `status`."""
     if status == "completed":
@@ -336,6 +348,80 @@ def assess_failure(
     )
 
 
+class EventDisposition(str, Enum):
+    """Why an outbox event stopped being delivered. Wire-visible."""
+
+    #: Its automatic retries ran out, or it failed in a way none could fix.
+    DEAD_LETTER = "dead_letter"
+    #: Its payload did not meet the event schema; it was never retried.
+    QUARANTINED = "quarantined"
+
+
+class EventFailure(_Value):
+    """An outbox event the worker gave up delivering, and what may be done about it.
+
+    Recoverable by an operator: a retry puts the event back in line with a
+    fresh attempt budget, for after the handler -- or, for a quarantined
+    event, whatever produced it -- has been fixed. Delivery is idempotent on
+    the event's `dedupe_key`, so a retry of an event that was in fact applied
+    applies nothing twice.
+    """
+
+    #: The `outbox_events` row id.
+    failure_id: UUID
+    event_id: UUID
+    event_type: str
+    dedupe_key: str | None = None
+    #: The workflow the event belongs to, when it could be told.
+    workflow_id: UUID | None = None
+    disposition: EventDisposition
+    status: FailureStatus = FailureStatus.FAILED
+    retryable: bool = True
+    actions: list[RecoveryAction] = Field(default_factory=lambda: [RecoveryAction.RETRY])
+    #: The last delivery error, redacted and truncated.
+    last_error: str
+    #: Deliveries attempted since it was staged or last retried by hand.
+    attempts: int
+    created_at: datetime | None = None
+    failed_at: datetime | None = None
+
+
+def assess_event_failure(
+    *,
+    outbox_id: UUID,
+    event_id: UUID | None,
+    event_type: str,
+    status: str,
+    last_error: str | None,
+    attempts: int,
+    dedupe_key: str | None = None,
+    workflow_id: UUID | None = None,
+    created_at: datetime | None = None,
+    failed_at: datetime | None = None,
+) -> EventFailure:
+    """An outbox row given up on, as a recoverable failure."""
+    disposition = (
+        EventDisposition.QUARANTINED
+        if status == EventDisposition.QUARANTINED.value
+        else EventDisposition.DEAD_LETTER
+    )
+    text = " ".join(redact_text(last_error or "").split()) or "no error was recorded"
+    if len(text) > MAX_ERROR_LENGTH:
+        text = text[: MAX_ERROR_LENGTH - 1].rstrip() + "…"
+    return EventFailure(
+        failure_id=outbox_id,
+        event_id=event_id or outbox_id,
+        event_type=event_type,
+        dedupe_key=dedupe_key,
+        workflow_id=workflow_id,
+        disposition=disposition,
+        last_error=text,
+        attempts=attempts,
+        created_at=created_at,
+        failed_at=failed_at,
+    )
+
+
 def redacted_receipt(receipt: Any) -> dict[str, Any] | None:
     """A stored receipt as it may be shown."""
     return redact(receipt) if isinstance(receipt, dict) else None
@@ -397,6 +483,8 @@ __all__ = [
     "MAX_ERROR_LENGTH",
     "MAX_FAILURE_ATTEMPTS",
     "RETRYABLE_CLASSES",
+    "EventDisposition",
+    "EventFailure",
     "FailedOperation",
     "FailureStatus",
     "IntegrationHealth",
@@ -404,8 +492,10 @@ __all__ = [
     "RecoveryAction",
     "StoredError",
     "WorkflowFailure",
+    "assess_event_failure",
     "assess_failure",
     "classify",
+    "describe_exception",
     "failure_id",
     "operation_recovery",
     "parse_stored_error",

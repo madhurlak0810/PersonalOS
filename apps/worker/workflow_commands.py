@@ -94,8 +94,7 @@ async def process_next(
         runner = runners.get(kind or "")
         if runner is None:
             raise LookupError(
-                f"no runner is wired for '{kind}' threads "
-                f"(thread '{claimed.command.thread_id}')"
+                f"no runner is wired for '{kind}' threads (thread '{claimed.command.thread_id}')"
             )
         await run_workflow_command(claimed.command, runner)
     except WorkflowLeaseUnavailable:

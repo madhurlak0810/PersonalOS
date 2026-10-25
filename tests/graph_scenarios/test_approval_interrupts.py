@@ -276,9 +276,7 @@ async def test_a_mutation_that_also_forges_the_request_is_still_refused():
     from personalos.domain.job_search import ActionIntent
 
     forged["action_hash"] = ActionIntent.model_validate(pending).fingerprint()
-    await graph.aupdate_state(
-        cfg, {"pending_actions": [pending], "approval_requests": [forged]}
-    )
+    await graph.aupdate_state(cfg, {"pending_actions": [pending], "approval_requests": [forged]})
 
     resumed = await graph.ainvoke(Command(resume=[decision]), cfg)
 
@@ -338,9 +336,7 @@ async def test_an_owed_recruiter_reply_also_parks_before_it_is_sent():
     reply_requests = _requests_in(second)
 
     assert second["approval_stage"] == STAGE_RECRUITER_OUTREACH
-    assert [request.kind for request in reply_requests] == [
-        ActionKind.SEND_RECRUITER_MESSAGE
-    ]
+    assert [request.kind for request in reply_requests] == [ActionKind.SEND_RECRUITER_MESSAGE]
     assert reply_requests[0].risk == RiskLevel.MEDIUM
     assert reply_requests[0].requested_scopes == ("communications:send",)
     assert reply_requests[0].target.startswith("recruiter@acme.test")
@@ -440,9 +436,7 @@ def test_a_workflow_paused_on_an_approval_survives_a_process_restart(tmp_path):
     state = asyncio.run(reader.runner.inspect(thread))
 
     assert state.next == (APPROVAL_CHECKPOINT,)
-    requests = [
-        ApprovalRequest.model_validate(raw) for raw in state.values["approval_requests"]
-    ]
+    requests = [ApprovalRequest.model_validate(raw) for raw in state.values["approval_requests"]]
     assert len(requests) == 1
     request = requests[0]
     assert request.kind == ActionKind.SUBMIT_APPLICATION
@@ -458,9 +452,7 @@ def test_a_workflow_paused_on_an_approval_survives_a_process_restart(tmp_path):
 
     # 3. The human answers, hours or days later, and a third process resumes.
     decision_file = tmp_path / "decision.json"
-    decision_file.write_text(
-        json.dumps([grant(request).model_dump(mode="json")]), encoding="utf-8"
-    )
+    decision_file.write_text(json.dumps([grant(request).model_dump(mode="json")]), encoding="utf-8")
 
     resumed = _worker(
         db_path,
@@ -514,9 +506,7 @@ def test_an_action_mutated_while_parked_is_refused_across_a_restart(tmp_path):
     asyncio.run(reader.graph.aupdate_state(thread.config(), {"pending_actions": [pending]}))
 
     decision_file = tmp_path / "decision.json"
-    decision_file.write_text(
-        json.dumps([grant(request).model_dump(mode="json")]), encoding="utf-8"
-    )
+    decision_file.write_text(json.dumps([grant(request).model_dump(mode="json")]), encoding="utf-8")
     resumed = _worker(
         db_path, log.path, thread_id, durable.MODE_RESUME_APPROVAL, str(decision_file)
     )

@@ -20,8 +20,8 @@ Create Date: 2026-09-10
 
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 from personalos.persistence.models import GUID
 
@@ -36,9 +36,7 @@ def upgrade() -> None:
     op.create_table(
         "communication_events",
         sa.Column("id", GUID(), primary_key=True),
-        sa.Column(
-            "application_id", GUID(), sa.ForeignKey("applications.id"), nullable=False
-        ),
+        sa.Column("application_id", GUID(), sa.ForeignKey("applications.id"), nullable=False),
         sa.Column(
             "classification",
             sa.Enum(

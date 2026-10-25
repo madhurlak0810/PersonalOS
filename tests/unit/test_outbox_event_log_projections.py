@@ -87,6 +87,10 @@ def test_schema_creates_all_three_tables_with_documented_shape(tmp_path):
             "dispatched_at",
             "claimed_at",
             "attempts",
+            "available_at",
+            "last_error",
+            "failed_at",
+            "workflow_id",
         }
         outbox_indexed_columns = {
             column

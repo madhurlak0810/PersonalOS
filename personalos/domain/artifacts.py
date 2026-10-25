@@ -464,7 +464,8 @@ def document_overwrite_intent(
         },
         # Derived from the file and both versions: re-proposing the same
         # replacement is the same action, and any other one gets a new key.
-        idempotency_key="overwrite-" + content_sha256(
+        idempotency_key="overwrite-"
+        + content_sha256(
             f"{overwrite.path}\n{overwrite.expected_sha256}\n{content_sha256(new_content)}"
         )[:48],
         requested_by=requested_by,

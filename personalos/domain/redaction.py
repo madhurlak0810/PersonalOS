@@ -91,11 +91,7 @@ def _separator(before_value: str = "") -> str:
     gateway and again on its way into a checkpoint. The guard sits directly
     after the `:`/`=` so the optional whitespace cannot backtrack around it.
     """
-    return (
-        r"""(["']?\s*[:=](?!\s*["']?"""
-        + before_value
-        + r"""\[REDACTED\])\s*["']?)"""
-    )
+    return r"""(["']?\s*[:=](?!\s*["']?""" + before_value + r"""\[REDACTED\])\s*["']?)"""
 
 
 _NAME_VALUE_SEPARATOR = _separator()
@@ -134,9 +130,7 @@ _TEXT_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
             r"(?i)(?<![A-Za-z0-9])"
             r"((?:refresh|access|id|auth|session|bearer)[_-]?token"
             r"|client[_-]?secret|(?:x[_-])?api[_-]?key|password|passwd"
-            r"|secret[_-]?key|private[_-]?key)"
-            + _NAME_VALUE_SEPARATOR
-            + r"[^\s\"'&,;}\]]+"
+            r"|secret[_-]?key|private[_-]?key)" + _NAME_VALUE_SEPARATOR + r"[^\s\"'&,;}\]]+"
         ),
         rf"\1\2{REDACTED}",
     ),
@@ -144,9 +138,7 @@ _TEXT_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     # `idempotency-token=` -- identifiers, not credentials -- are left alone.
     (
         re.compile(
-            r"(?i)(?<![A-Za-z0-9_-])(token|secret)"
-            + _NAME_VALUE_SEPARATOR
-            + r"[^\s\"'&,;}\]]{8,}"
+            r"(?i)(?<![A-Za-z0-9_-])(token|secret)" + _NAME_VALUE_SEPARATOR + r"[^\s\"'&,;}\]]{8,}"
         ),
         rf"\1\2{REDACTED}",
     ),
@@ -323,7 +315,9 @@ class Redactor:
             return value, False
         if dataclasses.is_dataclass(value):
             names = [f.name for f in dataclasses.fields(value) if f.init]
-            return self._rebuild(value, names, lambda updates: dataclasses.replace(value, **updates))
+            return self._rebuild(
+                value, names, lambda updates: dataclasses.replace(value, **updates)
+            )
         model_fields = getattr(type(value), "model_fields", None)
         if isinstance(model_fields, Mapping) and hasattr(value, "model_copy"):
             return self._rebuild(

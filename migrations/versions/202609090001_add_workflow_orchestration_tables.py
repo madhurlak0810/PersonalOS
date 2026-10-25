@@ -22,8 +22,8 @@ Create Date: 2026-09-09
 
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 from personalos.persistence.models import GUID
 
@@ -63,7 +63,11 @@ def upgrade() -> None:
         sa.Column(
             "status",
             sa.Enum(
-                "pending", "running", "completed", "failed", "cancelled",
+                "pending",
+                "running",
+                "completed",
+                "failed",
+                "cancelled",
                 name="workflow_run_status",
             ),
             nullable=False,
@@ -81,15 +85,17 @@ def upgrade() -> None:
     op.create_table(
         "workflow_steps",
         sa.Column("id", GUID(), primary_key=True),
-        sa.Column(
-            "workflow_run_id", GUID(), sa.ForeignKey("workflow_runs.id"), nullable=False
-        ),
+        sa.Column("workflow_run_id", GUID(), sa.ForeignKey("workflow_runs.id"), nullable=False),
         sa.Column("step_name", sa.String(length=255), nullable=False),
         sa.Column("sequence", sa.Integer(), nullable=False, server_default="0"),
         sa.Column(
             "status",
             sa.Enum(
-                "pending", "running", "completed", "failed", "skipped",
+                "pending",
+                "running",
+                "completed",
+                "failed",
+                "skipped",
                 name="workflow_step_status",
             ),
             nullable=False,
@@ -109,9 +115,7 @@ def upgrade() -> None:
         "checkpoints",
         sa.Column("id", GUID(), primary_key=True),
         sa.Column("workflow_id", GUID(), sa.ForeignKey("workflows.id"), nullable=False),
-        sa.Column(
-            "workflow_run_id", GUID(), sa.ForeignKey("workflow_runs.id"), nullable=True
-        ),
+        sa.Column("workflow_run_id", GUID(), sa.ForeignKey("workflow_runs.id"), nullable=True),
         sa.Column("thread_id", sa.String(length=255), nullable=False),
         sa.Column("checkpoint_ns", sa.String(length=255), nullable=False, server_default=""),
         sa.Column("checkpoint_id", sa.String(length=255), nullable=False),
@@ -125,7 +129,9 @@ def upgrade() -> None:
         # the table, and this migration must run against both SQLite (tests,
         # local dev) and Postgres (production).
         sa.UniqueConstraint(
-            "thread_id", "checkpoint_ns", "checkpoint_id",
+            "thread_id",
+            "checkpoint_ns",
+            "checkpoint_id",
             name="uq_checkpoints_thread_ns_checkpoint",
         ),
     )
@@ -135,12 +141,8 @@ def upgrade() -> None:
     op.create_table(
         "approvals",
         sa.Column("id", GUID(), primary_key=True),
-        sa.Column(
-            "workflow_run_id", GUID(), sa.ForeignKey("workflow_runs.id"), nullable=True
-        ),
-        sa.Column(
-            "workflow_step_id", GUID(), sa.ForeignKey("workflow_steps.id"), nullable=True
-        ),
+        sa.Column("workflow_run_id", GUID(), sa.ForeignKey("workflow_runs.id"), nullable=True),
+        sa.Column("workflow_step_id", GUID(), sa.ForeignKey("workflow_steps.id"), nullable=True),
         sa.Column("action_hash", sa.String(length=64), nullable=False),
         sa.Column(
             "status",

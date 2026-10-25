@@ -171,8 +171,7 @@ class ApprovalQueue:
                 raise ApprovalHashMismatch(details={"approval_id": str(approval_id)})
             if recorded.status != _STATUS_BY_OUTCOME[outcome].value:
                 raise ApprovalAlreadyDecided(
-                    f"approval '{approval_id}' was already {recorded.status}; "
-                    f"that decision stands",
+                    f"approval '{approval_id}' was already {recorded.status}; that decision stands",
                     details={"approval_id": str(approval_id)},
                 )
 

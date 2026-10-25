@@ -76,6 +76,15 @@ class EventType:
     #: `{"application_id": str, "status": str, "reason": str | None}`.
     APPLICATION_TRANSITION_REQUESTED = "application.transition_requested"
 
+    #: A mutating tool call failed for good: its automatic retries, if its
+    #: retry policy allows any, are spent. Staged with the failed
+    #: `tool_executions` row, so recovery and escalation can follow policy
+    #: from the event instead of from a log line. Payload: `kind`, `tool`,
+    #: `target`, `idempotency_key`, `operation_id`, `workflow_id`,
+    #: `operation_class`, `failure_class`, `error_code`, `retryable`,
+    #: `attempts`, `error` (redacted).
+    TOOL_OPERATION_FAILED = "tool.operation.failed"
+
 
 class EventEnvelope(BaseModel):
     """One event, as every producer stages it and every consumer reads it."""

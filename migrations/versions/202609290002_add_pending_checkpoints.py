@@ -33,8 +33,8 @@ Create Date: 2026-09-29
 
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 from personalos.persistence.models import GUID
 
@@ -101,9 +101,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("ix_pending_checkpoints_application_id", table_name="pending_checkpoints")
-    op.drop_index(
-        "ix_pending_checkpoints_status_trigger_at", table_name="pending_checkpoints"
-    )
+    op.drop_index("ix_pending_checkpoints_status_trigger_at", table_name="pending_checkpoints")
     op.drop_table("pending_checkpoints")
     # Postgres enum types created by sa.Enum(...) in create_table outlive
     # drop_table and must be dropped explicitly, or re-running this migration

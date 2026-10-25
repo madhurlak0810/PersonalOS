@@ -394,9 +394,7 @@ def main(argv: Sequence[str]) -> int:
             from langgraph.types import Command
 
             decisions = json.loads(Path(decision_path).read_text(encoding="utf-8"))
-            await runner.resume(
-                thread_id=thread_id, resume_input=Command(resume=decisions)
-            )
+            await runner.resume(thread_id=thread_id, resume_input=Command(resume=decisions))
         else:
             await runner.start(thread, initial_state())
 

@@ -50,8 +50,7 @@ class MCPToolInvoker:
         """
         if not isinstance(approved, ApprovedIntent):
             raise PolicyViolation(
-                f"MCPToolInvoker requires an ApprovedIntent, got "
-                f"{type(approved).__name__}"
+                f"MCPToolInvoker requires an ApprovedIntent, got {type(approved).__name__}"
             )
 
         request = ToolCallRequest(

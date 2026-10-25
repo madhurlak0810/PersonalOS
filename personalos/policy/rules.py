@@ -26,9 +26,7 @@ class PolicyRule(ABC):
         """Return a decision, or None to abstain."""
 
     # Helpers so rules do not each rebuild the decision payload.
-    def _decide(
-        self, intent: ToolIntent, decision: Decision, reason: str
-    ) -> PolicyDecision:
+    def _decide(self, intent: ToolIntent, decision: Decision, reason: str) -> PolicyDecision:
         return PolicyDecision(
             intent_id=intent.intent_id,
             tool_ref=intent.tool_ref,
@@ -144,9 +142,7 @@ class MutatingToolRule(PolicyRule):
                 f"mutating tool '{intent.tool_ref}' requires an {IDEMPOTENCY_KEY_ARG}",
             )
         if intent.tool_ref in self.auto_approved:
-            return self.allow(
-                intent, f"mutating tool '{intent.tool_ref}' is auto-approved"
-            )
+            return self.allow(intent, f"mutating tool '{intent.tool_ref}' is auto-approved")
         return self.require_approval(
             intent, f"mutating tool '{intent.tool_ref}' needs human approval"
         )

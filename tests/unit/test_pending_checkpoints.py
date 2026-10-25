@@ -284,7 +284,7 @@ def test_only_one_of_two_callers_closing_the_same_wait_wins(store):
 
 
 def test_closing_a_wait_as_pending_is_refused(store):
-    """"Closed, still waiting" is not a state, and would silently reopen a decision."""
+    """ "Closed, still waiting" is not a state, and would silently reopen a decision."""
     stored = store.schedule(wait())
 
     with pytest.raises(ValueError, match="terminal status"):
@@ -327,7 +327,7 @@ def test_an_event_older_than_the_wait_does_not_resolve_it(store):
 
 
 def test_closed_waits_are_kept_so_a_silence_can_be_explained(store):
-    """"Why was no follow-up sent?" is answerable only if the row is still there."""
+    """ "Why was no follow-up sent?" is answerable only if the row is still there."""
     stored = store.schedule(wait())
     store.close(stored, PendingCheckpointStatus.RESOLVED, reason="recruiter replied on day 2")
 

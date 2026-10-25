@@ -73,9 +73,7 @@ def test_relative_traversal_out_of_the_root_is_rejected(sandbox, path):
         sandbox.resolve(path)
 
 
-def test_traversal_is_rejected_even_when_the_raw_string_starts_with_an_allowed_root(
-    sandbox, root
-):
+def test_traversal_is_rejected_even_when_the_raw_string_starts_with_an_allowed_root(sandbox, root):
     """The prefix is the allowed root; the canonical path is not under it."""
     for raw in (
         f"{root}/../../{root.parent.name}/outside/secret.txt",

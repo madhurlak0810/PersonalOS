@@ -323,6 +323,7 @@ def test_retrying_a_step_whose_send_already_succeeded_replays_its_receipt(db_pat
         "workflow_id": str(harness.workflow_id),
         "status": "completed",
         "failures": [],
+        "event_failures": [],
     }
 
 
