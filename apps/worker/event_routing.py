@@ -38,6 +38,8 @@ from sqlalchemy.orm import Session
 from personalos.domain.events import EventEnvelope, InvalidEventEnvelope
 from personalos.domain.models import ApplicationStatus, InvalidApplicationTransition
 from personalos.domain.workflow import WorkflowCommand, WorkflowCommandKind, WorkflowThread
+from personalos.observability import tracing
+from personalos.observability.tracing import Attr
 from personalos.persistence.event_correlation import WaitingThread
 from personalos.persistence.event_inbox import Consumption, IdempotentConsumer
 from personalos.persistence.repositories import ApplicationRepository
@@ -150,6 +152,31 @@ class EventRouter:
         return self._enqueue(command, envelope, RouteKind.STARTED)
 
     def _enqueue(
+        self, command: WorkflowCommand, envelope: EventEnvelope, kind: RouteKind
+    ) -> RoutedEvent:
+        # In the workflow's trace, linked to the delivery's: the command
+        # queued here carries this span, so the run it starts or resumes is
+        # part of the workflow's trace, and the event that caused it is a link
+        # away. A new workflow's trace starts here.
+        with tracing.workflow_span(
+            "event.route",
+            workflow_id=command.workflow_id,
+            correlation_id=command.correlation_id,
+            thread_id=command.thread_id,
+            actor_id=command.actor_id,
+            root=kind == RouteKind.STARTED,
+            attributes={
+                Attr.EVENT_TYPE: envelope.type,
+                Attr.EVENT_ID: envelope.event_id,
+                Attr.COMMAND_KIND: command.kind,
+                Attr.COMMAND_ID: command.command_id,
+            },
+        ) as span:
+            routed = self._enqueue_in_span(command, envelope, kind)
+            tracing.set_attributes(span, {Attr.EVENT_OUTCOME: routed.kind})
+            return routed
+
+    def _enqueue_in_span(
         self, command: WorkflowCommand, envelope: EventEnvelope, kind: RouteKind
     ) -> RoutedEvent:
         try:

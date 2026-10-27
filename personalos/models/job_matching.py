@@ -29,6 +29,7 @@ from personalos.domain.job_search import (
     SemanticAssessment,
 )
 from personalos.models.routing import DEFAULT_CLASSIFIER_MODEL, StructuredChatModel
+from personalos.observability.tracing import model_name, model_span
 
 #: Cap on posting description characters sent to the model. Long enough for a
 #: real requirements section; short enough that one padded posting cannot
@@ -74,6 +75,7 @@ class StructuredLLMSemanticAssessor:
             raise ValueError("StructuredLLMSemanticAssessor requires a chat model")
         self.system_prompt = system_prompt or ASSESSOR_SYSTEM_PROMPT
         self._structured = model.with_structured_output(SemanticAssessment)
+        self._model_name = model_name(model)
 
     async def assess(
         self,
@@ -81,12 +83,13 @@ class StructuredLLMSemanticAssessor:
         profile: SearchProfile,
         evidence: Sequence[EvidenceRecord],
     ) -> SemanticAssessment:
-        raw = await self._structured.ainvoke(
-            [
-                ("system", self.system_prompt),
-                ("human", render_assessment_input(posting, profile, evidence)),
-            ]
-        )
+        with model_span("assess_posting", model=self._model_name):
+            raw = await self._structured.ainvoke(
+                [
+                    ("system", self.system_prompt),
+                    ("human", render_assessment_input(posting, profile, evidence)),
+                ]
+            )
         if isinstance(raw, SemanticAssessment):
             return raw
         return SemanticAssessment.model_validate(raw)

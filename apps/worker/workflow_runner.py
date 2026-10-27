@@ -51,7 +51,9 @@ from personalos.domain.progress import (
     approval_requested_data,
     approval_resolved_data,
 )
-from personalos.domain.workflow import WorkflowResumeState, WorkflowThread
+from personalos.domain.workflow import WorkflowResumeState, WorkflowThread, thread_namespace
+from personalos.observability import tracing
+from personalos.observability.tracing import Attr
 from personalos.persistence.checkpointer import (
     RUN_STATUS_COMPLETED,
     RUN_STATUS_FAILED,
@@ -258,25 +260,41 @@ class DurableWorkflowRunner:
         correlation_id = configurable.get("correlation_id")
         #: Task id -> node, for every step that started and has not finished.
         running: dict[str, str] = {}
-        self.registry.mark_status(thread.thread_id, RUN_STATUS_RUNNING, started=True)
-        try:
-            final = await self._stream(thread, graph_input, configurable, running)
-        except Exception as exc:
-            self.registry.mark_status(thread.thread_id, RUN_STATUS_FAILED, finished=True)
-            self._note_broken_integration(thread, exc)
-            await self._note_failure(thread, correlation_id, running, exc)
-            raise
+        with tracing.workflow_span(
+            "graph.run",
+            workflow_id=thread.workflow_id,
+            thread_id=thread.thread_id,
+            correlation_id=correlation_id,
+            actor_id=configurable.get("actor_id"),
+            attributes={
+                Attr.GRAPH: thread_namespace(thread.thread_id),
+                "resumed": graph_input is None or isinstance(graph_input, Command),
+            },
+        ) as span:
+            self.registry.mark_status(thread.thread_id, RUN_STATUS_RUNNING, started=True)
+            try:
+                final = await self._stream(thread, graph_input, configurable, running)
+            except Exception as exc:
+                self.registry.mark_status(thread.thread_id, RUN_STATUS_FAILED, finished=True)
+                self._note_broken_integration(thread, exc)
+                await self._note_failure(thread, correlation_id, running, exc)
+                tracing.set_attributes(span, {Attr.OUTCOME: "failed"})
+                raise
 
-        # A graph that stopped at an interrupt (an unanswered approval, say) has
-        # not finished: it is waiting. Marking it completed would hide work that
-        # is still owed a human answer.
-        state = await self.inspect(thread)
-        if state.next:
-            logger.info("thread '%s' paused at step(s) %s", thread.thread_id, ", ".join(state.next))
-        else:
-            self.registry.mark_status(thread.thread_id, RUN_STATUS_COMPLETED, finished=True)
-            self._emit(thread, correlation_id, ProgressEventType.WORKFLOW_COMPLETED, {})
-        return final
+            # A graph that stopped at an interrupt (an unanswered approval, say) has
+            # not finished: it is waiting. Marking it completed would hide work that
+            # is still owed a human answer.
+            state = await self.inspect(thread)
+            if state.next:
+                logger.info(
+                    "thread '%s' paused at step(s) %s", thread.thread_id, ", ".join(state.next)
+                )
+                tracing.set_attributes(span, {Attr.OUTCOME: "paused", Attr.INTERRUPTED: True})
+            else:
+                self.registry.mark_status(thread.thread_id, RUN_STATUS_COMPLETED, finished=True)
+                self._emit(thread, correlation_id, ProgressEventType.WORKFLOW_COMPLETED, {})
+                tracing.set_attributes(span, {Attr.OUTCOME: "completed"})
+            return final
 
     async def _stream(
         self,
@@ -342,6 +360,10 @@ class DurableWorkflowRunner:
         running.pop(task_id, None)
         raised = task.get("interrupts") or ()
         for interrupt in raised:
+            tracing.add_event(
+                "approval.requested",
+                {Attr.NODE: step, Attr.INTERRUPT_IDS: [str(_field(interrupt, "id") or "")]},
+            )
             self._emit(
                 thread,
                 correlation_id,
@@ -377,6 +399,10 @@ class DurableWorkflowRunner:
         except Exception:
             logger.exception("could not read the interrupts of thread '%s'", thread.thread_id)
             interrupt_ids = ()
+        tracing.add_event(
+            "approval.resolved",
+            {Attr.INTERRUPT_IDS: list(interrupt_ids), Attr.NODE: list(state.next)},
+        )
         self._emit(
             thread,
             configurable.get("correlation_id"),

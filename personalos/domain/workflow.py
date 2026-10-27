@@ -336,6 +336,11 @@ class WorkflowCommand(BaseModel):
     correlation_id: UUID
     graph_input: Any = None
     interrupt_ids: tuple[str, ...] = Field(default_factory=tuple)
+    #: W3C trace context (`traceparent`, `baggage`) of the span that queued the
+    #: command, so the worker's run continues the request's trace instead of
+    #: starting its own. Ids only; filled in by the queue. Empty when tracing
+    #: is off.
+    trace_context: dict[str, str] = Field(default_factory=dict)
     created_at: datetime | None = None
 
 

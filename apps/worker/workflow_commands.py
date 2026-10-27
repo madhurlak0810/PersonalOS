@@ -29,9 +29,12 @@ from datetime import timedelta
 from typing import Any
 
 from langgraph.types import Command
+from opentelemetry.trace import SpanKind
 
 from apps.worker.workflow_runner import DurableWorkflowRunner
 from personalos.domain.workflow import WorkflowCommand, WorkflowCommandKind, thread_namespace
+from personalos.observability import tracing
+from personalos.observability.tracing import Attr
 from personalos.persistence.leases import WorkflowLeaseUnavailable
 from personalos.persistence.workflow_commands import WorkflowCommandQueue
 
@@ -136,14 +139,31 @@ async def process_next(
     claimed = queue.claim_next()
     if claimed is None:
         return False
+    command = claimed.command
     try:
-        kind = thread_namespace(claimed.command.thread_id)
-        runner = runners.get(kind or "")
-        if runner is None:
-            raise LookupError(
-                f"no runner is wired for '{kind}' threads (thread '{claimed.command.thread_id}')"
-            )
-        await run_workflow_command(claimed.command, runner, redelivered=claimed.redelivered)
+        # A child of the span that queued the command -- the request, or the
+        # event delivery -- carried across in the command itself.
+        with tracing.workflow_span(
+            f"worker.command.{command.kind.value}",
+            workflow_id=command.workflow_id,
+            correlation_id=command.correlation_id,
+            thread_id=command.thread_id,
+            actor_id=command.actor_id,
+            carrier=command.trace_context,
+            kind=SpanKind.CONSUMER,
+            attributes={
+                Attr.COMMAND_ID: command.command_id,
+                Attr.COMMAND_KIND: command.kind,
+                Attr.ATTEMPT: claimed.attempt,
+            },
+        ):
+            kind = thread_namespace(command.thread_id)
+            runner = runners.get(kind or "")
+            if runner is None:
+                raise LookupError(
+                    f"no runner is wired for '{kind}' threads (thread '{command.thread_id}')"
+                )
+            await run_workflow_command(command, runner, redelivered=claimed.redelivered)
     except WorkflowLeaseUnavailable:
         logger.info(
             "workflow %s is leased elsewhere; returning command %s to the queue",

@@ -63,7 +63,7 @@ LAYERS: tuple[Layer, ...] = (
     Layer(
         name="persistence",
         modules=("personalos.persistence",),
-        allows=("domain", "config"),
+        allows=("domain", "config", "observability"),
         responsibility="stores and retrieves state; makes no decisions",
     ),
     Layer(
@@ -96,7 +96,7 @@ LAYERS: tuple[Layer, ...] = (
     Layer(
         name="tools",
         modules=("personalos.tools",),
-        allows=("domain", "policy"),
+        allows=("domain", "policy", "observability"),
         responsibility=(
             "defines the tool boundary: the gateway that turns approved intents into adapter calls"
         ),
@@ -134,7 +134,7 @@ LAYERS: tuple[Layer, ...] = (
     Layer(
         name="models",
         modules=("personalos.models",),
-        allows=("domain", "config"),
+        allows=("domain", "config", "observability"),
         responsibility="model clients and prompt plumbing",
     ),
     Layer(
@@ -149,13 +149,23 @@ LAYERS: tuple[Layer, ...] = (
             "state",
             "config",
             "secrets",
+            "observability",
         ),
         responsibility=("runs approved intents step by step; cannot reach a tool adapter directly"),
     ),
     Layer(
         name="graphs",
         modules=("personalos.graphs",),
-        allows=("domain", "policy", "executor", "events", "state", "models", "config"),
+        allows=(
+            "domain",
+            "policy",
+            "executor",
+            "events",
+            "state",
+            "models",
+            "config",
+            "observability",
+        ),
         responsibility=(
             "orchestrates which step happens next; delegates all side effects to executors"
         ),
@@ -202,6 +212,22 @@ FORBIDDEN_IMPORTS: tuple[ForbiddenImport, ...] = (
         layer="graphs",
         module_prefix="personalos.bootstrap",
         reason="the composition root wires graphs, not the other way round",
+    ),
+    # Tracing is cross-cutting, so the layers that open spans may import
+    # `observability` -- but only its API (`observability.tracing`, which
+    # depends on opentelemetry-api alone and is a no-op until a provider is
+    # installed). Installing the SDK provider and its exporter is a process
+    # decision, made once by the composition root.
+    *(
+        ForbiddenImport(
+            layer=layer,
+            module_prefix="personalos.observability.tracing_setup",
+            reason=(
+                "only the composition root installs the tracer provider and exporter; "
+                "open spans through personalos.observability.tracing"
+            ),
+        )
+        for layer in ("persistence", "tools", "models", "executor", "graphs")
     ),
 )
 

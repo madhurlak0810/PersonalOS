@@ -29,6 +29,8 @@ from personalos.domain.retry_policy import (
     RetryPolicy,
     retry_after_seconds,
 )
+from personalos.observability import tracing
+from personalos.observability.tracing import Attr
 from personalos.policy import ApprovalGrant, PolicyError, ToolIntent
 from personalos.policy.permissions import DEFAULT_TOOL_PERMISSIONS, PermissionClass
 from personalos.tools.gateway import ToolGateway, ToolResult
@@ -111,7 +113,16 @@ async def dispatch_with_retry(
     attempt = 1
     while True:
         try:
-            return await gateway.dispatch(intent, approval)
+            with tracing.span(
+                "tool.attempt",
+                {
+                    Attr.TOOL_NAME: intent.tool_ref,
+                    Attr.ACTION_ID: intent.intent_id,
+                    Attr.ATTEMPT: attempt,
+                    Attr.MAX_ATTEMPTS: policy.max_attempts,
+                },
+            ):
+                return await gateway.dispatch(intent, approval)
         except Exception as error:
             if not policy.allows_retry(attempt) or not is_retryable(error):
                 raise

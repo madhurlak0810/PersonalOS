@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 from personalos.domain.errors import Conflict
 from personalos.domain.models import OutboxEventStatus
 from personalos.domain.workflow import WorkflowCommand
+from personalos.observability import tracing
 from personalos.persistence.models import OutboxEventModel
 from personalos.persistence.repositories import OutboxEventRepository
 
@@ -103,7 +104,12 @@ class WorkflowCommandQueue:
         checkpoint it answers. Left out, the command id is used, and every
         command is distinct. Raises `DuplicateWorkflowCommand` when an
         equivalent one was queued before.
+
+        A command queued with no `trace_context` is given the current one, so
+        the worker that runs it continues the trace of whatever queued it.
         """
+        if not command.trace_context:
+            command = command.model_copy(update={"trace_context": tracing.inject_trace_context()})
         key = (
             f"{_key_prefix(command.workflow_id)}{command.kind.value}:{dedupe or command.command_id}"
         )

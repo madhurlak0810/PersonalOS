@@ -64,6 +64,7 @@ from personalos.bootstrap import (
 from personalos.config import settings
 from personalos.domain.errors import ValidationFailed
 from personalos.domain.workflow import JOB_SEARCH_THREAD_NAMESPACE
+from personalos.observability.tracing_setup import configure_tracing_from_settings
 from personalos.persistence.checkpointer import (
     RUN_STATUS_COMPLETED,
     RUN_STATUS_FAILED,
@@ -324,6 +325,7 @@ def main(graph_factory: str | None = None) -> None:
     TTL longer for another worker to pick its command up.
     """
     spec = graph_factory if graph_factory is not None else settings.worker_graphs
+    configure_tracing_from_settings("personalos-worker")
     register_mcp_servers()
     graphs = load_graph_factory(spec)(SessionLocal) if spec else WorkerGraphs()
     worker = build_worker(SessionLocal, graphs)

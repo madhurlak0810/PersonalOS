@@ -110,6 +110,10 @@ class EventEnvelope(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     #: Where the source document lives, if anywhere -- `gmail:<message id>`.
     raw_ref: str | None = None
+    #: W3C trace context (`traceparent`, `baggage`) of the span that published
+    #: the event, so its delivery joins the producer's trace. Filled in by the
+    #: transport when the producer left it empty; empty when tracing is off.
+    trace_context: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("type", "source", "dedupe_key")
     @classmethod

@@ -43,9 +43,13 @@ class Settings(BaseSettings):
 
     # Observability
     log_level: str = "INFO"
-    jaeger_enabled: bool = False
-    jaeger_host: str = "localhost"
-    jaeger_port: int = 6831
+    # Tracing (OpenTelemetry). Off unless enabled; with no endpoint, spans are
+    # created and propagated but exported nowhere. The endpoint is an OTLP/HTTP
+    # collector, e.g. http://localhost:4318 for Jaeger's all-in-one image.
+    # See `personalos.observability.tracing_setup`.
+    tracing_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = ""
+    otel_service_name: str = ""
 
     # MCP Servers
     mcp_files_enabled: bool = True
