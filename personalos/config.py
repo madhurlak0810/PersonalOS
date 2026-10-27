@@ -43,6 +43,9 @@ class Settings(BaseSettings):
 
     # Observability
     log_level: str = "INFO"
+    # `json` (one object per line, for shipping) or `text` (for a terminal).
+    # See `personalos.observability.structured_logging`.
+    log_format: str = "json"
     # Tracing (OpenTelemetry). Off unless enabled; with no endpoint, spans are
     # created and propagated but exported nowhere. The endpoint is an OTLP/HTTP
     # collector, e.g. http://localhost:4318 for Jaeger's all-in-one image.

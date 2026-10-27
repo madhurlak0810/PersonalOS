@@ -232,6 +232,7 @@ from personalos.domain.recruiter_events import (
 )
 from personalos.domain.redaction import redact
 from personalos.domain.workflow import job_search_thread_id
+from personalos.observability.structured_logging import LogEvent
 from personalos.observability.tracing import traced_node
 
 logger = logging.getLogger(__name__)
@@ -1596,11 +1597,17 @@ class JobSearchGraph:
                     requests[intent.action_id].model_dump(mode="json") for intent in outstanding
                 ],
             }
-            logger.info(
-                "pausing the run: %s action(s) await approval (%s)",
-                len(outstanding),
-                ", ".join(intent.kind.value for intent in outstanding),
-            )
+            for intent in outstanding:
+                logger.info(
+                    "action %s (%s) awaits approval",
+                    intent.action_id,
+                    intent.kind.value,
+                    extra={
+                        "event": LogEvent.APPROVAL_REQUESTED,
+                        "action_id": intent.action_id,
+                        "approval_id": requests[intent.action_id].request_id,
+                    },
+                )
             # Raises `GraphInterrupt` the first time through, which checkpoints
             # the thread and ends the invocation; on a resume it returns the
             # value the caller supplied instead. Everything the answer is

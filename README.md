@@ -60,6 +60,7 @@ For the full architecture diagram and the allowed dependency direction between l
 - Trace context travels in the workflow commands and event envelopes that cross the outbox, so an async continuation joins the trace that caused it
 - Spans for every graph node, model call, policy decision, tool execution, attempt, and receipt, all with the same ids (`workflow_id`, `thread_id`, `correlation_id`, `node`, `tool_name`, `action_id`, `policy_decision`, `attempt`). Payloads are referenced by id and never embedded, and spans are redacted before export
 - Off by default. Set `TRACING_ENABLED=true` and `OTEL_EXPORTER_OTLP_ENDPOINT` (an OTLP/HTTP collector such as Jaeger at `http://localhost:4318`) to turn it on; no code change is needed
+- Structured JSON logs (`LOG_FORMAT=json`, the default; `text` for a terminal). Every line has `timestamp`, `level`, `component`, `event`, `workflow_id` and `correlation_id`, plus `action_id`/`operation_id` when one is active. The ids are bound through context, so code inside a node or worker task never passes them. Policy decisions, approvals, retries and failures use fixed `event` names and levels, and carry the policy-decision and approval ids the audit trail cites. Credentials are redacted before a line is written
 
 ### API and tools
 

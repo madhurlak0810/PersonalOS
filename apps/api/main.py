@@ -13,6 +13,10 @@ from apps.api.errors import register_error_handlers
 from personalos.bootstrap import initialize_mcp_servers
 from personalos.config import settings
 from personalos.observability import tracing
+from personalos.observability.structured_logging import (
+    configure_logging_from_settings,
+    log_scope,
+)
 from personalos.observability.tracing_setup import configure_tracing_from_settings
 from personalos.persistence import init_db
 
@@ -35,7 +39,8 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
     It is also the request's tracing context: a caller's W3C `traceparent` is
     extracted, so the workflow span a route opens links back to the caller's
     trace, and the correlation id goes into baggage, so every span the request
-    produces carries it.
+    produces carries it -- and the request's log scope, so every log line
+    written while handling it carries it too.
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -51,7 +56,7 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
             str(correlation_id),
             tracing.extract_trace_context(request.headers),
         )
-        with tracing.attached(ctx):
+        with tracing.attached(ctx), log_scope(correlation_id=correlation_id):
             response = await call_next(request)
         response.headers[CORRELATION_ID_HEADER] = str(correlation_id)
         return response
@@ -74,6 +79,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     """Create and configure FastAPI application."""
+    configure_logging_from_settings()
     app = FastAPI(
         title=settings.app_name,
         description="PersonalOS - Local-first agentic assistant",

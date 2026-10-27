@@ -30,6 +30,7 @@ from personalos.domain.retry_policy import (
     retry_after_seconds,
 )
 from personalos.observability import tracing
+from personalos.observability.structured_logging import LogEvent
 from personalos.observability.tracing import Attr
 from personalos.policy import ApprovalGrant, PolicyError, ToolIntent
 from personalos.policy.permissions import DEFAULT_TOOL_PERMISSIONS, PermissionClass
@@ -137,6 +138,12 @@ async def dispatch_with_retry(
                     intent.context.as_log_str(),
                     retry_after,
                     error,
+                    extra={
+                        "event": LogEvent.RETRY_ABANDONED,
+                        "action_id": intent.intent_id,
+                        Attr.ATTEMPT: attempt,
+                        Attr.MAX_ATTEMPTS: policy.max_attempts,
+                    },
                 )
                 raise
             delay = policy.delay(attempt, retry_after=retry_after, rand=rand)
@@ -148,6 +155,13 @@ async def dispatch_with_retry(
                 intent.context.as_log_str(),
                 delay,
                 error,
+                extra={
+                    "event": LogEvent.RETRY_SCHEDULED,
+                    "action_id": intent.intent_id,
+                    Attr.ATTEMPT: attempt,
+                    Attr.MAX_ATTEMPTS: policy.max_attempts,
+                    Attr.RETRY_DELAY: delay,
+                },
             )
             await sleep(delay)
             attempt += 1

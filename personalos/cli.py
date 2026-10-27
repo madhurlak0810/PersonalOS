@@ -6,9 +6,10 @@ import click
 import uvicorn
 
 from personalos.config import settings
+from personalos.observability.structured_logging import configure_logging_from_settings
 from personalos.persistence import init_db
 
-logging.basicConfig(level=settings.log_level)
+configure_logging_from_settings()
 logger = logging.getLogger(__name__)
 
 
@@ -34,6 +35,9 @@ def api(host: str, port: int, workers: int, reload: bool):
         port=port,
         workers=workers if not reload else 1,
         reload=reload,
+        # Leave uvicorn's loggers handler-less, so they propagate to the root
+        # handler the app installs and come out structured like everything else.
+        log_config=None,
     )
 
 

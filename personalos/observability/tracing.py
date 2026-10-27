@@ -29,6 +29,12 @@ arrived in) rather than losing it. `workflow_id`, `correlation_id`,
 stamped with them (`tracing_setup.ScopeAttributesSpanProcessor`), so a tool
 span deep in an executor carries the same ids as the request span above it.
 
+The same ids scope the *log lines* written under a span: `workflow_span`,
+`node_span` and `span` bind them -- and an action, command, event or approval
+id among a span's attributes -- to `structured_logging.log_scope`, so a log
+call inside a node or an executor names its workflow without being told.
+That holds with tracing off too; logs do not depend on spans being recorded.
+
 **No payload goes on a span.** `clean_attributes` keeps scalars and sequences
 of scalars and drops anything else -- a dict, a model, a message body -- so a
 span refers to an action, a command or an event by id and never embeds it.
@@ -64,6 +70,8 @@ from opentelemetry.trace import (
     StatusCode,
     TraceFlags,
 )
+
+from personalos.observability.structured_logging import log_scope
 
 #: Instrumentation scope every PersonalOS span is created under.
 TRACER_NAME = "personalos"
@@ -103,6 +111,19 @@ class Attr:
     MODEL_NAME = "model_name"
     GRAPH = "graph"
 
+
+#: Span attributes that also scope the log lines written while the span is
+#: current (see `structured_logging`).
+_LOG_SCOPED_ATTRIBUTES = (
+    Attr.ACTION_ID,
+    Attr.NODE,
+    Attr.GRAPH,
+    Attr.TOOL_NAME,
+    Attr.COMMAND_ID,
+    Attr.EVENT_ID,
+    Attr.APPROVAL_ID,
+    Attr.ATTEMPT,
+)
 
 #: The ids that scope a workflow's spans. Carried in baggage, so they cross
 #: the outbox with the trace context, and copied onto every span started under
@@ -291,6 +312,19 @@ def attached(ctx: otel_context.Context) -> Iterator[None]:
 # --- Spans ------------------------------------------------------------------------------
 
 
+def _log_fields(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The log scope a span with these attributes binds: its ids, never its payload.
+
+    `operation_id` is the command or event being processed, whichever the
+    span names, so a log line says what unit of work it was part of under one
+    field whichever kind of work it was.
+    """
+    attributes = attributes or {}
+    fields = {key: attributes.get(key) for key in _LOG_SCOPED_ATTRIBUTES}
+    fields["operation_id"] = attributes.get(Attr.COMMAND_ID) or attributes.get(Attr.EVENT_ID)
+    return fields
+
+
 @contextmanager
 def _running(new: Span, ctx: otel_context.Context | None = None) -> Iterator[Span]:
     """Make `new` current (under `ctx`, if given) and end it when the block does.
@@ -329,7 +363,7 @@ def span(
 ) -> Iterator[Span]:
     """A span under whatever is current. Exceptions are recorded, then re-raised."""
     new = tracer().start_span(name, kind=kind, attributes=clean_attributes(attributes))
-    with _running(new) as current:
+    with log_scope(**_log_fields(attributes)), _running(new) as current:
         yield current
 
 
@@ -374,12 +408,48 @@ def workflow_span(
 
     The scope ids given here (and any already in baggage) are set on this
     span and carried to every span under it. With tracing off this is a plain
-    no-op span, and the context is left alone.
+    no-op span, and the context is left alone -- but the log scope is still
+    bound.
     """
-    if not enabled():
-        with span(name, kind=kind) as noop:
-            yield noop
-        return
+    with log_scope(
+        workflow_id=workflow_id,
+        correlation_id=correlation_id or baggage.get_baggage(Attr.CORRELATION_ID),
+        thread_id=thread_id,
+        actor_id=actor_id,
+        **_log_fields(attributes),
+    ):
+        if not enabled():
+            with span(name, kind=kind) as noop:
+                yield noop
+            return
+        with _workflow_span(
+            name,
+            workflow_id=workflow_id,
+            correlation_id=correlation_id,
+            thread_id=thread_id,
+            actor_id=actor_id,
+            carrier=carrier,
+            attributes=attributes,
+            kind=kind,
+            root=root,
+        ) as opened:
+            yield opened
+
+
+@contextmanager
+def _workflow_span(
+    name: str,
+    *,
+    workflow_id: UUID,
+    correlation_id: UUID | str | None,
+    thread_id: str | None,
+    actor_id: str | None,
+    carrier: Mapping[str, str] | None,
+    attributes: Mapping[str, Any] | None,
+    kind: SpanKind,
+    root: bool,
+) -> Iterator[Span]:
+    """`workflow_span` with tracing on: the parenting and baggage described there."""
     trace_id = workflow_trace_id(workflow_id)
     ctx = otel_context.get_current()
     links: list[Link] = []

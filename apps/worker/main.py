@@ -64,6 +64,7 @@ from personalos.bootstrap import (
 from personalos.config import settings
 from personalos.domain.errors import ValidationFailed
 from personalos.domain.workflow import JOB_SEARCH_THREAD_NAMESPACE
+from personalos.observability.structured_logging import configure_logging_from_settings
 from personalos.observability.tracing_setup import configure_tracing_from_settings
 from personalos.persistence.checkpointer import (
     RUN_STATUS_COMPLETED,
@@ -353,5 +354,5 @@ __all__ = [
 
 
 if __name__ == "__main__":  # pragma: no cover - the process entry point
-    logging.basicConfig(level=settings.log_level)
+    configure_logging_from_settings()
     main()
