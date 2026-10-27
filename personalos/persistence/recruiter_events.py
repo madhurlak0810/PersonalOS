@@ -33,6 +33,7 @@ from personalos.domain.recruiter_events import (
     RecruiterEvent,
     RecruiterEventRecord,
 )
+from personalos.persistence.event_outbox import stage_raw_event
 from personalos.persistence.models import (
     ApplicationModel,
     CommitmentModel,
@@ -42,7 +43,6 @@ from personalos.persistence.models import (
 from personalos.persistence.repositories import (
     ApplicationRepository,
     CommunicationEventRepository,
-    OutboxEventRepository,
 )
 
 logger = logging.getLogger(__name__)
@@ -279,15 +279,13 @@ class SqlRecruiterEventStore:
                 {ApplicationModel.last_activity_at: now}, synchronize_session=False
             )
 
-        outbox = OutboxEventRepository(session)
         for emitted in emit:
-            if emitted.dedupe_key and outbox.get_by_dedupe_key(emitted.dedupe_key) is not None:
-                continue
-            outbox.create(
+            stage_raw_event(
+                session,
                 type=emitted.type.value,
                 payload=emitted.payload,
                 dedupe_key=emitted.dedupe_key,
-                commit=False,
+                skip_duplicate=True,
             )
 
         session.flush()

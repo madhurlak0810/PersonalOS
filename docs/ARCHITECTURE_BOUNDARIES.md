@@ -329,6 +329,14 @@ Durability lives here rather than in `graphs` because `graphs` may not import
   into transactions: the claim on its own before the call, then the receipt,
   the `audit_events` row and the outbox event together after it. It records and
   decides nothing; `executor.tool_executor.ToolExecutor` drives it.
+- **`EventOutbox`** is the first implementation of the event-transport ports
+  (`EventPublisher`, `EventConsumer` in `domain/event_transport.py`). The
+  outbox tables are its implementation detail. Only the modules that implement
+  it (`OUTBOX_OWNERS` in the spec) may name `OutboxEventModel`,
+  `ConsumedEventModel` or `OutboxEventRepository`. Every other producer stages
+  events through `stage_event`, and every worker consumes through the port. See
+  [EVENT_TRANSPORT.md](EVENT_TRANSPORT.md) for the contract and the path to a
+  broker.
 
 ### `secrets` — `personalos/secrets/`
 
@@ -419,7 +427,7 @@ string looks:
 | Layer | Owns | May import |
 | --- | --- | --- |
 | `config` | settings from the environment | nothing internal |
-| `events` | domain events between layers | `domain` |
+| `events` | domain events between layers; the in-memory event transport | `domain` |
 | `state` | in-flight agent state | `domain`, `persistence` |
 | `observability` | logging, metrics, tracing | `domain`, `config` |
 | `retrieval` | retrieval and ranking | `domain`, `persistence`, `config` |
@@ -769,6 +777,9 @@ From [test_boundaries.py](../tests/architecture/test_boundaries.py):
   depends on nothing internal.
 - Nothing outside `personalos/policy/` references the approval-minting
   internals.
+- Nothing outside the modules that implement the outbox names its tables or
+  repository, whether by import or by attribute. The checker is shown to flag
+  planted references from a worker, a route, a producer and `bootstrap`.
 - This document exists, describes every declared layer, and points at the spec.
 
 From [test_intent_boundary.py](../tests/architecture/test_intent_boundary.py):

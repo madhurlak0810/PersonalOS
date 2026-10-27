@@ -532,7 +532,7 @@ def test_a_terminal_failure_is_dead_lettered_without_retrying(factory, clock):
     outbox.publish(envelope)
     claimed = outbox.claim()
 
-    failure = outbox.fail(claimed, ProviderPermanentFailure(provider="gmail"))
+    failure = outbox.nack(claimed, ProviderPermanentFailure(provider="gmail"))
 
     assert failure.outcome == FailureOutcome.DEAD_LETTERED
     assert _row(factory, envelope.event_id).status == OutboxEventStatus.DEAD_LETTER.value
@@ -546,7 +546,7 @@ def test_a_late_failure_from_a_lapsed_claim_writes_nothing(factory, clock):
     clock.advance(TIMEOUT + timedelta(seconds=1))
     assert outbox.claim() is not None
 
-    assert outbox.fail(stale, RetryableFailure()).outcome == FailureOutcome.CLAIM_LOST
+    assert outbox.nack(stale, RetryableFailure()).outcome == FailureOutcome.CLAIM_LOST
     assert _row(factory, envelope.event_id).status == OutboxEventStatus.IN_PROGRESS.value
 
 

@@ -6,6 +6,8 @@ not that the check is being fussy: fix the import, or change the declared
 boundary deliberately in both the spec and the doc.
 """
 
+import ast
+
 import pytest
 
 from tests.architecture.boundaries import (
@@ -13,12 +15,16 @@ from tests.architecture.boundaries import (
     FORBIDDEN_IMPORTS,
     LAYERS,
     LAYERS_BY_NAME,
+    OUTBOX_INTERNALS,
+    OUTBOX_OWNERS,
     REPO_ROOT,
     ImportEdge,
     Scan,
+    SymbolReference,
     iter_source_files,
     layer_for_module,
     module_name_for_path,
+    outbox_references,
     scan_imports,
     violations,
 )
@@ -139,6 +145,65 @@ def test_checker_permits_intended_dependency(source_module: str, target_module: 
     assert not problems, f"checker wrongly flagged {source_module} -> {target_module}"
 
 
+def _planted_symbol(source_module: str, symbol: str) -> Scan:
+    """A scan containing exactly one synthetic reference to `symbol`."""
+    return Scan(
+        symbols=[
+            SymbolReference(
+                source_module=source_module,
+                symbol=symbol,
+                path=REPO_ROOT / "personalos" / "planted.py",
+                lineno=1,
+            )
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "source_module,symbol",
+    [
+        # A handler or worker reading the outbox table instead of its consumer port.
+        ("apps.worker.outbox_dispatcher", "OutboxEventModel"),
+        ("apps.worker.event_routing", "ConsumedEventModel"),
+        ("apps.api.routes.failures", "OutboxEventModel"),
+        # A producer writing the row itself instead of staging an event.
+        ("personalos.persistence.recruiter_events", "OutboxEventRepository"),
+        ("personalos.persistence.execution_ledger", "OutboxEventRepository"),
+        ("personalos.executor.tool_executor", "OutboxEventRepository"),
+        ("personalos.bootstrap", "OutboxEventModel"),
+        ("personalos.events.memory", "OutboxEventModel"),
+    ],
+)
+def test_checker_rejects_outbox_internals_outside_the_outbox(source_module: str, symbol: str):
+    """Naming an outbox table or its repository outside the outbox is flagged."""
+    problems = violations(_planted_symbol(source_module, symbol))
+    assert problems, f"checker failed to flag {source_module} -> {symbol}"
+
+
+@pytest.mark.parametrize("source_module", OUTBOX_OWNERS)
+def test_checker_permits_outbox_internals_inside_the_outbox(source_module: str):
+    """The modules that implement the outbox may name its internals."""
+    for symbol in OUTBOX_INTERNALS:
+        assert not violations(_planted_symbol(source_module, symbol))
+
+
+def test_scan_sees_outbox_internals_however_they_are_reached():
+    """Imported by name or reached as a module attribute, the reference is recorded."""
+    source = (
+        "import personalos.persistence.models as models\n"
+        "from personalos.persistence.repositories import OutboxEventRepository\n"
+        "rows = models.OutboxEventModel\n"
+        '"""A docstring naming ConsumedEventModel is not a reference."""\n'
+    )
+    found = {
+        (ref.symbol, ref.lineno)
+        for ref in outbox_references(
+            ast.parse(source), "apps.planted", REPO_ROOT / "apps" / "planted.py"
+        )
+    }
+    assert found == {("OutboxEventRepository", 2), ("OutboxEventModel", 3)}
+
+
 # ----------------------------------------------------------------------
 # Named guarantees, stated directly so a reader of the test names can see
 # what the architecture promises.
@@ -194,6 +259,12 @@ def test_domain_depends_on_nothing_internal(scan: Scan):
         if not target.startswith("personalos.domain")
     ]
     assert not offenders, f"domain took on a dependency: {offenders}"
+
+
+def test_only_the_outbox_names_its_tables(scan: Scan):
+    """Producers, handlers and workflows see envelopes and ports, never outbox rows."""
+    offenders = [str(ref) for ref in scan.symbols if ref.source_module not in OUTBOX_OWNERS]
+    assert not offenders, f"outbox internals referenced outside the outbox: {offenders}"
 
 
 def test_only_the_policy_layer_can_mint_approvals():

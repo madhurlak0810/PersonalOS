@@ -18,7 +18,7 @@ therefore be *delivered* more than once, and consumers deduplicate on the
 envelope's `dedupe_key` (`personalos.persistence.event_inbox`) so that it is
 *applied* once.
 
-**A failed delivery backs off, then dead-letters.** `fail` puts the row back
+**A failed delivery backs off, then dead-letters.** `nack` puts the row back
 to PENDING with an `available_at` set by the retry policy -- exponential
 backoff with jitter, never sooner than a `Retry-After` the handler's error
 carried (`personalos.domain.retry_policy`). Once the policy's attempts are
@@ -34,6 +34,14 @@ QUARANTINED on its first failure. Both dead-lettered and quarantined rows keep
 the workflow they belong to, when it can be told, and come back on an
 operator's `requeue`.
 
+**It is one implementation of the transport ports.** `EventOutbox` is an
+`EventPublisher` and an `EventConsumer` (`personalos.domain.event_transport`),
+and passes the same contract suite as the in-memory transport. Nothing outside
+the persistence modules that implement the outbox touches `outbox_events`
+directly -- `tests/architecture` enforces it -- so the transport can change
+without its producers and handlers changing; `docs/EVENT_TRANSPORT.md` says
+what would.
+
 Rows staged before envelopes existed (plain `type` + payload, written by
 `OutboxEventRepository.create` directly) are read as envelopes too, with the
 row's own id, type and creation time standing in for the fields they lack.
@@ -44,18 +52,27 @@ import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from enum import Enum
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from personalos.domain.errors import PersonalOSError, ValidationFailed
+from personalos.domain.event_transport import (
+    Delivery,
+    DeliveryFailure,
+    FailureOutcome,
+    Published,
+    classify_failure,
+    is_poison,
+    is_terminal,
+    lapsed_lease_error,
+)
 from personalos.domain.events import ENVELOPE_KEY, EventEnvelope
 from personalos.domain.failures import describe_exception
 from personalos.domain.models import OutboxEventStatus
 from personalos.domain.redaction import redact_text
-from personalos.domain.retry_policy import EVENT_DELIVERY, RetryPolicy, retry_after_seconds
+from personalos.domain.retry_policy import EVENT_DELIVERY, RetryPolicy
 from personalos.persistence.models import OutboxEventModel, WorkflowModel, WorkflowRunModel
 from personalos.persistence.repositories import OutboxEventRepository
 
@@ -94,6 +111,35 @@ def stage_event(session: Session, envelope: EventEnvelope) -> OutboxEventModel:
     unique constraint on `dedupe_key` still backs this up against a racing
     producer, whose commit then fails as a unit.
     """
+    return _stage(session, envelope)[0]
+
+
+def stage_raw_event(
+    session: Session,
+    *,
+    type: str,
+    payload: dict[str, Any],
+    dedupe_key: str | None = None,
+    skip_duplicate: bool = False,
+) -> OutboxEventModel | None:
+    """Add an un-enveloped event to the outbox inside the caller's open transaction.
+
+    For producers that predate `EventEnvelope` and whose rows consumers still
+    read as a bare payload; the dispatcher reads such a row as an envelope
+    built around it (`envelope_from_row`). New producers use `stage_event`.
+
+    A `dedupe_key` already in the outbox fails the caller's commit with an
+    `IntegrityError`, unless `skip_duplicate`, which stages nothing and
+    returns `None`. Does not commit.
+    """
+    outbox = OutboxEventRepository(session)
+    if skip_duplicate and dedupe_key is not None and outbox.get_by_dedupe_key(dedupe_key):
+        return None
+    return outbox.create(type=type, payload=payload, dedupe_key=dedupe_key, commit=False)
+
+
+def _stage(session: Session, envelope: EventEnvelope) -> tuple[OutboxEventModel, bool]:
+    """(the row holding `envelope`'s fact, whether it was already there)."""
     outbox = OutboxEventRepository(session)
     existing = outbox.get_by_dedupe_key(envelope.dedupe_key)
     if existing is not None:
@@ -103,14 +149,15 @@ def stage_event(session: Session, envelope: EventEnvelope) -> OutboxEventModel:
             envelope.type,
             existing.id,
         )
-        return existing
-    return outbox.create(
+        return existing, True
+    row = outbox.create(
         id=envelope.event_id,
         type=envelope.type,
         payload={ENVELOPE_KEY: envelope.model_dump(mode="json")},
         dedupe_key=envelope.dedupe_key,
         commit=False,
     )
+    return row, False
 
 
 def envelope_from_row(row: OutboxEventModel) -> EventEnvelope:
@@ -133,60 +180,18 @@ def envelope_from_row(row: OutboxEventModel) -> EventEnvelope:
     )
 
 
-def is_poison(error: BaseException) -> bool:
-    """True when no redelivery could make this failure go away: the event is malformed."""
-    return isinstance(error, ValidationFailed)
-
-
-def is_terminal(error: BaseException) -> bool:
-    """True for a classified failure the error itself says not to retry.
-
-    A policy refusal, a revoked integration: delivering again gets the same
-    answer. An unclassified exception is not terminal -- it may be a database
-    blip -- and gets the policy's retries.
-    """
-    return isinstance(error, PersonalOSError) and not error.retryable and not is_poison(error)
-
-
 @dataclass(frozen=True)
-class ClaimedEvent:
-    """An event a dispatcher now holds the lease on."""
+class ClaimedEvent(Delivery):
+    """An outbox row a dispatcher now holds the lease on."""
 
     outbox_id: UUID
-    envelope: EventEnvelope
-    #: Which claim of this row this is, counting from 1.
-    attempt: int
     #: The claim's token: settling a row is conditional on it, so a dispatcher
     #: whose lease expired cannot settle a row another one has since claimed.
     claimed_at: datetime
 
 
-class FailureOutcome(str, Enum):
-    """What `EventOutbox.fail` did with a failed delivery."""
-
-    #: Back in line, claimable again after `delay` seconds.
-    RETRY_SCHEDULED = "retry_scheduled"
-    #: Out of attempts (or failed in a way no retry fixes); parked for an operator.
-    DEAD_LETTERED = "dead_lettered"
-    #: Malformed; parked for an operator without a single retry.
-    QUARANTINED = "quarantined"
-    #: The claim had lapsed and another dispatcher holds the row; nothing written.
-    CLAIM_LOST = "claim_lost"
-
-
-@dataclass(frozen=True)
-class DeliveryFailure:
-    """The outcome of recording one failed delivery."""
-
-    outcome: FailureOutcome
-    #: The sanitized error the row now carries.
-    error: str
-    #: Seconds until the row is claimable again, for a scheduled retry.
-    delay: float | None = None
-
-
 class EventOutbox:
-    """Claims enveloped events for dispatch and settles them afterwards.
+    """The Postgres outbox as an event transport: publishes, claims and settles events.
 
     Each call is its own short transaction from `session_factory`, for the
     reason `WorkflowCommandQueue` gives: a claim made inside a caller's
@@ -227,13 +232,26 @@ class EventOutbox:
         """Deliveries a row gets before it is dead-lettered."""
         return self.retry_policy.max_attempts
 
-    def publish(self, envelope: EventEnvelope) -> OutboxEventModel:
-        """Stage and commit an event on its own, for a producer with no mutation to pair it with."""
+    def publish(self, envelope: EventEnvelope) -> Published:
+        """Stage and commit an event on its own, for a producer with no mutation to pair it with.
+
+        A producer that has a mutation to pair the event with calls
+        `stage_event` inside its own transaction instead.
+        """
         session = self.session_factory()
         try:
-            row = stage_event(session, envelope)
+            row, duplicate = _stage(session, envelope)
+            event_id = row.id
             session.commit()
-            return row
+            return Published(event_id=event_id, duplicate=duplicate)
+        except IntegrityError:
+            # A racing publisher committed the same fact between our lookup
+            # and our insert; theirs is the copy that counts.
+            session.rollback()
+            existing = OutboxEventRepository(session).get_by_dedupe_key(envelope.dedupe_key)
+            if existing is None:
+                raise
+            return Published(event_id=existing.id, duplicate=True)
         except Exception:
             session.rollback()
             raise
@@ -294,12 +312,7 @@ class EventOutbox:
             if attempts > self.max_attempts:
                 # Every earlier claim lapsed without being settled: the handler
                 # keeps taking its worker down, or outlives the lease.
-                self._dead_letter(
-                    claimed,
-                    f"the event's lease lapsed {attempts - 1} times without the delivery "
-                    f"being settled (the worker crashed or the handler outran the "
-                    f"{self.visibility_timeout} visibility timeout)",
-                )
+                self._dead_letter(claimed, lapsed_lease_error(attempts, self.visibility_timeout))
                 continue
             if attempts > 1:
                 logger.warning(
@@ -312,26 +325,25 @@ class EventOutbox:
             return claimed
         return None
 
-    def ack(self, claimed: ClaimedEvent) -> bool:
+    def ack(self, claimed: Delivery) -> bool:
         """Mark a claimed event delivered. False if the claim had already lapsed and moved on."""
         return self._settle(
-            claimed,
+            _own(claimed),
             {
                 OutboxEventModel.status: OutboxEventStatus.DISPATCHED.value,
                 OutboxEventModel.dispatched_at: self.clock(),
             },
         )
 
-    def fail(self, claimed: ClaimedEvent, error: BaseException) -> DeliveryFailure:
+    def nack(self, claimed: Delivery, error: BaseException) -> DeliveryFailure:
         """Record a failed delivery: back off and retry, dead-letter, or quarantine.
 
-        A poison event (`is_poison`) is quarantined on its first failure. A
-        failure the error itself calls terminal, or one on the last attempt the
-        policy allows, is dead-lettered. Anything else is put back in line
-        after the policy's backoff, or the error's `Retry-After` if longer.
+        `classify_failure` decides which, the same way for every transport.
         """
-        text = describe_exception(error)
-        if is_poison(error):
+        claimed = _own(claimed)
+        plan = classify_failure(error, claimed.attempt, self.retry_policy, rand=self.rand)
+        text = plan.error
+        if plan.outcome is FailureOutcome.QUARANTINED:
             settled = self._park_claim(claimed, OutboxEventStatus.QUARANTINED, text)
             logger.error(
                 "outbox event %s (%s) is malformed; quarantined without a retry: %s",
@@ -339,19 +351,13 @@ class EventOutbox:
                 claimed.envelope.type,
                 text,
             )
-            return DeliveryFailure(
-                FailureOutcome.QUARANTINED if settled else FailureOutcome.CLAIM_LOST, text
-            )
+            return plan if settled else DeliveryFailure(FailureOutcome.CLAIM_LOST, text)
 
-        if is_terminal(error) or not self.retry_policy.allows_retry(claimed.attempt):
+        if plan.outcome is FailureOutcome.DEAD_LETTERED:
             settled = self._dead_letter(claimed, text)
-            return DeliveryFailure(
-                FailureOutcome.DEAD_LETTERED if settled else FailureOutcome.CLAIM_LOST, text
-            )
+            return plan if settled else DeliveryFailure(FailureOutcome.CLAIM_LOST, text)
 
-        delay = self.retry_policy.delay(
-            claimed.attempt, retry_after=retry_after_seconds(error), rand=self.rand
-        )
+        delay = plan.delay
         settled = self._settle(
             claimed,
             {
@@ -372,7 +378,12 @@ class EventOutbox:
             delay,
             text,
         )
-        return DeliveryFailure(FailureOutcome.RETRY_SCHEDULED, text, delay)
+        return plan
+
+    def dead_letter(self, claimed: Delivery, reason: BaseException | str) -> bool:
+        """Park a claimed event for an operator now, whatever its retry budget says."""
+        text = reason if isinstance(reason, str) else describe_exception(reason)
+        return self._dead_letter(_own(claimed), text)
 
     def requeue(self, outbox_id: UUID) -> OutboxEventModel | None:
         """Put a dead-lettered or quarantined event back in line, with a fresh budget.
@@ -493,6 +504,12 @@ class EventOutbox:
         return updated == 1
 
 
+def _own(delivery: Delivery) -> ClaimedEvent:
+    if not isinstance(delivery, ClaimedEvent):
+        raise TypeError(f"the outbox cannot settle a {type(delivery).__name__} it did not hand out")
+    return delivery
+
+
 def _workflow_hint(envelope: dict[str, Any]) -> tuple[UUID | None, UUID | None]:
     """(workflow id named in the payload, correlation id) of a possibly malformed envelope."""
     payload = envelope.get("payload")
@@ -539,4 +556,5 @@ __all__ = [
     "is_poison",
     "is_terminal",
     "stage_event",
+    "stage_raw_event",
 ]
