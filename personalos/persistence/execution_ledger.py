@@ -35,10 +35,9 @@ from sqlalchemy.orm import Session
 
 from personalos.domain.events import EventEnvelope
 from personalos.domain.models import AuditEventResult
-from personalos.persistence.event_outbox import stage_event
+from personalos.persistence.event_outbox import stage_event, stage_raw_event
 from personalos.persistence.repositories import (
     AuditEventRepository,
-    OutboxEventRepository,
     PolicyDecisionRepository,
     ToolExecutionRepository,
     WorkflowRepository,
@@ -147,13 +146,13 @@ class ExecutionLedger:
                 AuditEventResult.SUCCESS if succeeded else AuditEventResult.FAILURE,
             )
             if event is not None and succeeded:
-                OutboxEventRepository(session).create(
+                stage_raw_event(
+                    session,
                     type=event.type,
                     payload={**event.payload, "operation_id": str(execution.operation_id)},
                     # One execution row, one event: a second enqueue for the
                     # same execution is a duplicate by construction.
                     dedupe_key=f"{event.type}:{execution.operation_id}",
-                    commit=False,
                 )
             session.commit()
         except Exception:

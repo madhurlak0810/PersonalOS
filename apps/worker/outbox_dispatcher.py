@@ -1,25 +1,27 @@
-"""The worker half of the outbox: claim an event, deliver it, settle it.
+"""The worker half of event delivery: claim an event, deliver it, settle it.
 
-`OutboxDispatcher.process_next` is one delivery: claim the oldest claimable
-row from `EventOutbox`, hand its envelope to the handler registered for its
-type (or the default handler, typically `EventRouter`), then `ack` it. Any
-number of dispatchers can run this against the same database at once: the
-claim is `SELECT ... FOR UPDATE SKIP LOCKED`, so each row goes to one of them.
+`OutboxDispatcher.process_next` is one delivery: claim the next ready event
+from an `EventConsumer`, hand its envelope to the handler registered for its
+type (or the default handler, typically `EventRouter`), then `ack` it. The
+dispatcher knows the transport only through that port: in production it is
+the Postgres outbox (`EventOutbox`, built by `build_event_outbox`), whose claim
+is `SELECT ... FOR UPDATE SKIP LOCKED`, so any number of dispatchers can run
+against the same database at once and each row goes to one of them.
 
 What a dispatcher promises is *at-least-once*, not exactly-once. It acks only
 after its handler returns, so a crash in between -- after the effect, before
-the ack -- leaves the row claimed by nobody, and once the claim's lease runs
+the ack -- leaves the event claimed by nobody, and once the claim's lease runs
 out another dispatcher delivers it again. That redelivery is safe because
 handlers are idempotent on the envelope's `dedupe_key`
 (`IdempotentConsumer`, or `EventRouter`'s deduplicated commands), which is the
 other half of the bargain and the one that makes an event *apply* once.
 
-A handler that raises is not retried on the spot: `EventOutbox.fail` puts the
-row back in line after an exponential, jittered backoff (or the error's
+A handler that raises is not retried on the spot: `EventConsumer.nack` puts the
+event back in line after an exponential, jittered backoff (or the error's
 `Retry-After`), and dead-letters it once the retry policy is spent. A
 malformed event (`ValidationFailed`) is quarantined at once; delivering it
 again would fail the same way. A dispatcher that is cancelled or killed
-mid-delivery settles nothing: the row's lease runs out and another dispatcher
+mid-delivery settles nothing: the event's lease runs out and another dispatcher
 picks it up.
 
 `run` is the polling loop the worker process drives: deliver while there is
@@ -45,9 +47,9 @@ from personalos.bootstrap import (
     build_workflow_thread_registry,
     register_event_handler_thread,
 )
+from personalos.domain.event_transport import EventConsumer
 from personalos.domain.events import EventEnvelope, EventType
 from personalos.persistence.database import SessionLocal
-from personalos.persistence.event_outbox import EventOutbox
 
 logger = logging.getLogger(__name__)
 
@@ -56,27 +58,27 @@ EventHandler = Callable[[EventEnvelope], Awaitable[Any]]
 
 
 class OutboxDispatcher:
-    """Delivers outbox events to their handlers, one claimed row at a time."""
+    """Delivers events to their handlers, one claimed event at a time."""
 
     def __init__(
         self,
-        outbox: EventOutbox,
+        consumer: EventConsumer,
         handlers: Mapping[str, EventHandler],
         *,
         default: EventHandler | None = None,
     ):
-        """Initialize with the outbox, per-type handlers, and the handler for every other type.
+        """Initialize with the consumer, per-type handlers, and the handler for every other type.
 
         An event with neither a handler for its type nor a default has nobody
         to deliver to, and is acknowledged rather than left to block the queue.
         """
-        self.outbox = outbox
+        self.consumer = consumer
         self.handlers = dict(handlers)
         self.default = default
 
     async def process_next(self) -> bool:
         """Claim and deliver the oldest claimable event. False when there was none."""
-        claimed = self.outbox.claim()
+        claimed = self.consumer.claim()
         if claimed is None:
             return False
         envelope = claimed.envelope
@@ -97,9 +99,9 @@ class OutboxDispatcher:
                 envelope.type,
                 claimed.attempt,
             )
-            self.outbox.fail(claimed, error)
+            self.consumer.nack(claimed, error)
             return True
-        self.outbox.ack(claimed)
+        self.consumer.ack(claimed)
         return True
 
     async def drain(self, limit: int | None = None) -> int:
@@ -112,14 +114,14 @@ class OutboxDispatcher:
         return delivered
 
     async def run(self, stop: asyncio.Event, *, idle_seconds: float = 1.0) -> None:
-        """Deliver events until `stop` is set, pausing `idle_seconds` whenever the outbox is empty."""
+        """Deliver events until `stop` is set, pausing `idle_seconds` whenever nothing is ready."""
         while not stop.is_set():
             try:
                 delivered = await self.process_next()
             except Exception:
-                # A claim or settle that could not reach the database. The
-                # row, if any, is still leased and will come back; the loop
-                # must outlive a database blip.
+                # A claim or settle that could not reach the transport. The
+                # event, if any, is still leased and will come back; the loop
+                # must outlive a database (or broker) blip.
                 logger.exception("outbox dispatch failed; backing off")
                 delivered = False
             if not delivered:

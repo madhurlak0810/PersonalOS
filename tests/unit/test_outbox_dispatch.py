@@ -686,9 +686,9 @@ def test_types_that_start_no_run_are_left_unrouted(factory):
 def test_built_dispatcher_applies_transition_requests(factory, clock):
     application_id = _make_application(factory)
     dispatcher = build_outbox_dispatcher(factory)
-    dispatcher.outbox.clock = clock
-    dispatcher.outbox.publish(_transition_request(application_id, dedupe_key="move:1"))
-    dispatcher.outbox.publish(_envelope())  # unrouted: nothing waits, starts nothing
+    dispatcher.consumer.clock = clock
+    dispatcher.consumer.publish(_transition_request(application_id, dedupe_key="move:1"))
+    dispatcher.consumer.publish(_envelope())  # unrouted: nothing waits, starts nothing
 
     assert asyncio.run(dispatcher.drain()) == 2
     assert _status(factory, application_id) == ApplicationStatus.SAVED.value

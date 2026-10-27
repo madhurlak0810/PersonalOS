@@ -206,6 +206,31 @@ FORBIDDEN_IMPORTS: tuple[ForbiddenImport, ...] = (
 )
 
 
+#: The outbox's tables and the repository over them. Producers publish through
+#: `EventPublisher` (or `stage_event`), workers consume through `EventConsumer`,
+#: and both read and write `EventEnvelope`s; only the modules that *implement*
+#: the outbox know it is a table, so the transport can be swapped
+#: (`docs/EVENT_TRANSPORT.md`) without touching anyone else.
+OUTBOX_INTERNALS: tuple[str, ...] = (
+    "OutboxEventModel",
+    "ConsumedEventModel",
+    "OutboxEventRepository",
+)
+
+#: The modules that implement the outbox, and so may name its internals:
+#: where they are defined, the transport itself, the consumer inbox, the
+#: operator's view of parked events, and the workflow-command queue that
+#: rides the same table under its own lease.
+OUTBOX_OWNERS: tuple[str, ...] = (
+    "personalos.persistence.models",
+    "personalos.persistence.repositories",
+    "personalos.persistence.event_outbox",
+    "personalos.persistence.event_inbox",
+    "personalos.persistence.event_failures",
+    "personalos.persistence.workflow_commands",
+)
+
+
 #: Only these modules may mint an approval. Anything else that references the
 #: minting internals is trying to fabricate authorization.
 APPROVAL_MINTING_MODULES = ("personalos.policy.intents", "personalos.policy.engine")
@@ -247,12 +272,29 @@ class ImportEdge:
 
 
 @dataclass
+class SymbolReference:
+    """A name a module imports or reaches as an attribute, for symbol-level bans."""
+
+    source_module: str
+    symbol: str
+    path: Path
+    lineno: int
+
+    def __str__(self) -> str:
+        rel = self.path.relative_to(REPO_ROOT).as_posix()
+        return f"{rel}:{self.lineno} {self.source_module} -> {self.symbol}"
+
+
+@dataclass
 class Scan:
     """Result of scanning the checked packages."""
 
     edges: list[ImportEdge] = field(default_factory=list)
     modules: set[str] = field(default_factory=set)
     files: list[Path] = field(default_factory=list)
+    #: References to `OUTBOX_INTERNALS`, however they are spelled: imported by
+    #: name, or reached as an attribute of an imported module.
+    symbols: list[SymbolReference] = field(default_factory=list)
 
 
 def module_name_for_path(path: Path) -> str:
@@ -299,6 +341,7 @@ def scan_imports(packages: Iterable[str] = CHECKED_PACKAGES) -> Scan:
         scan.files.append(path)
 
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        scan.symbols.extend(outbox_references(tree, source_module, path))
         for node in ast.walk(tree):
             targets: list[str] = []
             if isinstance(node, ast.Import):
@@ -321,6 +364,23 @@ def scan_imports(packages: Iterable[str] = CHECKED_PACKAGES) -> Scan:
                     )
                 )
     return scan
+
+
+def outbox_references(tree: ast.AST, source_module: str, path: Path) -> list[SymbolReference]:
+    """Every reference to `OUTBOX_INTERNALS` in `tree`: imported by name, or as an attribute."""
+    references: list[SymbolReference] = []
+    for node in ast.walk(tree):
+        names: list[str] = []
+        if isinstance(node, ast.ImportFrom):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.Attribute):
+            names = [node.attr]
+        references.extend(
+            SymbolReference(source_module, name, path, node.lineno)
+            for name in names
+            if name in OUTBOX_INTERNALS
+        )
+    return references
 
 
 def violations(scan: Scan | None = None) -> list[str]:
@@ -363,6 +423,15 @@ def violations(scan: Scan | None = None) -> list[str]:
                     f"{edge}: '{ban.layer}' may not import '{ban.module_prefix}'. {ban.reason}"
                 )
 
+    for reference in scan.symbols:
+        if reference.source_module not in OUTBOX_OWNERS:
+            problems.append(
+                f"{reference}: only the modules that implement the outbox may name "
+                f"'{reference.symbol}'. Publish through EventPublisher / stage_event and "
+                f"consume through EventConsumer (personalos.domain.event_transport); "
+                f"see docs/EVENT_TRANSPORT.md"
+            )
+
     return problems
 
 
@@ -375,12 +444,16 @@ __all__ = [
     "ForbiddenImport",
     "FORBIDDEN_IMPORTS",
     "APPROVAL_MINTING_MODULES",
+    "OUTBOX_INTERNALS",
+    "OUTBOX_OWNERS",
     "ImportEdge",
     "Scan",
+    "SymbolReference",
     "layer_for_module",
     "is_allowed",
     "module_name_for_path",
     "iter_source_files",
+    "outbox_references",
     "scan_imports",
     "violations",
 ]
