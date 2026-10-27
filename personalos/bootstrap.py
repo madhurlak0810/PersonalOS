@@ -10,6 +10,7 @@ See ``docs/ARCHITECTURE_BOUNDARIES.md``.
 
 import logging
 from collections.abc import Callable, Iterable, Mapping
+from datetime import timedelta
 from uuid import UUID
 
 from personalos.config import settings
@@ -394,9 +395,31 @@ def build_durable_checkpointer(
 
 def build_workflow_command_queue(
     session_factory: Callable[[], object] = SessionLocal,
+    *,
+    reclaim_after: timedelta | None = None,
 ) -> WorkflowCommandQueue:
-    """Build the queue the API hands runs to and the worker claims them from."""
-    return WorkflowCommandQueue(session_factory)
+    """Build the queue the API hands runs to and the worker claims them from.
+
+    `reclaim_after` matters only to the worker, the one process that claims:
+    see `build_worker_command_queue`.
+    """
+    return WorkflowCommandQueue(session_factory, reclaim_after=reclaim_after)
+
+
+def build_worker_command_queue(
+    session_factory: Callable[[], object] = SessionLocal,
+    *,
+    lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
+) -> WorkflowCommandQueue:
+    """Build the queue a worker claims from, reclaiming what a dead worker left claimed.
+
+    A claim is reclaimable once it is as old as the workflow lease's TTL, so a
+    command is only handed on after the worker that claimed it has stopped
+    renewing -- or never renewed -- the lease that let it run.
+    """
+    return build_workflow_command_queue(
+        session_factory, reclaim_after=timedelta(seconds=lease_ttl_seconds)
+    )
 
 
 def build_workflow_status_reader(
@@ -844,6 +867,7 @@ __all__ = [
     "build_workflow_thread_registry",
     "build_durable_checkpointer",
     "build_workflow_command_queue",
+    "build_worker_command_queue",
     "build_workflow_status_reader",
     "build_workflow_action_reader",
     "build_approval_queue",

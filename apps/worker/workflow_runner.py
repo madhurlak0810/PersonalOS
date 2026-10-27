@@ -154,6 +154,16 @@ class DurableWorkflowRunner:
             values=dict(snapshot.values or {}),
         )
 
+    async def checkpoint_metadata(self, thread: WorkflowThread) -> dict[str, Any]:
+        """The metadata the thread's latest checkpoint was written with; empty if none.
+
+        Carries the `configurable` entries of the run that wrote it -- which
+        command it was carrying out, for whom -- so a worker can tell its own
+        unfinished run from someone else's.
+        """
+        snapshot = await self.graph.aget_state(thread.config())
+        return dict(snapshot.metadata or {})
+
     # ------------------------------------------------------------------
     # Running
     # ------------------------------------------------------------------

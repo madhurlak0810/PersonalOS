@@ -1190,6 +1190,12 @@ class ActionReceipt(_Value):
     detail: str | None = None
 
 
+#: `ApprovalDecision.decided_by` for the rejection the worker's expiry sweep
+#: records once a request's window has closed with nobody answering it. Named,
+#: so the refusal that follows reads as an expiry rather than as a reviewer's no.
+APPROVAL_EXPIRY_ACTOR = "system:approval_expiry"
+
+
 class RefusalReason(str, Enum):
     """Why an approved-looking action was not executed after all.
 
@@ -1238,6 +1244,20 @@ class ApprovalRefusal(_Value):
     def to_receipt(self) -> ActionReceipt:
         """The not-ok receipt this refusal settles the action with."""
         return ActionReceipt(action_id=self.action_id, ok=False, detail=self.detail)
+
+
+def _non_approval_reason(decision: ApprovalDecision) -> RefusalReason:
+    """Why a decision that is not an approval refuses its action.
+
+    A rejection recorded by the expiry sweep is an expiry, not a reviewer's no:
+    nobody looked at the action, and reading it as `DENIED_BY_USER` would say
+    somebody did.
+    """
+    if decision.decided_by == APPROVAL_EXPIRY_ACTOR:
+        return RefusalReason.EXPIRED
+    if decision.verdict == ApprovalVerdict.REJECTED:
+        return RefusalReason.DENIED_BY_USER
+    return RefusalReason.NOT_APPROVED
 
 
 def authorize_execution(
@@ -1325,11 +1345,7 @@ def authorize_execution(
         return ApprovalRefusal(
             action_id=intent.action_id,
             request_id=request.request_id,
-            reason=(
-                RefusalReason.DENIED_BY_USER
-                if decision.verdict == ApprovalVerdict.REJECTED
-                else RefusalReason.NOT_APPROVED
-            ),
+            reason=_non_approval_reason(decision),
             detail=(
                 f"action {intent.action_id} ({intent.kind.value}) was not approved: "
                 f"verdict={decision.verdict.value}"
@@ -1587,6 +1603,7 @@ __all__ = [
     "ApprovalVerdict",
     "ApprovalDecision",
     "ActionReceipt",
+    "APPROVAL_EXPIRY_ACTOR",
     "RefusalReason",
     "ApprovalRefusal",
     "authorize_execution",

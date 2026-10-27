@@ -13,6 +13,13 @@ properties come from that table and are relied on:
 - **A claim is exclusive.** `OutboxEventRepository.claim_next` is `SKIP LOCKED`
   on Postgres and a guarded `UPDATE` elsewhere, so two workers never run the
   same command.
+- **A claim outlives its worker only so long.** A worker killed mid-run never
+  settles its command, so a claim older than `reclaim_after` is claimable
+  again. That is not a second run racing the first: running a command takes
+  the workflow's lease, and a live worker still holds it. A redelivered
+  command is told so (`ClaimedWorkflowCommand.attempt`), which is how the
+  worker knows to continue the run from its checkpoint instead of starting it
+  over.
 - **`dedupe_key` is unique.** Each command's key starts with its workflow id
   (`workflow:<id>:...`), which is how `queued_for` finds a workflow's
   unfinished commands without a payload query, and a resume's key names the
@@ -22,6 +29,7 @@ properties come from that table and are relied on:
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
@@ -53,6 +61,14 @@ class ClaimedWorkflowCommand:
 
     outbox_id: UUID
     command: WorkflowCommand
+    #: How many times this command has been claimed, this claim included. More
+    #: than one means an earlier worker claimed it and never settled it.
+    attempt: int = 1
+
+    @property
+    def redelivered(self) -> bool:
+        """True when a previous claim of this command was never settled."""
+        return self.attempt > 1
 
 
 def _key_prefix(workflow_id: UUID) -> str:
@@ -62,9 +78,23 @@ def _key_prefix(workflow_id: UUID) -> str:
 class WorkflowCommandQueue:
     """Enqueues, lists and claims `WorkflowCommand`s in `outbox_events`."""
 
-    def __init__(self, session_factory: Callable[[], Session]):
-        """Initialize with a callable returning a SQLAlchemy `Session`."""
+    def __init__(
+        self,
+        session_factory: Callable[[], Session],
+        *,
+        reclaim_after: timedelta | None = None,
+        clock: Callable[[], datetime] = datetime.utcnow,
+    ):
+        """Initialize with a callable returning a SQLAlchemy `Session`.
+
+        `reclaim_after` is how old an unsettled claim must be before another
+        worker may take it; `None` never reclaims. A worker sets it no shorter
+        than the workflow lease TTL, so a command is only reclaimed once the
+        worker that claimed it has also stopped holding its workflow.
+        """
         self.session_factory = session_factory
+        self.reclaim_after = reclaim_after
+        self.clock = clock
 
     def enqueue(self, command: WorkflowCommand, *, dedupe: str | None = None) -> WorkflowCommand:
         """Queue a command for the worker.
@@ -139,10 +169,16 @@ class WorkflowCommandQueue:
         """Claim the oldest queued command for this worker, or `None` if there is none."""
         session = self.session_factory()
         try:
-            row = OutboxEventRepository(session).claim_next(type=WORKFLOW_COMMAND_EVENT)
+            row = OutboxEventRepository(session).claim_next(
+                type=WORKFLOW_COMMAND_EVENT,
+                reclaim_after=self.reclaim_after,
+                now=self.clock(),
+            )
             if row is None:
                 return None
-            return ClaimedWorkflowCommand(outbox_id=row.id, command=self._command(row))
+            return ClaimedWorkflowCommand(
+                outbox_id=row.id, command=self._command(row), attempt=row.attempts or 1
+            )
         finally:
             session.close()
 
@@ -154,17 +190,21 @@ class WorkflowCommandQueue:
         finally:
             session.close()
 
-    def release(self, outbox_id: UUID) -> None:
-        """Put a claimed command back in line, for a worker that could not run it yet."""
+    def release(self, outbox_id: UUID, *, delay: timedelta | None = None) -> None:
+        """Put a claimed command back in line, for a worker that could not run it yet.
+
+        `delay` holds it out of line for that long, so a command whose workflow
+        is busy elsewhere is not claimed straight back by the same poll loop.
+        """
+        values: dict = {OutboxEventModel.status: OutboxEventStatus.PENDING.value}
+        if delay is not None:
+            values[OutboxEventModel.available_at] = self.clock() + delay
         session = self.session_factory()
         try:
             session.query(OutboxEventModel).filter(
                 OutboxEventModel.id == outbox_id,
                 OutboxEventModel.status == OutboxEventStatus.IN_PROGRESS.value,
-            ).update(
-                {OutboxEventModel.status: OutboxEventStatus.PENDING.value},
-                synchronize_session=False,
-            )
+            ).update(values, synchronize_session=False)
             session.commit()
         finally:
             session.close()

@@ -20,6 +20,15 @@ of the `approvals` row a decision writes. Two properties follow:
 One interrupt can carry several requests. The run can only be resumed with an
 answer to all of them, so each decision is recorded as it arrives and the
 resume is queued by whichever one completes the set.
+
+**Nobody answering is an answer too, eventually.** A request past its expiry
+can no longer be approved, so a workflow parked on it would wait forever.
+`expire_overdue` -- run on a schedule by the worker, never by a request --
+records each such request as `EXPIRED` and resumes the run exactly as a denial
+would, with `APPROVAL_EXPIRY_ACTOR` as the decider so the refusal the graph
+records says "expired" and not "denied". It is the same guarded insert a
+reviewer's decision is, so an expiry racing a last-minute answer leaves one of
+them on record, not both.
 """
 
 import logging
@@ -33,7 +42,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from personalos.domain.errors import Conflict, NotFound
-from personalos.domain.job_search import ApprovalDecision, ApprovalRequest, ApprovalVerdict
+from personalos.domain.job_search import (
+    APPROVAL_EXPIRY_ACTOR,
+    ApprovalDecision,
+    ApprovalRequest,
+    ApprovalVerdict,
+)
 from personalos.domain.models import AuditEventResult
 from personalos.domain.workflow import (
     ApprovalOutcome,
@@ -62,6 +76,9 @@ AUDIT_REFUSED_EXPIRED = "approval.refused.expired"
 _STATUS_BY_OUTCOME = {
     ApprovalOutcome.APPROVED: ApprovalState.APPROVED,
     ApprovalOutcome.DENIED_BY_USER: ApprovalState.DENIED,
+    # Stored as a denial -- the run takes its declined branch either way --
+    # and told apart by the outcome written to `approvals.note`.
+    ApprovalOutcome.EXPIRED: ApprovalState.DENIED,
 }
 _VERDICT_BY_STATE = {
     ApprovalState.APPROVED.value: ApprovalVerdict.APPROVED,
@@ -192,6 +209,30 @@ class ApprovalQueue:
             resumed=resumed,
             replayed=replayed,
         )
+
+    def expire_overdue(
+        self, *, now: datetime | None = None, actor_id: str = APPROVAL_EXPIRY_ACTOR
+    ) -> list[UUID]:
+        """Close every unanswered request past its expiry, resuming runs that are now answered.
+
+        Returns the ids of the approvals this call expired. One a reviewer
+        answered first is skipped, not overwritten; a run whose interrupt
+        still has live requests is left parked until they are answered too.
+        """
+        now = now or self.clock()
+        open_requests = list(self._open_requests())
+        decided = self._decided_rows([item.request.request_id for item in open_requests])
+        expired: list[UUID] = []
+        for item in open_requests:
+            if item.request.request_id in decided or not item.request.is_expired(now):
+                continue
+            if not self._record(item, outcome=ApprovalOutcome.EXPIRED, actor_id=actor_id, now=now):
+                continue
+            expired.append(item.request.request_id)
+            self._resume_if_answered(item, actor_id=actor_id, correlation_id=uuid4())
+        if expired:
+            logger.info("expired %s unanswered approval(s) at %s", len(expired), now.isoformat())
+        return expired
 
     # ------------------------------------------------------------------
     # Internals
@@ -441,11 +482,11 @@ def _pending(item: _OpenRequest, now: datetime) -> PendingApproval:
 
 
 def _outcome(row: ApprovalModel) -> ApprovalOutcome:
-    return (
-        ApprovalOutcome.APPROVED
-        if row.status == ApprovalState.APPROVED.value
-        else ApprovalOutcome.DENIED_BY_USER
-    )
+    if row.status == ApprovalState.APPROVED.value:
+        return ApprovalOutcome.APPROVED
+    if row.note == ApprovalOutcome.EXPIRED.value:
+        return ApprovalOutcome.EXPIRED
+    return ApprovalOutcome.DENIED_BY_USER
 
 
 __all__ = [

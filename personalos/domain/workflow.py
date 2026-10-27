@@ -543,6 +543,8 @@ class ApprovalOutcome(str, Enum):
 
     APPROVED = "APPROVED"
     DENIED_BY_USER = "DENIED_BY_USER"
+    #: Nobody answered before the request's expiry; the worker closed it.
+    EXPIRED = "EXPIRED"
 
 
 class PendingApproval(BaseModel):
