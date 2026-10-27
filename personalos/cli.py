@@ -46,11 +46,17 @@ def db_init():
 
 
 @cli.command()
-def worker():
-    """Run the background worker."""
+@click.option(
+    "--graphs",
+    default=None,
+    help="Graph factory as module:callable (default: WORKER_GRAPHS).",
+)
+def worker(graphs: str | None):
+    """Run the worker: queued workflow runs, outbox delivery and scheduled sweeps."""
+    from apps.worker.main import main
+
     logger.info("Starting PersonalOS worker...")
-    # Placeholder for worker implementation
-    logger.info("Worker not yet implemented")
+    main(graphs)
 
 
 @cli.command()

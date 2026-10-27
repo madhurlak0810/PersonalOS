@@ -69,6 +69,17 @@ class Settings(BaseSettings):
     application_stall_window_days: int = 14
     application_stall_check_interval_seconds: int = 3600
 
+    # Worker. How often the worker polls for queued workflow commands and
+    # outbox events when it finds none, and how often it sweeps for
+    # follow-up checkpoints and approvals that have come due. These are
+    # polling cadences: what is due is read from the database each time.
+    # `worker_graphs` names the factory that composes the graphs the worker
+    # runs, as `module:callable`; see `apps.worker.main.WorkerGraphs`.
+    worker_idle_seconds: float = 1.0
+    worker_checkpoint_sweep_seconds: int = 60
+    worker_approval_expiry_sweep_seconds: int = 300
+    worker_graphs: str = ""
+
     # Google Integration
     google_api_key: str = ""
     google_search_engine_id: str = ""

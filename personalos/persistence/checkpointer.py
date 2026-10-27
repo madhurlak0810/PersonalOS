@@ -221,6 +221,19 @@ class WorkflowThreadRegistry:
             )
         return thread
 
+    def user_id_for(self, thread_id: str) -> UUID | None:
+        """The candidate a thread was registered for, or `None` if it names none."""
+        session = self.session_factory()
+        try:
+            row = (
+                session.query(WorkflowRunModel.user_id)
+                .filter(WorkflowRunModel.thread_id == thread_id)
+                .first()
+            )
+            return row[0] if row else None
+        finally:
+            session.close()
+
     def threads_for_workflow(self, workflow_id: UUID) -> list[WorkflowThread]:
         """Every thread belonging to a workflow, oldest first.
 

@@ -2854,6 +2854,12 @@ class JobSearchSubgraphRunner:
     the checkpointer underneath it is. The composition root derives a stable id
     (`personalos.domain.workflow.job_search_thread_id`) and registers it against
     the workflow before the first run; see `personalos.bootstrap`.
+
+    A thread with steps still to run is continued, not started again. That is
+    the case when the Supervisor's own step is re-run after its worker died
+    part way through this subgraph: starting from the initial state would
+    search the boards and score everything a second time, when the thread's
+    checkpoint already holds where it got to.
     """
 
     def __init__(
@@ -2884,12 +2890,23 @@ class JobSearchSubgraphRunner:
         configurable: dict[str, Any] = {"thread_id": self.thread_id}
         if self.workflow_id is not None:
             configurable["workflow_id"] = str(self.workflow_id)
-        initial: JobSearchState = {
-            "user_id": str(self.user_id),
-            "query": (state or {}).get("message", "") if hasattr(state, "get") else "",
-            "prepare_application": self.prepare_application,
-        }
-        final = await self.graph.ainvoke(initial, config={"configurable": configurable})
+        config = {"configurable": configurable}
+        stored = await self.graph.aget_state(config)
+        initial: JobSearchState | None = None
+        if not stored.next:
+            initial = {
+                "user_id": str(self.user_id),
+                "query": (state or {}).get("message", "") if hasattr(state, "get") else "",
+                "prepare_application": self.prepare_application,
+            }
+        else:
+            logger.info(
+                "job search thread '%s' has %s still to run; continuing it rather than "
+                "starting a new search",
+                self.thread_id,
+                ", ".join(stored.next),
+            )
+        final = await self.graph.ainvoke(initial, config=config)
         return {
             "goal": task_dag.get("goal"),
             "shortlist": final.get("shortlist") or [],
