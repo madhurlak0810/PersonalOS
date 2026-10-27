@@ -23,9 +23,11 @@ from personalos.domain.redaction import Redactor, default_redactor
 
 #: Attributes every `LogRecord` has. Anything else on a record arrived through
 #: `extra=` and is redacted as data.
-_STANDARD_RECORD_ATTRIBUTES = frozenset(
-    logging.LogRecord("", 0, "", 0, "", None, None).__dict__
-) | {"message", "asctime", "taskName"}
+STANDARD_RECORD_ATTRIBUTES = frozenset(logging.LogRecord("", 0, "", 0, "", None, None).__dict__) | {
+    "message",
+    "asctime",
+    "taskName",
+}
 
 _FACTORY_MARKER = "_personalos_redacting"
 
@@ -53,7 +55,7 @@ def scrub_record(record: logging.LogRecord, redactor: Redactor | None = None) ->
         record.stack_info = redactor.redact_text(record.stack_info)
 
     for name, value in list(record.__dict__.items()):
-        if name not in _STANDARD_RECORD_ATTRIBUTES:
+        if name not in STANDARD_RECORD_ATTRIBUTES:
             record.__dict__[name] = redactor.redact(value)
     return record
 
@@ -93,4 +95,9 @@ def install_log_redaction(redactor: Redactor | None = None) -> None:
             handler.addFilter(RedactingFilter(redactor))
 
 
-__all__ = ["scrub_record", "RedactingFilter", "install_log_redaction"]
+__all__ = [
+    "STANDARD_RECORD_ATTRIBUTES",
+    "scrub_record",
+    "RedactingFilter",
+    "install_log_redaction",
+]

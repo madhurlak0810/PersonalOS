@@ -60,6 +60,7 @@ from personalos.domain.workflow import (
     WorkflowCommandKind,
 )
 from personalos.observability import tracing
+from personalos.observability.structured_logging import LogEvent
 from personalos.observability.tracing import Attr
 from personalos.persistence.checkpointer import WorkflowThreadRegistry
 from personalos.persistence.models import ApprovalModel, AuditEventModel, WorkflowRunModel
@@ -263,7 +264,12 @@ class ApprovalQueue:
             expired.append(item.request.request_id)
             self._resume_if_answered(item, actor_id=actor_id, correlation_id=uuid4())
         if expired:
-            logger.info("expired %s unanswered approval(s) at %s", len(expired), now.isoformat())
+            logger.info(
+                "expired %s unanswered approval(s) at %s",
+                len(expired),
+                now.isoformat(),
+                extra={"event": LogEvent.APPROVAL_EXPIRED, "approval_ids": expired},
+            )
         return expired
 
     # ------------------------------------------------------------------
@@ -359,6 +365,15 @@ class ApprovalQueue:
             found.workflow_id,
             outcome.value,
             actor_id,
+            extra={
+                "event": LogEvent.APPROVAL_DECIDED,
+                "workflow_id": found.workflow_id,
+                "thread_id": found.thread.thread_id,
+                "action_id": request.action_id,
+                "approval_id": request.request_id,
+                "approval_outcome": outcome.value,
+                "actor_id": actor_id,
+            },
         )
         return True
 

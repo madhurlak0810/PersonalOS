@@ -45,7 +45,13 @@ from personalos.domain.errors import (
     PersonalOSError,
     ProviderPermanentFailure,
 )
-from personalos.domain.failures import classify, failure_id, parse_stored_error, sanitize_error
+from personalos.domain.failures import (
+    classify,
+    describe_exception,
+    failure_id,
+    parse_stored_error,
+    sanitize_error,
+)
 from personalos.domain.progress import (
     ProgressEventType,
     approval_requested_data,
@@ -53,6 +59,7 @@ from personalos.domain.progress import (
 )
 from personalos.domain.workflow import WorkflowResumeState, WorkflowThread, thread_namespace
 from personalos.observability import tracing
+from personalos.observability.structured_logging import LogEvent
 from personalos.observability.tracing import Attr
 from personalos.persistence.checkpointer import (
     RUN_STATUS_COMPLETED,
@@ -275,6 +282,13 @@ class DurableWorkflowRunner:
             try:
                 final = await self._stream(thread, graph_input, configurable, running)
             except Exception as exc:
+                logger.error(
+                    "thread '%s' failed at step(s) %s: %s",
+                    thread.thread_id,
+                    ", ".join(running.values()) or "(none running)",
+                    describe_exception(exc),
+                    extra={"event": LogEvent.WORKFLOW_FAILED},
+                )
                 self.registry.mark_status(thread.thread_id, RUN_STATUS_FAILED, finished=True)
                 self._note_broken_integration(thread, exc)
                 await self._note_failure(thread, correlation_id, running, exc)

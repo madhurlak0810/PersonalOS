@@ -160,16 +160,17 @@ class PolicyEngine:
         record_id = self._persist(
             principal, workflow_id, tool, args_hash, decision, requested_scopes
         )
-        logger.info(
-            "policy %s %s (rule=%s, origin=%s, requested_by=%s, principal=%s, workflow_id=%s): %s",
-            decision.value,
+        _log_decision(
+            decision,
             tool,
             rule,
-            provenance.origin.value,
-            provenance.requested_by,
-            principal,
-            workflow_id,
             reason,
+            provenance.origin,
+            provenance.requested_by,
+            workflow_id=workflow_id,
+            actor_id=principal,
+            action_id=action_id,
+            record_id=record_id,
         )
         return PolicyDecision(
             intent_id=action_id or uuid4(),
@@ -334,19 +335,71 @@ class PolicyEngine:
             self._declared_scopes(intent.tool_ref),
         )
         decision = decision.model_copy(update={"record_id": record_id})
-        logger.info(
-            "policy %s %s (rule=%s, origin=%s, requested_by=%s, %s): %s",
-            decision.decision.value,
+        _log_decision(
+            decision.decision,
             decision.tool_ref,
             decision.rule,
-            intent.origin.value,
-            intent.requested_by,
-            intent.context.as_log_str(),
             decision.reason,
+            intent.origin,
+            intent.requested_by,
+            workflow_id=intent.context.workflow_id,
+            correlation_id=intent.context.correlation_id,
+            actor_id=intent.context.actor_id,
+            action_id=intent.intent_id,
+            record_id=record_id,
         )
         if self.decision_sink is not None:
             self.decision_sink(intent, decision)
         return decision
+
+
+def _log_decision(
+    decision: Decision,
+    tool: str,
+    rule: str,
+    reason: str,
+    origin: IntentOrigin,
+    requested_by: str,
+    *,
+    workflow_id: UUID | None,
+    actor_id: str,
+    action_id: UUID | None,
+    record_id: UUID | None,
+    correlation_id: UUID | None = None,
+) -> None:
+    """Log a verdict as a `policy.decision` record: WARNING for a denial, INFO otherwise.
+
+    `event` and the fields with it are the structured-logging contract
+    (`observability.structured_logging.LogEvent.POLICY_DECISION`), spelled out
+    here because the policy layer may not import observability. An id left
+    `None` falls back to the one bound in the log scope. `policy_decision_id`
+    is the decision-log row the audit trail cites, so the two join on it.
+    """
+    logger.log(
+        logging.WARNING if decision == Decision.DENY else logging.INFO,
+        "policy %s %s (rule=%s, origin=%s, requested_by=%s): %s",
+        decision.value,
+        tool,
+        rule,
+        origin.value,
+        requested_by,
+        reason,
+        extra={
+            key: value
+            for key, value in {
+                "event": "policy.decision",
+                "workflow_id": workflow_id,
+                "correlation_id": correlation_id,
+                "actor_id": actor_id,
+                "action_id": action_id,
+                "tool_name": tool,
+                "policy_decision": decision.value,
+                "policy_rule": rule,
+                "policy_decision_id": record_id,
+            }.items()
+            if value is not None
+        },
+    )
 
 
 def default_policy_engine(

@@ -66,6 +66,7 @@ from personalos.domain.redaction import redact
 from personalos.domain.retry_policy import RetryPolicy, retry_after_seconds
 from personalos.executor.retry import is_retryable, retry_policy_for
 from personalos.observability import tracing
+from personalos.observability.structured_logging import LogEvent
 from personalos.observability.tracing import Attr, policy_attributes
 from personalos.persistence.execution_ledger import (
     AuditEntry,
@@ -327,6 +328,12 @@ class ToolExecutor:
                     policy.max_attempts,
                     delay,
                     describe_exception(exc),
+                    extra={
+                        "event": LogEvent.RETRY_SCHEDULED,
+                        Attr.ATTEMPT: attempt,
+                        Attr.MAX_ATTEMPTS: policy.max_attempts,
+                        Attr.RETRY_DELAY: delay,
+                    },
                 )
                 tracing.add_event(
                     "tool.retry_scheduled", {Attr.ATTEMPT: attempt, Attr.RETRY_DELAY: delay}
@@ -369,6 +376,7 @@ class ToolExecutor:
                 intent.action_id,
                 intent.kind.value,
                 describe_exception(error),
+                extra={"event": LogEvent.RETRY_ABANDONED},
             )
             return False
         try:
@@ -378,6 +386,7 @@ class ToolExecutor:
                 "reconciling failed action %s (%s) before its retry failed; not retrying",
                 intent.action_id,
                 intent.kind.value,
+                extra={"event": LogEvent.RETRY_ABANDONED},
             )
             return False
         if reconciliation.outcome == ReconcileOutcome.APPLIED and reconciliation.receipt:
@@ -398,6 +407,7 @@ class ToolExecutor:
             "action %s (%s) failed and the provider could not confirm either way; not retrying",
             intent.action_id,
             intent.kind.value,
+            extra={"event": LogEvent.RETRY_ABANDONED},
         )
         return False
 
@@ -416,6 +426,17 @@ class ToolExecutor:
         else:
             code = ErrorCode.INTERNAL.value
             failure_class = FailureClass.UNCLASSIFIED.value
+        logger.error(
+            "action %s (%s) failed: %s",
+            intent.action_id,
+            intent.kind.value,
+            describe_exception(error),
+            extra={
+                "event": LogEvent.ACTION_FAILED,
+                "failure_class": failure_class,
+                "error_code": code,
+            },
+        )
         self.ledger.record_failure(
             intent.idempotency_key,
             str(error),

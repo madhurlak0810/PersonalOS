@@ -19,6 +19,7 @@ from personalos.bootstrap import (
     register_mcp_servers,
 )
 from personalos.domain.models import Job
+from personalos.observability.structured_logging import configure_logging_from_settings
 from personalos.persistence.database import SessionLocal
 from personalos.persistence.repositories import JobRepository
 
@@ -48,7 +49,7 @@ async def run_job_search(job_id: UUID) -> Job:
 
 def main(job_id: str) -> None:
     """CLI entry point: register servers, then run one job."""
-    logging.basicConfig(level=logging.INFO)
+    configure_logging_from_settings()
     register_mcp_servers()
     job = asyncio.run(run_job_search(UUID(job_id)))
     logger.info(
