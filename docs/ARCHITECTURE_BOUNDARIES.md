@@ -105,7 +105,7 @@ The tool boundary. `gateway.py` defines the two ports:
 `registry.py` is an adapter for in-process tools; it takes loose keyword
 arguments and therefore must only be reached through `ToolRegistryInvoker`.
 
-- **May import:** `domain`, `policy`.
+- **May import:** `domain`, `policy`, `observability` (tracing API only).
 - **Must not:** import `mcp`, `executor`, `graphs`, or `persistence`. The
   gateway is a port, not a hub.
 
@@ -120,7 +120,7 @@ handling. Every step is expressed as a `ToolIntent` and submitted to the
 gateway.
 
 - **May import:** `domain`, `policy`, `persistence`, `tools`, `events`, `state`,
-  `config`, `secrets`.
+  `config`, `secrets`, `observability` (tracing API only).
 - **Must not:** import `personalos.mcp`, `mcp_servers`, or
   `personalos.tools.registry`. Must not construct its own gateway or reach for
   a global tool manager — the gateway is a required constructor argument.
@@ -137,7 +137,7 @@ Orchestration: which step happens next, branching, retries, human-in-the-loop
 pauses.
 
 - **May import:** `domain`, `policy`, `executor`, `events`, `state`, `models`,
-  `config`.
+  `config`, `observability` (tracing API only).
 - **Must not:** import `tools`, `mcp`, `mcp_servers`, or `persistence`. A graph
   that can call a tool directly is a graph that can bypass policy; a graph that
   can write to the database is a graph whose state transitions are untraceable.
@@ -303,7 +303,7 @@ workflow survive its own process —
 [`leases.py`](../personalos/persistence/leases.py) and
 [`action_journal.py`](../personalos/persistence/action_journal.py).
 
-- **May import:** `domain`, `config`.
+- **May import:** `domain`, `config`, `observability` (tracing API only).
 - **Must not:** make decisions, call tools, or import `executor` / `graphs` /
   `policy`. Repositories translate between domain models and rows; that is all.
 
@@ -359,7 +359,9 @@ manager, caching, and `MCPToolInvoker`, which satisfies the `ToolInvoker` port.
 - **Must not:** import `mcp_servers`. This layer knows *how* to talk to a
   server, never *which* servers exist — that inversion is what previously made
   `manager.py` import a concrete server, and it is why registration moved to the
-  composition root.
+  composition root. `policy` stays pure and opens no spans: its verdicts are
+traced by the callers that ask for them (`policy.evaluate` spans in
+`ToolExecutor` and `PolicyEnforcingToolGateway`).
 
 The `persistence` dependency is deliberate and narrow: `MCPServer` uses
 `IdempotencyGuard` so a mutating tool cannot execute without a dedup record.
@@ -431,7 +433,16 @@ string looks:
 | `state` | in-flight agent state | `domain`, `persistence` |
 | `observability` | logging, metrics, tracing | `domain`, `config` |
 | `retrieval` | retrieval and ranking | `domain`, `persistence`, `config` |
-| `models` | model clients, prompt plumbing | `domain`, `config` |
+| `models` | model clients, prompt plumbing | `domain`, `config`, `observability` |
+
+**Tracing is the one cross-cutting import.** `persistence`, `tools`, `models`,
+`executor` and `graphs` may also import `observability` -- but only
+its tracing API, [`observability/tracing.py`](../personalos/observability/tracing.py),
+which depends on `opentelemetry-api` alone and opens no-op spans until a
+provider is installed. Opening a span is not I/O: spans are exported off the
+call path, by whatever the composition root installed. Installing that provider
+and its exporter (`observability.tracing_setup`) is forbidden outside the
+composition root.
 
 ### `composition` — `personalos/bootstrap.py`, `personalos/cli.py`, `apps/`
 

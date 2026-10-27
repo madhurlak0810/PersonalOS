@@ -35,10 +35,13 @@ from personalos.domain.errors import (
     ValidationFailed,
 )
 from personalos.domain.redaction import redact, redact_text
+from personalos.observability import tracing
+from personalos.observability.tracing import Attr, policy_attributes
 from personalos.policy import (
     ApprovalGrant,
     ApprovedIntent,
     PolicyEngine,
+    PolicyError,
     PolicyViolation,
     ToolIntent,
 )
@@ -196,8 +199,25 @@ class PolicyEnforcingToolGateway(ToolGateway):
                 f"raw tool arguments cannot be dispatched"
             )
 
-        approved = self.policy.authorize(intent, approval)
-        return await self.execute_approved(approved)
+        with tracing.span(
+            "tool.dispatch",
+            {Attr.TOOL_NAME: intent.tool_ref, Attr.ACTION_ID: intent.intent_id},
+        ) as span:
+            with tracing.span(
+                "policy.evaluate",
+                {Attr.TOOL_NAME: intent.tool_ref, Attr.ACTION_ID: intent.intent_id},
+            ) as policy_span:
+                try:
+                    approved = self.policy.authorize(intent, approval)
+                except PolicyError as refusal:
+                    tracing.set_attributes(
+                        policy_span, policy_attributes(getattr(refusal, "decision", None))
+                    )
+                    raise
+                tracing.set_attributes(policy_span, policy_attributes(approved.decision))
+            result = await self.execute_approved(approved)
+            tracing.set_attributes(span, {Attr.OUTCOME: "ok" if result.success else "failed"})
+            return result
 
     async def execute_approved(self, approved: ApprovedIntent) -> ToolResult:
         """Execute an already-approved intent.

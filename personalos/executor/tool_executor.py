@@ -65,6 +65,8 @@ from personalos.domain.models import ToolExecutionStatus
 from personalos.domain.redaction import redact
 from personalos.domain.retry_policy import RetryPolicy, retry_after_seconds
 from personalos.executor.retry import is_retryable, retry_policy_for
+from personalos.observability import tracing
+from personalos.observability.tracing import Attr, policy_attributes
 from personalos.persistence.execution_ledger import (
     AuditEntry,
     DomainEvent,
@@ -191,6 +193,21 @@ class ToolExecutor:
         so a retry never gets an answer the engine did not see.
         """
         tool = self.action_tools.get(intent.kind, f"job_search.{intent.kind.value}")
+        with tracing.span(
+            "tool.execute",
+            {
+                Attr.TOOL_NAME: tool,
+                Attr.ACTION_ID: intent.action_id,
+                Attr.ACTION_KIND: intent.kind,
+            },
+        ) as span:
+            receipt = await self._execute(intent, decision, tool)
+            tracing.set_attributes(span, {Attr.RECEIPT_OK: receipt.ok})
+            return receipt
+
+    async def _execute(
+        self, intent: ActionIntent, decision: ApprovalDecision, tool: str
+    ) -> ActionReceipt:
         authorization = self._authorize(intent, decision, tool)
 
         record, claimed = self.ledger.claim(
@@ -220,7 +237,9 @@ class ToolExecutor:
                 intent.kind.value,
                 intent.idempotency_key,
             )
-            return self._rebind(intent, record["receipt_json"])
+            receipt = self._rebind(intent, record["receipt_json"])
+            with self._receipt_span(intent, receipt, replayed=True):
+                return receipt
 
         return await self._resolve_in_doubt(intent, decision, tool, record, authorization)
 
@@ -232,17 +251,21 @@ class ToolExecutor:
         self, intent: ActionIntent, decision: ApprovalDecision, tool: str
     ) -> ExecutionAuthorization:
         """Get this attempt's policy verdict and check the approval against it."""
-        verdict: PolicyDecision = self.policy.evaluate_action(
-            intent.requested_by,
-            self.workflow_id,
-            tool,
-            intent.fingerprint(),
-            list(intent.risk_profile().scopes),
-            # SYSTEM: the action's shape is fixed by the graph, and whatever a
-            # model contributed to its payload is what the reviewer approved.
-            Provenance(origin=IntentOrigin.SYSTEM, requested_by=intent.requested_by),
-            action_id=intent.action_id,
-        )
+        with tracing.span(
+            "policy.evaluate", {Attr.TOOL_NAME: tool, Attr.ACTION_ID: intent.action_id}
+        ) as span:
+            verdict: PolicyDecision = self.policy.evaluate_action(
+                intent.requested_by,
+                self.workflow_id,
+                tool,
+                intent.fingerprint(),
+                list(intent.risk_profile().scopes),
+                # SYSTEM: the action's shape is fixed by the graph, and whatever a
+                # model contributed to its payload is what the reviewer approved.
+                Provenance(origin=IntentOrigin.SYSTEM, requested_by=intent.requested_by),
+                action_id=intent.action_id,
+            )
+            tracing.set_attributes(span, policy_attributes(verdict))
         if verdict.decision == Decision.DENY:
             raise PolicyDenied(verdict)
 
@@ -274,7 +297,16 @@ class ToolExecutor:
         policy = self.retry_policies(tool)
         while True:
             try:
-                receipt = await self.inner.execute(intent, decision)
+                with tracing.span(
+                    "tool.attempt",
+                    {
+                        Attr.TOOL_NAME: tool,
+                        Attr.ACTION_ID: intent.action_id,
+                        Attr.ATTEMPT: attempt,
+                        Attr.MAX_ATTEMPTS: policy.max_attempts,
+                    },
+                ):
+                    receipt = await self.inner.execute(intent, decision)
                 break
             except Exception as exc:
                 if not (policy.allows_retry(attempt) and is_retryable(exc)):
@@ -295,6 +327,9 @@ class ToolExecutor:
                     policy.max_attempts,
                     delay,
                     describe_exception(exc),
+                )
+                tracing.add_event(
+                    "tool.retry_scheduled", {Attr.ATTEMPT: attempt, Attr.RETRY_DELAY: delay}
                 )
                 await self.sleep(delay)
                 if not self.ledger.reclaim(intent.idempotency_key, authorization):
@@ -453,7 +488,25 @@ class ToolExecutor:
 
         return self._in_doubt(intent, record, "the provider could not confirm either way")
 
+    @staticmethod
+    def _receipt_span(intent: ActionIntent, receipt: ActionReceipt, *, replayed: bool = False):
+        return tracing.span(
+            "tool.receipt",
+            {
+                Attr.ACTION_ID: intent.action_id,
+                Attr.RECEIPT_OK: receipt.ok,
+                Attr.RECEIPT_REPLAYED: replayed,
+                Attr.EXTERNAL_REFERENCE: receipt.external_reference,
+            },
+        )
+
     def _record(self, intent: ActionIntent, receipt: ActionReceipt, audit: AuditEntry) -> None:
+        with self._receipt_span(intent, receipt):
+            self._record_outcome(intent, receipt, audit)
+
+    def _record_outcome(
+        self, intent: ActionIntent, receipt: ActionReceipt, audit: AuditEntry
+    ) -> None:
         self.ledger.record_outcome(
             intent.idempotency_key,
             receipt.model_dump(mode="json"),

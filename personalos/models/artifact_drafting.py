@@ -26,6 +26,7 @@ from personalos.domain.job_search import EvidenceRecord, NormalizedPosting, Sear
 from personalos.domain.models import ArtifactType
 from personalos.models.job_matching import MAX_DESCRIPTION_CHARS
 from personalos.models.routing import DEFAULT_CLASSIFIER_MODEL, StructuredChatModel
+from personalos.observability.tracing import model_name, model_span
 
 DRAFT_WRITER_SYSTEM_PROMPT = """\
 You tailor a candidate's application documents to a job posting.
@@ -68,6 +69,7 @@ class StructuredLLMDraftWriter:
             raise ValueError("StructuredLLMDraftWriter requires a chat model")
         self.system_prompt = system_prompt or DRAFT_WRITER_SYSTEM_PROMPT
         self._structured = model.with_structured_output(DraftProposal)
+        self._model_name = model_name(model)
 
     async def write(
         self,
@@ -76,12 +78,13 @@ class StructuredLLMDraftWriter:
         profile: SearchProfile,
         evidence: Sequence[EvidenceRecord],
     ) -> DraftProposal:
-        raw = await self._structured.ainvoke(
-            [
-                ("system", self.system_prompt),
-                ("human", render_draft_input(artifact_type, posting, profile, evidence)),
-            ]
-        )
+        with model_span("draft_artifact", model=self._model_name, artifact_type=artifact_type):
+            raw = await self._structured.ainvoke(
+                [
+                    ("system", self.system_prompt),
+                    ("human", render_draft_input(artifact_type, posting, profile, evidence)),
+                ]
+            )
         if isinstance(raw, DraftProposal):
             return raw
         return DraftProposal.model_validate(raw)

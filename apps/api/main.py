@@ -6,11 +6,14 @@ from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from opentelemetry import baggage
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from apps.api.errors import register_error_handlers
 from personalos.bootstrap import initialize_mcp_servers
 from personalos.config import settings
+from personalos.observability import tracing
+from personalos.observability.tracing_setup import configure_tracing_from_settings
 from personalos.persistence import init_db
 
 logger = logging.getLogger(__name__)
@@ -28,6 +31,11 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
     tying the two together from the very first hop. A malformed caller-supplied
     id is replaced rather than rejected: a bad correlation id should not be why
     a request fails.
+
+    It is also the request's tracing context: a caller's W3C `traceparent` is
+    extracted, so the workflow span a route opens links back to the caller's
+    trace, and the correlation id goes into baggage, so every span the request
+    produces carries it.
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -38,7 +46,13 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
             correlation_id = uuid4()
         request.state.correlation_id = correlation_id
 
-        response = await call_next(request)
+        ctx = baggage.set_baggage(
+            tracing.Attr.CORRELATION_ID,
+            str(correlation_id),
+            tracing.extract_trace_context(request.headers),
+        )
+        with tracing.attached(ctx):
+            response = await call_next(request)
         response.headers[CORRELATION_ID_HEADER] = str(correlation_id)
         return response
 
@@ -48,6 +62,7 @@ async def lifespan(app: FastAPI):
     """Manage application startup and shutdown."""
     # Startup
     logger.info("Starting PersonalOS API...")
+    configure_tracing_from_settings("personalos-api")
     init_db()
     logger.info("Database initialized")
     initialize_mcp_servers()

@@ -59,6 +59,8 @@ from personalos.domain.workflow import (
     WorkflowCommand,
     WorkflowCommandKind,
 )
+from personalos.observability import tracing
+from personalos.observability.tracing import Attr
 from personalos.persistence.checkpointer import WorkflowThreadRegistry
 from personalos.persistence.models import ApprovalModel, AuditEventModel, WorkflowRunModel
 from personalos.persistence.repositories import AuditEventRepository
@@ -166,48 +168,78 @@ class ApprovalQueue:
         correlation_id = correlation_id or uuid4()
         found = self._find(approval_id)
 
-        recorded = self._decided_rows([approval_id]).get(approval_id)
-        if recorded is None:
-            if found is None:
-                raise NotFound(
-                    f"no pending approval '{approval_id}'",
-                    details={"approval_id": str(approval_id)},
+        with self._decision_span(found, approval_id, actor_id, correlation_id) as span:
+            recorded = self._decided_rows([approval_id]).get(approval_id)
+            if recorded is None:
+                if found is None:
+                    raise NotFound(
+                        f"no pending approval '{approval_id}'",
+                        details={"approval_id": str(approval_id)},
+                    )
+                self._check(
+                    found, approved=approved, action_hash=action_hash, actor_id=actor_id, now=now
                 )
-            self._check(
-                found, approved=approved, action_hash=action_hash, actor_id=actor_id, now=now
+                replayed = not self._record(found, outcome=outcome, actor_id=actor_id, now=now)
+                recorded = self._decided_rows([approval_id])[approval_id]
+            else:
+                replayed = True
+
+            if replayed:
+                # The original outcome stands. A repeat is only "the same decision"
+                # if it names the same action and the same answer.
+                if action_hash != recorded.action_hash:
+                    raise ApprovalHashMismatch(details={"approval_id": str(approval_id)})
+                if recorded.status != _STATUS_BY_OUTCOME[outcome].value:
+                    raise ApprovalAlreadyDecided(
+                        f"approval '{approval_id}' was already {recorded.status}; that decision stands",
+                        details={"approval_id": str(approval_id)},
+                    )
+
+            # Also reached on a repeat, so a decision recorded by a request that
+            # died before queuing the resume is completed by the retry. The queue's
+            # dedupe key is what keeps that from ever resuming twice.
+            resumed = found is None or self._resume_if_answered(
+                found, actor_id=actor_id, correlation_id=correlation_id
             )
-            replayed = not self._record(found, outcome=outcome, actor_id=actor_id, now=now)
-            recorded = self._decided_rows([approval_id])[approval_id]
-        else:
-            replayed = True
+            decision = RecordedApprovalDecision(
+                approval_id=approval_id,
+                workflow_id=found.workflow_id if found else self._workflow_id(recorded),
+                action_hash=recorded.action_hash,
+                state=ApprovalState(recorded.status),
+                outcome=_outcome(recorded),
+                decided_by=self._decided_by([approval_id]).get(approval_id),
+                decided_at=recorded.decided_at,
+                resumed=resumed,
+                replayed=replayed,
+            )
+            tracing.set_attributes(
+                span,
+                {
+                    Attr.APPROVAL_OUTCOME: decision.outcome,
+                    Attr.OUTCOME: "resumed" if decision.resumed else "recorded",
+                    "replayed": decision.replayed,
+                },
+            )
+            return decision
 
-        if replayed:
-            # The original outcome stands. A repeat is only "the same decision"
-            # if it names the same action and the same answer.
-            if action_hash != recorded.action_hash:
-                raise ApprovalHashMismatch(details={"approval_id": str(approval_id)})
-            if recorded.status != _STATUS_BY_OUTCOME[outcome].value:
-                raise ApprovalAlreadyDecided(
-                    f"approval '{approval_id}' was already {recorded.status}; that decision stands",
-                    details={"approval_id": str(approval_id)},
-                )
-
-        # Also reached on a repeat, so a decision recorded by a request that
-        # died before queuing the resume is completed by the retry. The queue's
-        # dedupe key is what keeps that from ever resuming twice.
-        resumed = found is None or self._resume_if_answered(
-            found, actor_id=actor_id, correlation_id=correlation_id
-        )
-        return RecordedApprovalDecision(
-            approval_id=approval_id,
-            workflow_id=found.workflow_id if found else self._workflow_id(recorded),
-            action_hash=recorded.action_hash,
-            state=ApprovalState(recorded.status),
-            outcome=_outcome(recorded),
-            decided_by=self._decided_by([approval_id]).get(approval_id),
-            decided_at=recorded.decided_at,
-            resumed=resumed,
-            replayed=replayed,
+    @staticmethod
+    def _decision_span(
+        found: _OpenRequest | None,
+        approval_id: UUID,
+        actor_id: str,
+        correlation_id: UUID,
+    ):
+        """The span a decision is recorded in: the workflow's trace, when it is known."""
+        attributes = {Attr.APPROVAL_ID: approval_id}
+        if found is None:
+            return tracing.span("approval.decide", attributes)
+        return tracing.workflow_span(
+            "approval.decide",
+            workflow_id=found.workflow_id,
+            correlation_id=correlation_id,
+            thread_id=found.thread.thread_id,
+            actor_id=actor_id,
+            attributes={**attributes, Attr.ACTION_ID: found.request.action_id},
         )
 
     def expire_overdue(

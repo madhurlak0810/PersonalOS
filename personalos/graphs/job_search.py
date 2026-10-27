@@ -232,6 +232,7 @@ from personalos.domain.recruiter_events import (
 )
 from personalos.domain.redaction import redact
 from personalos.domain.workflow import job_search_thread_id
+from personalos.observability.tracing import traced_node
 
 logger = logging.getLogger(__name__)
 
@@ -1019,30 +1020,105 @@ class JobSearchGraph:
         """Assemble and compile the pipeline with this instance's checkpointer."""
         graph = StateGraph(JobSearchState)
 
-        graph.add_node(LOAD_SEARCH_PROFILE, self.load_search_profile)
-        graph.add_node(SEARCH_PROVIDERS, self.search_providers)
-        graph.add_node(NORMALIZE_JOBS, self.normalize_jobs)
-        graph.add_node(DEDUPLICATE, self.deduplicate)
-        graph.add_node(PERSIST_POSTINGS, self.persist_postings)
-        graph.add_node(HARD_FILTER, self.hard_filter)
-        graph.add_node(SCORE_CANDIDATES, self.score_candidates)
-        graph.add_node(EVIDENCE_CHECK, self.evidence_check)
-        graph.add_node(RANK, self.rank)
-        graph.add_node(SHORTLIST, self.shortlist)
-        graph.add_node(PREPARE_APPLICATION_PACKET, self.prepare_application_packet)
-        graph.add_node(REQUEST_APPROVAL, self.request_approval)
-        graph.add_node(APPROVAL_CHECKPOINT, self.approval_checkpoint)
-        graph.add_node(EXECUTE_APPROVED_ACTIONS, self.execute_approved_actions)
-        graph.add_node(PERSIST_APPLICATION, self.persist_application)
-        graph.add_node(EMIT_APPLICATION_CREATED, self.emit_application_created)
-        graph.add_node(HANDLE_RECRUITER_RESPONSE, self.handle_recruiter_response)
-        graph.add_node(CREATE_FOLLOW_UP_CHECKPOINT, self.create_follow_up_checkpoint)
-        graph.add_node(DRAFT_FOLLOW_UP, self.draft_follow_up)
-        graph.add_node(CLASSIFY_RECRUITER_EVENTS, self.classify_recruiter_events)
-        graph.add_node(RECORD_RECRUITER_EVENTS, self.record_recruiter_events)
-        graph.add_node(PLAN_INTERVIEW_SCHEDULE, self.plan_interview_schedule)
-        graph.add_node(PROPOSE_REQUESTED_TRANSITIONS, self.propose_requested_transitions)
-        graph.add_node(APPLY_REQUESTED_TRANSITIONS, self.apply_requested_transitions)
+        graph.add_node(
+            LOAD_SEARCH_PROFILE,
+            traced_node(LOAD_SEARCH_PROFILE, self.load_search_profile, graph="job_search"),
+        )
+        graph.add_node(
+            SEARCH_PROVIDERS,
+            traced_node(SEARCH_PROVIDERS, self.search_providers, graph="job_search"),
+        )
+        graph.add_node(
+            NORMALIZE_JOBS, traced_node(NORMALIZE_JOBS, self.normalize_jobs, graph="job_search")
+        )
+        graph.add_node(DEDUPLICATE, traced_node(DEDUPLICATE, self.deduplicate, graph="job_search"))
+        graph.add_node(
+            PERSIST_POSTINGS,
+            traced_node(PERSIST_POSTINGS, self.persist_postings, graph="job_search"),
+        )
+        graph.add_node(HARD_FILTER, traced_node(HARD_FILTER, self.hard_filter, graph="job_search"))
+        graph.add_node(
+            SCORE_CANDIDATES,
+            traced_node(SCORE_CANDIDATES, self.score_candidates, graph="job_search"),
+        )
+        graph.add_node(
+            EVIDENCE_CHECK, traced_node(EVIDENCE_CHECK, self.evidence_check, graph="job_search")
+        )
+        graph.add_node(RANK, traced_node(RANK, self.rank, graph="job_search"))
+        graph.add_node(SHORTLIST, traced_node(SHORTLIST, self.shortlist, graph="job_search"))
+        graph.add_node(
+            PREPARE_APPLICATION_PACKET,
+            traced_node(
+                PREPARE_APPLICATION_PACKET, self.prepare_application_packet, graph="job_search"
+            ),
+        )
+        graph.add_node(
+            REQUEST_APPROVAL,
+            traced_node(REQUEST_APPROVAL, self.request_approval, graph="job_search"),
+        )
+        graph.add_node(
+            APPROVAL_CHECKPOINT,
+            traced_node(APPROVAL_CHECKPOINT, self.approval_checkpoint, graph="job_search"),
+        )
+        graph.add_node(
+            EXECUTE_APPROVED_ACTIONS,
+            traced_node(
+                EXECUTE_APPROVED_ACTIONS, self.execute_approved_actions, graph="job_search"
+            ),
+        )
+        graph.add_node(
+            PERSIST_APPLICATION,
+            traced_node(PERSIST_APPLICATION, self.persist_application, graph="job_search"),
+        )
+        graph.add_node(
+            EMIT_APPLICATION_CREATED,
+            traced_node(
+                EMIT_APPLICATION_CREATED, self.emit_application_created, graph="job_search"
+            ),
+        )
+        graph.add_node(
+            HANDLE_RECRUITER_RESPONSE,
+            traced_node(
+                HANDLE_RECRUITER_RESPONSE, self.handle_recruiter_response, graph="job_search"
+            ),
+        )
+        graph.add_node(
+            CREATE_FOLLOW_UP_CHECKPOINT,
+            traced_node(
+                CREATE_FOLLOW_UP_CHECKPOINT, self.create_follow_up_checkpoint, graph="job_search"
+            ),
+        )
+        graph.add_node(
+            DRAFT_FOLLOW_UP, traced_node(DRAFT_FOLLOW_UP, self.draft_follow_up, graph="job_search")
+        )
+        graph.add_node(
+            CLASSIFY_RECRUITER_EVENTS,
+            traced_node(
+                CLASSIFY_RECRUITER_EVENTS, self.classify_recruiter_events, graph="job_search"
+            ),
+        )
+        graph.add_node(
+            RECORD_RECRUITER_EVENTS,
+            traced_node(RECORD_RECRUITER_EVENTS, self.record_recruiter_events, graph="job_search"),
+        )
+        graph.add_node(
+            PLAN_INTERVIEW_SCHEDULE,
+            traced_node(PLAN_INTERVIEW_SCHEDULE, self.plan_interview_schedule, graph="job_search"),
+        )
+        graph.add_node(
+            PROPOSE_REQUESTED_TRANSITIONS,
+            traced_node(
+                PROPOSE_REQUESTED_TRANSITIONS,
+                self.propose_requested_transitions,
+                graph="job_search",
+            ),
+        )
+        graph.add_node(
+            APPLY_REQUESTED_TRANSITIONS,
+            traced_node(
+                APPLY_REQUESTED_TRANSITIONS, self.apply_requested_transitions, graph="job_search"
+            ),
+        )
 
         # Five ways into this graph, decided at START from the input alone.
         #

@@ -34,6 +34,8 @@ from collections.abc import Awaitable, Callable, Collection, Mapping
 from functools import partial
 from typing import Any
 
+from opentelemetry.trace import SpanKind
+
 from apps.worker.event_routing import (
     APPLICATION_TRANSITION_CONSUMER,
     ApplicationTransitionHandler,
@@ -49,6 +51,8 @@ from personalos.bootstrap import (
 )
 from personalos.domain.event_transport import EventConsumer
 from personalos.domain.events import EventEnvelope, EventType
+from personalos.observability import tracing
+from personalos.observability.tracing import Attr
 from personalos.persistence.database import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -83,25 +87,44 @@ class OutboxDispatcher:
             return False
         envelope = claimed.envelope
         handler = self.handlers.get(envelope.type, self.default)
-        try:
-            if handler is None:
-                logger.debug(
-                    "no consumer for %s events; acknowledging %s", envelope.type, envelope.event_id
-                )
-            else:
-                await handler(envelope)
-        except Exception as error:
-            # Not `BaseException`: a cancelled or killed dispatcher must leave
-            # the claim alone, for its lease to lapse and the row to come back.
-            logger.exception(
-                "delivering event %s (%s) failed on attempt %d",
-                envelope.event_id,
-                envelope.type,
-                claimed.attempt,
-            )
-            self.consumer.nack(claimed, error)
-            return True
-        self.consumer.ack(claimed)
+        # Continues the publisher's trace: the envelope carries its context.
+        with tracing.attached(tracing.extract_trace_context(envelope.trace_context)):
+            with tracing.span(
+                "event.deliver",
+                {
+                    Attr.EVENT_TYPE: envelope.type,
+                    Attr.EVENT_ID: envelope.event_id,
+                    Attr.CORRELATION_ID: envelope.correlation_id,
+                    Attr.ATTEMPT: claimed.attempt,
+                },
+                kind=SpanKind.CONSUMER,
+            ) as span:
+                try:
+                    if handler is None:
+                        logger.debug(
+                            "no consumer for %s events; acknowledging %s",
+                            envelope.type,
+                            envelope.event_id,
+                        )
+                    else:
+                        await handler(envelope)
+                except Exception as error:
+                    # Not `BaseException`: a cancelled or killed dispatcher must leave
+                    # the claim alone, for its lease to lapse and the row to come back.
+                    logger.exception(
+                        "delivering event %s (%s) failed on attempt %d",
+                        envelope.event_id,
+                        envelope.type,
+                        claimed.attempt,
+                    )
+                    failure = self.consumer.nack(claimed, error)
+                    tracing.mark_failed(span, error)
+                    tracing.set_attributes(
+                        span, {Attr.EVENT_OUTCOME: failure.outcome, Attr.RETRY_DELAY: failure.delay}
+                    )
+                    return True
+                self.consumer.ack(claimed)
+                tracing.set_attributes(span, {Attr.EVENT_OUTCOME: "acked"})
         return True
 
     async def drain(self, limit: int | None = None) -> int:

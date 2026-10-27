@@ -38,6 +38,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, Request, Response
+from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from personalos.bootstrap import (
@@ -67,6 +68,8 @@ from personalos.domain.workflow import (
     WorkflowStatus,
     thread_namespace,
 )
+from personalos.observability import tracing
+from personalos.observability.tracing import Attr
 from personalos.persistence.approvals import ApprovalQueue
 from personalos.persistence.checkpointer import WorkflowThreadRegistry
 from personalos.persistence.database import SessionLocal
@@ -362,6 +365,7 @@ async def chat(
     """
     actor_id = x_actor_id or _DEFAULT_ACTOR
     correlation_id = _correlation_id(http_request)
+    new_workflow = request.thread_id is None
 
     if request.thread_id is None:
         workflow_id = services.registry.create_workflow(SUPERVISOR_WORKFLOW)
@@ -392,17 +396,31 @@ async def chat(
                 f"POST /v1/workflows/{thread.workflow_id}/resume before sending another message"
             )
 
-    command = services.commands.enqueue(
-        WorkflowCommand(
-            command_id=uuid4(),
-            kind=WorkflowCommandKind.START,
-            workflow_id=thread.workflow_id,
-            thread_id=thread.thread_id,
-            actor_id=actor_id,
-            correlation_id=correlation_id,
-            graph_input={"message": request.message},
+    # The request that creates a workflow opens its trace: this span is the
+    # root every later request, worker run and receipt for it hangs off.
+    with tracing.workflow_span(
+        "api.chat",
+        workflow_id=thread.workflow_id,
+        correlation_id=correlation_id,
+        thread_id=thread.thread_id,
+        actor_id=actor_id,
+        kind=SpanKind.SERVER,
+        root=new_workflow,
+    ) as span:
+        command = services.commands.enqueue(
+            WorkflowCommand(
+                command_id=uuid4(),
+                kind=WorkflowCommandKind.START,
+                workflow_id=thread.workflow_id,
+                thread_id=thread.thread_id,
+                actor_id=actor_id,
+                correlation_id=correlation_id,
+                graph_input={"message": request.message},
+            )
         )
-    )
+        tracing.set_attributes(
+            span, {Attr.COMMAND_ID: command.command_id, Attr.COMMAND_KIND: command.kind}
+        )
     logger.info(
         "queued start command %s for thread '%s' of workflow %s (actor_id=%s, correlation_id=%s)",
         command.command_id,
@@ -483,21 +501,39 @@ async def resume_workflow(
     else:
         resume_value = request.event
 
-    command = services.commands.enqueue(
-        WorkflowCommand(
-            command_id=uuid4(),
-            kind=WorkflowCommandKind.RESUME,
-            workflow_id=workflow_id,
-            thread_id=thread.thread_id,
-            actor_id=actor_id,
-            correlation_id=correlation_id,
-            graph_input=resume_value,
-            interrupt_ids=tuple(i.interrupt_id for i in pending if i.interrupt_id),
-        ),
-        # One answer per parked checkpoint: a second resume of the same stop
-        # collides here even if it raced past the pending check above.
-        dedupe=thread.checkpoint_id,
-    )
+    interrupt_ids = tuple(i.interrupt_id for i in pending if i.interrupt_id)
+    with tracing.workflow_span(
+        "api.workflow.resume",
+        workflow_id=workflow_id,
+        correlation_id=correlation_id,
+        thread_id=thread.thread_id,
+        actor_id=actor_id,
+        kind=SpanKind.SERVER,
+        attributes={Attr.INTERRUPT_IDS: interrupt_ids},
+    ) as span:
+        for decision in request.decisions or ():
+            tracing.add_event(
+                "approval.decided",
+                {Attr.ACTION_ID: decision.action_id, Attr.APPROVAL_OUTCOME: decision.verdict},
+            )
+        command = services.commands.enqueue(
+            WorkflowCommand(
+                command_id=uuid4(),
+                kind=WorkflowCommandKind.RESUME,
+                workflow_id=workflow_id,
+                thread_id=thread.thread_id,
+                actor_id=actor_id,
+                correlation_id=correlation_id,
+                graph_input=resume_value,
+                interrupt_ids=interrupt_ids,
+            ),
+            # One answer per parked checkpoint: a second resume of the same stop
+            # collides here even if it raced past the pending check above.
+            dedupe=thread.checkpoint_id,
+        )
+        tracing.set_attributes(
+            span, {Attr.COMMAND_ID: command.command_id, Attr.COMMAND_KIND: command.kind}
+        )
     logger.info(
         "queued resume command %s for thread '%s' of workflow %s (actor_id=%s, correlation_id=%s)",
         command.command_id,

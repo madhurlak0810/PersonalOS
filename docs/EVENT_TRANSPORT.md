@@ -229,3 +229,13 @@ receipt, decide nacks with `classify_failure`, add a builder to the contract
 suite, and wire it in `bootstrap`. If you find yourself importing
 `OutboxEventModel` anywhere else, the boundary check will tell you that you are
 building the wrong thing.
+
+Trace context rides inside the envelope (`EventEnvelope.trace_context`, a W3C
+`traceparent`/`baggage` carrier), so a transport that stores and returns
+envelopes whole carries it with nothing extra, and the dispatcher's
+`event.deliver` span continues the producer's trace from it. The Postgres
+outbox fills it in (`observability.tracing.inject_trace_context()`) when it
+stages an envelope the producer left it empty on; a new transport's `publish`
+should do the same. The in-memory transport does not, because the `events`
+layer imports nothing but `domain`. Do not move the context into broker headers
+unless you also read it back from them.

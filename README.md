@@ -54,6 +54,13 @@ For the full architecture diagram and the allowed dependency direction between l
 - An immutable event log with a status projection, and an outbox table for async processing
 - pgvector tables for semantic retrieval over resume evidence, job descriptions, and messages
 
+### Observability
+
+- One OpenTelemetry trace per workflow, and its trace id is the workflow id. The request that starts a run, every worker run, the approval, the resume, and each executed action's receipt all appear in it
+- Trace context travels in the workflow commands and event envelopes that cross the outbox, so an async continuation joins the trace that caused it
+- Spans for every graph node, model call, policy decision, tool execution, attempt, and receipt, all with the same ids (`workflow_id`, `thread_id`, `correlation_id`, `node`, `tool_name`, `action_id`, `policy_decision`, `attempt`). Payloads are referenced by id and never embedded, and spans are redacted before export
+- Off by default. Set `TRACING_ENABLED=true` and `OTEL_EXPORTER_OTLP_ENDPOINT` (an OTLP/HTTP collector such as Jaeger at `http://localhost:4318`) to turn it on; no code change is needed
+
 ### API and tools
 
 - FastAPI service with job-search endpoints under `/api/v1/jobs` (create, get, list)

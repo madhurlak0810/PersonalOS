@@ -25,6 +25,7 @@ without the graph changing at all.
 from typing import Any, Protocol
 
 from personalos.domain.routing import RouteDecision, RouteDomain
+from personalos.observability.tracing import model_name, model_span
 
 #: Confidence returned when at least one keyword for a domain matches.
 _MATCH_CONFIDENCE = 0.85
@@ -124,14 +125,16 @@ class StructuredLLMIntentClassifier:
             raise ValueError("StructuredLLMIntentClassifier requires a chat model")
         self.system_prompt = system_prompt or _render_system_prompt()
         self._structured = model.with_structured_output(RouteDecision)
+        self._model_name = model_name(model)
 
     def classify(self, message: str) -> RouteDecision:
-        raw = self._structured.invoke(
-            [
-                ("system", self.system_prompt),
-                ("human", message or ""),
-            ]
-        )
+        with model_span("classify_intent", model=self._model_name):
+            raw = self._structured.invoke(
+                [
+                    ("system", self.system_prompt),
+                    ("human", message or ""),
+                ]
+            )
         # Providers may hand back the decoded model or the plain dict behind
         # it; validating both ways means only a real RouteDecision leaves here.
         if isinstance(raw, RouteDecision):
@@ -149,6 +152,11 @@ class KeywordIntentClassifier:
     """
 
     def classify(self, message: str) -> RouteDecision:
+        # Traced like a model call: it stands in for one, at the same seam.
+        with model_span("classify_intent", model="keyword"):
+            return self._classify(message)
+
+    def _classify(self, message: str) -> RouteDecision:
         text = (message or "").lower()
 
         best_domain: RouteDomain | None = None

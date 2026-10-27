@@ -39,6 +39,7 @@ from personalos.domain.routing import (
 )
 from personalos.domain.tasks import InvalidTaskDAG, TaskDAG, TaskNode
 from personalos.models.routing import IntentClassifier
+from personalos.observability.tracing import traced_node
 
 logger = logging.getLogger(__name__)
 
@@ -162,11 +163,19 @@ class SupervisorGraph:
     def build(self) -> CompiledStateGraph:
         """Assemble and compile the graph with this instance's checkpointer and store."""
         graph = StateGraph(SupervisorState)
-        graph.add_node(_LOAD_CONTEXT, self._load_context)
-        graph.add_node(_CLASSIFY_INTENT, self._classify_intent)
-        graph.add_node(_PLAN_WORK, self._plan_work)
-        graph.add_node(_RUN_JOB_SUBGRAPH, self._run_job_subgraph)
-        graph.add_node(_CLARIFY, self._clarify)
+        graph.add_node(
+            _LOAD_CONTEXT, traced_node(_LOAD_CONTEXT, self._load_context, graph="supervisor")
+        )
+        graph.add_node(
+            _CLASSIFY_INTENT,
+            traced_node(_CLASSIFY_INTENT, self._classify_intent, graph="supervisor"),
+        )
+        graph.add_node(_PLAN_WORK, traced_node(_PLAN_WORK, self._plan_work, graph="supervisor"))
+        graph.add_node(
+            _RUN_JOB_SUBGRAPH,
+            traced_node(_RUN_JOB_SUBGRAPH, self._run_job_subgraph, graph="supervisor"),
+        )
+        graph.add_node(_CLARIFY, traced_node(_CLARIFY, self._clarify, graph="supervisor"))
 
         graph.add_edge(START, _LOAD_CONTEXT)
         graph.add_edge(_LOAD_CONTEXT, _CLASSIFY_INTENT)

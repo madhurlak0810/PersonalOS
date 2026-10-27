@@ -73,6 +73,8 @@ from personalos.domain.failures import describe_exception
 from personalos.domain.models import OutboxEventStatus
 from personalos.domain.redaction import redact_text
 from personalos.domain.retry_policy import EVENT_DELIVERY, RetryPolicy
+from personalos.observability import tracing
+from personalos.observability.tracing import Attr
 from personalos.persistence.models import OutboxEventModel, WorkflowModel, WorkflowRunModel
 from personalos.persistence.repositories import OutboxEventRepository
 
@@ -139,25 +141,41 @@ def stage_raw_event(
 
 
 def _stage(session: Session, envelope: EventEnvelope) -> tuple[OutboxEventModel, bool]:
-    """(the row holding `envelope`'s fact, whether it was already there)."""
-    outbox = OutboxEventRepository(session)
-    existing = outbox.get_by_dedupe_key(envelope.dedupe_key)
-    if existing is not None:
-        logger.debug(
-            "event %s (%s) is already in the outbox as %s",
-            envelope.dedupe_key,
-            envelope.type,
-            existing.id,
+    """(the row holding `envelope`'s fact, whether it was already there).
+
+    The envelope is stored with the trace context of the span that staged it,
+    unless the producer set one, so the delivery joins the producer's trace.
+    """
+    with tracing.span(
+        "event.publish",
+        {
+            Attr.EVENT_TYPE: envelope.type,
+            Attr.EVENT_ID: envelope.event_id,
+            Attr.CORRELATION_ID: envelope.correlation_id,
+        },
+    ) as span:
+        outbox = OutboxEventRepository(session)
+        existing = outbox.get_by_dedupe_key(envelope.dedupe_key)
+        if existing is not None:
+            logger.debug(
+                "event %s (%s) is already in the outbox as %s",
+                envelope.dedupe_key,
+                envelope.type,
+                existing.id,
+            )
+            tracing.set_attributes(span, {Attr.EVENT_OUTCOME: "duplicate"})
+            return existing, True
+        if not envelope.trace_context:
+            envelope = envelope.model_copy(update={"trace_context": tracing.inject_trace_context()})
+        row = outbox.create(
+            id=envelope.event_id,
+            type=envelope.type,
+            payload={ENVELOPE_KEY: envelope.model_dump(mode="json")},
+            dedupe_key=envelope.dedupe_key,
+            commit=False,
         )
-        return existing, True
-    row = outbox.create(
-        id=envelope.event_id,
-        type=envelope.type,
-        payload={ENVELOPE_KEY: envelope.model_dump(mode="json")},
-        dedupe_key=envelope.dedupe_key,
-        commit=False,
-    )
-    return row, False
+        tracing.set_attributes(span, {Attr.EVENT_OUTCOME: "staged"})
+        return row, False
 
 
 def envelope_from_row(row: OutboxEventModel) -> EventEnvelope:

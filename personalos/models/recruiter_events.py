@@ -42,6 +42,7 @@ from personalos.domain.recruiter_events import (
     parse_deadline,
 )
 from personalos.models.routing import DEFAULT_CLASSIFIER_MODEL, StructuredChatModel
+from personalos.observability.tracing import model_name, model_span
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +327,7 @@ class StructuredLLMRecruiterEventExtractor:
         self.fallback = fallback or RuleBasedRecruiterEventExtractor()
         self.max_attempts = max_attempts
         self._structured = model.with_structured_output(RecruiterEventExtraction)
+        self._model_name = model_name(model)
 
     async def extract(self, message: RecruiterMessage) -> ExtractionOutcome:
         turns: list[tuple[str, str]] = [
@@ -335,7 +337,10 @@ class StructuredLLMRecruiterEventExtractor:
         invalid = 0
         while invalid < self.max_attempts:
             try:
-                raw = await self._structured.ainvoke(turns)
+                with model_span(
+                    "extract_recruiter_event", model=self._model_name, attempt=invalid + 1
+                ):
+                    raw = await self._structured.ainvoke(turns)
                 extraction = (
                     raw
                     if isinstance(raw, RecruiterEventExtraction)
