@@ -29,7 +29,8 @@ from personalos.domain.job_search import (
     SemanticAssessment,
 )
 from personalos.models.routing import DEFAULT_CLASSIFIER_MODEL, StructuredChatModel
-from personalos.observability.tracing import model_name, model_span
+from personalos.models.structured import DEFAULT_MAX_ATTEMPTS, ainvoke_structured
+from personalos.observability.tracing import model_name
 
 #: Cap on posting description characters sent to the model. Long enough for a
 #: real requirements section; short enough that one padded posting cannot
@@ -65,15 +66,26 @@ invent evidence ids."""
 class StructuredLLMSemanticAssessor:
     """Assesses a posting by constraining a chat model to `SemanticAssessment`.
 
-    Failures (a provider error, output that will not validate) propagate:
-    `HybridJobMatcher` already degrades a raising assessor to keyword-level
-    matches, which is better than this layer inventing an assessment.
+    Output that will not validate is asked for again (see
+    `personalos.models.structured`); after `max_attempts`, and at once for a
+    provider error, the failure propagates: `HybridJobMatcher` already degrades
+    a raising assessor to keyword-level matches, which is better than this
+    layer inventing an assessment.
     """
 
-    def __init__(self, model: StructuredChatModel, *, system_prompt: str | None = None):
+    def __init__(
+        self,
+        model: StructuredChatModel,
+        *,
+        system_prompt: str | None = None,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    ):
         if model is None:
             raise ValueError("StructuredLLMSemanticAssessor requires a chat model")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
         self.system_prompt = system_prompt or ASSESSOR_SYSTEM_PROMPT
+        self.max_attempts = max_attempts
         self._structured = model.with_structured_output(SemanticAssessment)
         self._model_name = model_name(model)
 
@@ -83,16 +95,17 @@ class StructuredLLMSemanticAssessor:
         profile: SearchProfile,
         evidence: Sequence[EvidenceRecord],
     ) -> SemanticAssessment:
-        with model_span("assess_posting", model=self._model_name):
-            raw = await self._structured.ainvoke(
-                [
-                    ("system", self.system_prompt),
-                    ("human", render_assessment_input(posting, profile, evidence)),
-                ]
-            )
-        if isinstance(raw, SemanticAssessment):
-            return raw
-        return SemanticAssessment.model_validate(raw)
+        return await ainvoke_structured(
+            self._structured,
+            [
+                ("system", self.system_prompt),
+                ("human", render_assessment_input(posting, profile, evidence)),
+            ],
+            SemanticAssessment,
+            span="assess_posting",
+            model=self._model_name,
+            max_attempts=self.max_attempts,
+        )
 
 
 def render_assessment_input(

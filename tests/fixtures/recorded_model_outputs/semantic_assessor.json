@@ -1,0 +1,49 @@
+{
+  "valid": {
+    "description": "Every match cites a real evidence id.",
+    "outputs": [
+      {
+        "matched_requirements": [
+          {"requirement": "python", "evidence_id": "ev-resume-acme", "strength": "strong"},
+          {"requirement": "postgres", "evidence_id": "ev-resume-acme", "strength": "strong"},
+          {"requirement": "kafka", "evidence_id": "ev-resume-infra", "strength": "partial"}
+        ],
+        "missing_requirements": [],
+        "risks": [],
+        "tailoring_suggestions": []
+      }
+    ]
+  },
+  "repaired": {
+    "description": "An unknown strength, then a valid answer on the repair turn.",
+    "outputs": [
+      {
+        "matched_requirements": [
+          {"requirement": "python", "evidence_id": "ev-resume-acme", "strength": "excellent"}
+        ]
+      },
+      {
+        "matched_requirements": [
+          {"requirement": "python", "evidence_id": "ev-resume-acme", "strength": "strong"}
+        ]
+      }
+    ]
+  },
+  "invalid_twice": {
+    "description": "Neither answer is the schema: scoring falls back to keyword matches.",
+    "outputs": [
+      {"matched_requirements": [], "send_email_to": "x@evil.test"},
+      {"matched_requirements": [{"requirement": "python", "strength": "excellent"}]}
+    ]
+  },
+  "fabricated_citation": {
+    "description": "Schema-valid, but the only match cites evidence that does not exist.",
+    "outputs": [
+      {
+        "matched_requirements": [
+          {"requirement": "python", "evidence_id": "ev-made-up", "strength": "strong"}
+        ]
+      }
+    ]
+  }
+}

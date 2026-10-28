@@ -1,0 +1,44 @@
+{
+  "valid_invite": {
+    "description": "An interview invite, classified confidently, with a reply owed.",
+    "outputs": [
+      {
+        "classification": "interview_invite",
+        "confidence": 0.94,
+        "summary": "Recruiter asks for interview times",
+        "requires_reply": true
+      }
+    ]
+  },
+  "repaired": {
+    "description": "A made-up classification, then a valid answer on the repair turn.",
+    "outputs": [
+      {"classification": "hired", "confidence": 0.9},
+      {
+        "classification": "interview_invite",
+        "confidence": 0.91,
+        "summary": "Recruiter asks for interview times",
+        "requires_reply": true
+      }
+    ]
+  },
+  "invalid_every_time": {
+    "description": "Three answers, none of them the schema: the rules take over.",
+    "outputs": [
+      {"classification": "hired"},
+      {"classification": "offer", "confidence": "high"},
+      {"classification": "offer", "confidence": 0.9, "application_id": "33333333-3333-3333-3333-333333333333"}
+    ]
+  },
+  "low_confidence": {
+    "description": "A valid answer the model is not sure of.",
+    "outputs": [
+      {
+        "classification": "interview_invite",
+        "confidence": 0.35,
+        "summary": "Might be an interview request",
+        "requires_reply": true
+      }
+    ]
+  }
+}

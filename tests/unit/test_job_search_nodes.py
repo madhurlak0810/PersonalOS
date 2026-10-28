@@ -13,9 +13,12 @@ narrowest state that node is allowed to read, and asserting three things:
    `rank` must call nothing, and `prepare_application_packet` must not call the
    executor.
 
-`test_every_graph_node_has_a_contract_test` at the bottom fails if a node is
-added to the graph without a class here, so this file cannot silently fall
-behind the pipeline.
+Each class is registered with `covers_node`, and
+`tests/contracts/test_node_contract_coverage.py` fails if a node is added to
+the graph without one, so this file cannot silently fall behind the pipeline.
+The graph instance every test builds checks each node's returned update against
+its `personalos.graphs.contracts` output model, so a node that writes a key its
+contract does not declare fails whichever test happened to call it.
 
 End-to-end ordering and the conditional edges are covered in
 `tests/graph_scenarios/test_job_search_graph.py`.
@@ -73,6 +76,7 @@ from personalos.domain.recruiter_events import (
 )
 from personalos.executor.calendar import CalendarActionExecutor
 from personalos.graphs import job_search as jsg
+from personalos.graphs.contracts import JOB_SEARCH_GRAPH
 from personalos.graphs.job_search import (
     END,
     HANDLE_RECRUITER_RESPONSE,
@@ -84,6 +88,7 @@ from personalos.graphs.job_search import (
     JobSearchGraph,
 )
 from tests.fixtures import job_search_fakes as fakes
+from tests.fixtures.node_contracts import covers_node, enforce_contracts
 
 
 def graph(**overrides) -> tuple[JobSearchGraph, dict]:
@@ -108,7 +113,7 @@ def graph(**overrides) -> tuple[JobSearchGraph, dict]:
         "clock": lambda: fakes.NOW,
     }
     ports.update(overrides)
-    return JobSearchGraph(**ports), ports
+    return enforce_contracts(JobSearchGraph(**ports), JOB_SEARCH_GRAPH), ports
 
 
 def dumped(*values) -> list[dict]:
@@ -146,6 +151,7 @@ def _answered(intent, request, decision) -> dict:
 # --- load_search_profile ------------------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.LOAD_SEARCH_PROFILE)
 class TestLoadSearchProfile:
     async def test_returns_only_the_profile_it_loaded(self):
         subgraph, ports = graph()
@@ -193,6 +199,7 @@ class TestLoadSearchProfile:
 # --- search_providers ---------------------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.SEARCH_PROVIDERS)
 class TestSearchProviders:
     async def test_returns_raw_postings_and_an_empty_failure_list(self):
         subgraph, ports = graph()
@@ -236,6 +243,7 @@ class TestSearchProviders:
 # --- normalize_jobs -----------------------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.NORMALIZE_JOBS)
 class TestNormalizeJobs:
     def test_returns_normalized_postings_only(self):
         subgraph, _ports = graph()
@@ -299,6 +307,7 @@ class TestNormalizeJobs:
 # --- deduplicate --------------------------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.DEDUPLICATE)
 class TestDeduplicate:
     def test_returns_survivors_and_the_keys_that_collided(self):
         subgraph, _ports = graph()
@@ -334,6 +343,7 @@ class TestDeduplicate:
 # --- persist_postings ---------------------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.PERSIST_POSTINGS)
 class TestPersistPostings:
     async def test_records_each_distinct_posting_and_returns_its_row(self):
         catalog = fakes.FakePostingCatalog()
@@ -372,6 +382,7 @@ class TestPersistPostings:
 # --- hard_filter --------------------------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.HARD_FILTER)
 class TestHardFilter:
     def test_returns_survivors_and_an_explained_rejection_for_each_drop(self):
         subgraph, _ports = graph()
@@ -426,6 +437,7 @@ class TestHardFilter:
 # --- score_candidates ---------------------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.SCORE_CANDIDATES)
 class TestScoreCandidates:
     async def test_returns_one_scored_posting_per_survivor_with_components(self):
         subgraph, ports = graph()
@@ -461,6 +473,7 @@ class TestScoreCandidates:
 # --- evidence_check -----------------------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.EVIDENCE_CHECK)
 class TestEvidenceCheck:
     async def test_returns_one_check_per_scored_posting_keyed_by_dedupe_key(self):
         subgraph, ports = graph()
@@ -497,6 +510,7 @@ class TestEvidenceCheck:
 # --- rank ---------------------------------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.RANK)
 class TestRank:
     def test_orders_best_first_and_calls_no_port(self):
         subgraph, ports = graph()
@@ -530,6 +544,7 @@ class TestRank:
 # --- shortlist ----------------------------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.SHORTLIST)
 class TestShortlist:
     def test_returns_entries_ranked_from_one(self):
         subgraph, _ports = graph()
@@ -613,6 +628,7 @@ class TestShortlist:
 # --- prepare_application_packet ----------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.PREPARE_APPLICATION_PACKET)
 class TestPrepareApplicationPacket:
     async def test_returns_a_packet_and_a_proposed_submission_never_a_submission(self):
         """The node's whole contract: build locally, propose outwardly."""
@@ -673,6 +689,7 @@ class TestPrepareApplicationPacket:
 # --- request_approval ---------------------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.REQUEST_APPROVAL)
 class TestRequestApproval:
     def test_it_raises_a_reviewable_request_for_every_pending_action(self):
         subgraph, ports = graph()
@@ -730,6 +747,7 @@ class TestRequestApproval:
 # --- approval_checkpoint ------------------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.APPROVAL_CHECKPOINT)
 class TestApprovalCheckpoint:
     """Contract tests for the node that parks the run.
 
@@ -819,6 +837,7 @@ class TestApprovalCheckpoint:
 # --- execute_approved_actions -------------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.EXECUTE_APPROVED_ACTIONS)
 class TestExecuteApprovedActions:
     async def test_an_action_whose_approval_still_fits_it_is_redeemed(self):
         subgraph, ports = graph()
@@ -972,6 +991,7 @@ class TestExecuteApprovedActions:
 # --- persist_application ------------------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.PERSIST_APPLICATION)
 class TestPersistApplication:
     async def test_an_executed_submission_persists_as_applied(self):
         subgraph, ports = graph()
@@ -1077,6 +1097,7 @@ def _application(*, submitted: bool = True) -> PersistedApplication:
     )
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.EMIT_APPLICATION_CREATED)
 class TestEmitApplicationCreated:
     async def test_emits_application_created_with_a_dedupe_key(self):
         subgraph, ports = graph()
@@ -1149,6 +1170,7 @@ def _pending_wait(**overrides) -> PendingCheckpoint:
     return wait.model_copy(update=overrides) if overrides else wait
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.HANDLE_RECRUITER_RESPONSE)
 class TestHandleRecruiterResponse:
     async def test_classifies_records_and_proposes_a_reply(self):
         subgraph, ports = recruiter_graph()
@@ -1224,6 +1246,7 @@ class TestHandleRecruiterResponse:
 # --- create_follow_up_checkpoint ---------------------------------------------
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.CREATE_FOLLOW_UP_CHECKPOINT)
 class TestCreateFollowUpCheckpoint:
     async def test_an_interview_invite_schedules_prep_and_a_reply_reminder(self):
         subgraph, ports = recruiter_graph()
@@ -1387,6 +1410,7 @@ class TestCreateFollowUpCheckpoint:
         assert len(ports["application_store"].follow_ups) == 1
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.DRAFT_FOLLOW_UP)
 class TestDraftFollowUp:
     """The node a triggered durable wait lands on."""
 
@@ -1623,6 +1647,7 @@ async def _classified(subgraph, *messages, **extra) -> dict:
     return await subgraph.classify_recruiter_events(_inbound(*messages, **extra))
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.CLASSIFY_RECRUITER_EVENTS)
 class TestClassifyRecruiterEvents:
     async def test_classifies_and_correlates_without_writing_anything(self):
         subgraph, ports = inbound_graph()
@@ -1693,6 +1718,7 @@ class TestClassifyRecruiterEvents:
             graph(recruiter_event_extractor=fakes.FakeRecruiterEventExtractor())
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.RECORD_RECRUITER_EVENTS)
 class TestRecordRecruiterEvents:
     async def test_records_transitions_and_stages_the_calendar_event(self):
         commitment = ExtractedCommitment(
@@ -1893,6 +1919,7 @@ async def _invited(subgraph) -> dict:
     return {"user_id": str(fakes.USER_ID), **classified, **recorded}
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.PLAN_INTERVIEW_SCHEDULE)
 class TestPlanInterviewSchedule:
     async def test_a_timed_invite_is_handed_on_as_an_interview_request(self):
         subgraph, _ports = scheduling_graph()
@@ -2064,6 +2091,7 @@ def transitions_graph(statuses=None, **overrides):
     return subgraph, {**ports, "transitioner": transitioner}
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.PROPOSE_REQUESTED_TRANSITIONS)
 class TestProposeRequestedTransitions:
     async def test_proposes_each_effect_as_an_intent_and_writes_nothing(self):
         subgraph, ports = transitions_graph()
@@ -2092,6 +2120,7 @@ class TestProposeRequestedTransitions:
             )
 
 
+@covers_node(JOB_SEARCH_GRAPH, jsg.APPLY_REQUESTED_TRANSITIONS)
 class TestApplyRequestedTransitions:
     async def test_writes_the_move_only_on_an_ok_receipt(self):
         request = fakes.requested_withdrawal()
@@ -2165,59 +2194,3 @@ class TestRequestedTransitionRouting:
             subgraph.route_after_approval({"approval_stage": jsg.STAGE_LIFECYCLE_TRANSITION})
             == jsg.APPLY_REQUESTED_TRANSITIONS
         )
-
-
-# --- Coverage guard -----------------------------------------------------------
-
-
-#: Which contract test class covers which graph node. Explicit rather than
-#: derived from the node name: `approval_checkpoint_for_external_submission` is
-#: deliberately named for what it gates, not for its method, and a naming
-#: convention that happened to work for the other fourteen would break on it.
-NODE_TEST_CLASSES = {
-    jsg.LOAD_SEARCH_PROFILE: TestLoadSearchProfile,
-    jsg.SEARCH_PROVIDERS: TestSearchProviders,
-    jsg.NORMALIZE_JOBS: TestNormalizeJobs,
-    jsg.DEDUPLICATE: TestDeduplicate,
-    jsg.PERSIST_POSTINGS: TestPersistPostings,
-    jsg.HARD_FILTER: TestHardFilter,
-    jsg.SCORE_CANDIDATES: TestScoreCandidates,
-    jsg.EVIDENCE_CHECK: TestEvidenceCheck,
-    jsg.RANK: TestRank,
-    jsg.SHORTLIST: TestShortlist,
-    jsg.PREPARE_APPLICATION_PACKET: TestPrepareApplicationPacket,
-    jsg.REQUEST_APPROVAL: TestRequestApproval,
-    jsg.APPROVAL_CHECKPOINT: TestApprovalCheckpoint,
-    jsg.EXECUTE_APPROVED_ACTIONS: TestExecuteApprovedActions,
-    jsg.PERSIST_APPLICATION: TestPersistApplication,
-    jsg.EMIT_APPLICATION_CREATED: TestEmitApplicationCreated,
-    jsg.HANDLE_RECRUITER_RESPONSE: TestHandleRecruiterResponse,
-    jsg.CREATE_FOLLOW_UP_CHECKPOINT: TestCreateFollowUpCheckpoint,
-    jsg.DRAFT_FOLLOW_UP: TestDraftFollowUp,
-    jsg.CLASSIFY_RECRUITER_EVENTS: TestClassifyRecruiterEvents,
-    jsg.RECORD_RECRUITER_EVENTS: TestRecordRecruiterEvents,
-    jsg.PLAN_INTERVIEW_SCHEDULE: TestPlanInterviewSchedule,
-    jsg.PROPOSE_REQUESTED_TRANSITIONS: TestProposeRequestedTransitions,
-    jsg.APPLY_REQUESTED_TRANSITIONS: TestApplyRequestedTransitions,
-}
-
-
-async def test_every_graph_node_has_a_contract_test():
-    """A node added to the graph without a contract test fails here.
-
-    The acceptance criterion is "a node unit test exists for each node", which
-    is only durable if adding a node breaks something. This reads the compiled
-    graph's own node list rather than a hand-maintained one, so the map above
-    is what has to be kept honest, and forgetting to is a test failure.
-    """
-    subgraph, _ports = recruiter_graph()
-    compiled = subgraph.build()
-
-    graph_nodes = {
-        name for name in compiled.get_graph().nodes if name not in ("__start__", "__end__")
-    }
-
-    assert graph_nodes == set(NODE_TEST_CLASSES), (
-        f"untested node(s): {sorted(graph_nodes - set(NODE_TEST_CLASSES))}; "
-        f"mapped but not in the graph: {sorted(set(NODE_TEST_CLASSES) - graph_nodes)}"
-    )
