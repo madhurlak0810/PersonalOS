@@ -1,0 +1,10 @@
+{
+  "name": "openai-compatible-local",
+  "description": "Any OpenAI-compatible local server (llama.cpp server, vLLM, LM Studio) on port 8080. Set `model` to what the server serves. Needs the local extra.",
+  "default": {
+    "provider": "openai_compatible",
+    "model": "local-model",
+    "base_url": "http://localhost:8080/v1",
+    "params": {"temperature": 0}
+  }
+}

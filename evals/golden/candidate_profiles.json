@@ -1,0 +1,83 @@
+{
+  "description": "Synthetic candidates: a search profile and the evidence records that are the only facts about them. No real person.",
+  "candidates": {
+    "sam": {
+      "summary": "Senior backend engineer: Python APIs on Postgres, Kafka and Kubernetes in production. Open to remote or New York, full time.",
+      "profile": {
+        "target_roles": ["Backend Engineer", "Platform Engineer"],
+        "target_locations": ["Remote", "New York"],
+        "keywords": ["python", "postgres", "kafka"],
+        "must_have_skills": ["python"],
+        "excluded_companies": ["Stealth Co"],
+        "seniority_levels": ["senior"],
+        "employment_types": ["full_time"],
+        "salary_min": null,
+        "remote_only": false,
+        "min_score": 0.45,
+        "max_shortlist": 3
+      },
+      "evidence": [
+        {
+          "evidence_id": "ev-sam-acme",
+          "source_type": "resume",
+          "source_ref": "experience.acme",
+          "text": "Senior Software Engineer, Acme Corp (2019-2023). Built Python APIs backed by Postgres serving 1,200 requests per second; cut p95 latency by 40%."
+        },
+        {
+          "evidence_id": "ev-sam-infra",
+          "source_type": "resume",
+          "source_ref": "experience.infra",
+          "text": "Operated Kafka pipelines and Kubernetes clusters in production at Acme Corp; led the migration from cron jobs to event-driven consumers."
+        },
+        {
+          "evidence_id": "ev-sam-search",
+          "source_type": "project",
+          "source_ref": "projects.search",
+          "text": "Open-source search service written in Python with Elasticsearch; 600 GitHub stars."
+        },
+        {
+          "evidence_id": "ev-sam-edu",
+          "source_type": "resume",
+          "source_ref": "education.bs",
+          "text": "B.S. Computer Science, State University, 2015."
+        }
+      ]
+    },
+    "riley": {
+      "summary": "Staff data engineer: Spark, Airflow and dbt over a Snowflake warehouse. Remote only.",
+      "profile": {
+        "target_roles": ["Data Engineer"],
+        "target_locations": ["Remote"],
+        "keywords": ["python", "spark", "airflow", "dbt"],
+        "must_have_skills": ["spark"],
+        "excluded_companies": [],
+        "seniority_levels": ["senior", "staff"],
+        "employment_types": ["full_time"],
+        "salary_min": null,
+        "remote_only": true,
+        "min_score": 0.45,
+        "max_shortlist": 3
+      },
+      "evidence": [
+        {
+          "evidence_id": "ev-riley-globex",
+          "source_type": "resume",
+          "source_ref": "experience.globex",
+          "text": "Staff Data Engineer, Globex (2020-2025). Owned Spark batch jobs and Airflow DAGs moving 4 TB a day into Snowflake."
+        },
+        {
+          "evidence_id": "ev-riley-dbt",
+          "source_type": "resume",
+          "source_ref": "experience.globex.dbt",
+          "text": "Introduced dbt for warehouse modelling at Globex; 300 models with tests in CI."
+        },
+        {
+          "evidence_id": "ev-riley-python",
+          "source_type": "project",
+          "source_ref": "projects.lineage",
+          "text": "Python library for column-level lineage across dbt projects."
+        }
+      ]
+    }
+  }
+}

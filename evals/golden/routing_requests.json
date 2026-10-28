@@ -1,0 +1,19 @@
+{
+  "description": "User requests to the Supervisor, each with the route a careful reader would take. `route` is `job_search` (planned and handed to the Job Search subgraph) or `clarify` (asked back). `domain` is the domain the request is really about, checked when set: a clarify for an unsupported domain should still name the right one. Synthetic.",
+  "cases": [
+    {"id": "route-01", "message": "Find me senior backend jobs that use Python and Postgres.", "expected": {"route": "job_search", "domain": "job"}},
+    {"id": "route-02", "message": "Are there any remote platform engineering positions open right now?", "expected": {"route": "job_search", "domain": "job"}},
+    {"id": "route-03", "message": "Tailor my resume for the Northwind backend role and get the application ready.", "expected": {"route": "job_search", "domain": "job"}},
+    {"id": "route-04", "message": "Which companies are hiring staff data engineers this month?", "expected": {"route": "job_search", "domain": "job"}},
+    {"id": "route-05", "message": "Look for new roles like the one I interviewed for at Globex.", "expected": {"route": "job_search", "domain": "job"}},
+    {"id": "route-06", "message": "I want to apply to more ML engineering openings, can you search?", "expected": {"route": "job_search", "domain": "job"}},
+    {"id": "route-07", "message": "Move my Thursday dentist appointment to next week.", "expected": {"route": "clarify", "domain": "calendar"}},
+    {"id": "route-08", "message": "What does my calendar look like on Friday afternoon?", "expected": {"route": "clarify", "domain": "calendar"}},
+    {"id": "route-09", "message": "Summarise the unread email in my inbox from this morning.", "expected": {"route": "clarify", "domain": "communications"}},
+    {"id": "route-10", "message": "Reply to my landlord's message and say the rent is sent.", "expected": {"route": "clarify", "domain": "communications"}},
+    {"id": "route-11", "message": "Put the tax documents into a folder called 2026.", "expected": {"route": "clarify", "domain": "file"}},
+    {"id": "route-12", "message": "hmm", "expected": {"route": "clarify"}},
+    {"id": "route-13", "message": "Can you help me with something?", "expected": {"route": "clarify"}},
+    {"id": "route-14", "message": "", "expected": {"route": "clarify"}}
+  ]
+}

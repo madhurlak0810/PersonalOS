@@ -1,6 +1,7 @@
 """Models package."""
 
 from .artifact_drafting import StructuredLLMDraftWriter, anthropic_draft_writer
+from .gateway import ModelConfig, ModelGateway, ModelRole, ModelSpec
 from .job_matching import StructuredLLMSemanticAssessor, anthropic_semantic_assessor
 from .recruiter_events import (
     RuleBasedRecruiterEventExtractor,
@@ -17,6 +18,10 @@ from .routing import (
 )
 
 __all__ = [
+    "ModelConfig",
+    "ModelGateway",
+    "ModelRole",
+    "ModelSpec",
     "IntentClassifier",
     "KeywordIntentClassifier",
     "StructuredChatModel",

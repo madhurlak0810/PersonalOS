@@ -1,0 +1,176 @@
+{
+  "description": "Synthetic job postings as a provider would return them, each with the recommendation a careful human reviewer gives it for each golden candidate. `recommendation_in` lists every acceptable answer; `relevant` marks the postings that belong in that candidate's top-k. No real employer or posting.",
+  "posted_at": "2026-10-01T09:00:00",
+  "postings": [
+    {
+      "id": "jd-northwind-backend",
+      "payload": {
+        "title": "Senior Backend Engineer",
+        "company": "Northwind",
+        "location": "Remote",
+        "remote": true,
+        "skills": ["python", "postgres", "kafka"],
+        "salary_min": 170000,
+        "salary_max": 210000,
+        "description": "Northwind builds logistics software for regional carriers. You will own Python services on Postgres and the Kafka topics between them. Requirements: 5+ years of Python, production Postgres, event-driven systems (Kafka preferred). Remote within US time zones."
+      },
+      "expected": {
+        "sam": {"recommendation_in": ["APPLY"], "relevant": true},
+        "riley": {"recommendation_in": ["SKIP", "MAYBE"], "relevant": false}
+      }
+    },
+    {
+      "id": "jd-globex-platform",
+      "payload": {
+        "title": "Senior Platform Engineer",
+        "company": "Globex",
+        "location": "New York, NY",
+        "remote": false,
+        "skills": ["python", "kubernetes", "go"],
+        "salary_min": 180000,
+        "salary_max": 220000,
+        "description": "Join the platform team that runs Globex's Kubernetes fleet. You will write tooling in Python and Go and be on call for the clusters. Requirements: Kubernetes in production; Go or a willingness to learn it quickly; Python. Hybrid, three days a week in our Manhattan office."
+      },
+      "expected": {
+        "sam": {"recommendation_in": ["APPLY", "MAYBE"], "relevant": true},
+        "riley": {"recommendation_in": ["SKIP"], "relevant": false}
+      }
+    },
+    {
+      "id": "jd-initech-data",
+      "payload": {
+        "title": "Staff Data Engineer",
+        "company": "Initech",
+        "location": "Remote",
+        "remote": true,
+        "skills": ["python", "spark", "airflow", "dbt"],
+        "salary_min": 190000,
+        "salary_max": 230000,
+        "description": "Initech's data platform team is hiring a Staff Data Engineer to own batch pipelines end to end. Requirements: Spark at scale, Airflow, dbt, and Python. You will set modelling standards for the warehouse and mentor four engineers."
+      },
+      "expected": {
+        "sam": {"recommendation_in": ["SKIP", "MAYBE"], "relevant": false},
+        "riley": {"recommendation_in": ["APPLY"], "relevant": true}
+      }
+    },
+    {
+      "id": "jd-stark-ml",
+      "payload": {
+        "title": "Senior ML Engineer",
+        "company": "Stark",
+        "location": "Remote",
+        "remote": true,
+        "skills": ["python", "pytorch"],
+        "salary_min": 200000,
+        "salary_max": 240000,
+        "description": "Train and serve recommendation models. Requirements: PyTorch in production (mandatory), model serving, Python. Experience with feature stores is a plus."
+      },
+      "expected": {
+        "sam": {"recommendation_in": ["SKIP", "MAYBE"], "relevant": false},
+        "riley": {"recommendation_in": ["SKIP"], "relevant": false}
+      }
+    },
+    {
+      "id": "jd-hooli-berlin",
+      "payload": {
+        "title": "Senior Backend Engineer",
+        "company": "Hooli",
+        "location": "Berlin",
+        "remote": false,
+        "skills": ["python", "postgres", "kafka"],
+        "salary_min": null,
+        "salary_max": null,
+        "description": "Hooli's Berlin office is growing its payments backend. Python, Postgres and Kafka. On-site in Berlin five days a week; relocation support available."
+      },
+      "expected": {
+        "sam": {"recommendation_in": ["SKIP"], "relevant": false},
+        "riley": {"recommendation_in": ["SKIP"], "relevant": false}
+      }
+    },
+    {
+      "id": "jd-vandelay-contract",
+      "payload": {
+        "title": "Senior Backend Engineer (Contract)",
+        "company": "Vandelay",
+        "location": "Remote",
+        "remote": true,
+        "skills": ["python", "postgres", "kafka"],
+        "salary_min": null,
+        "salary_max": null,
+        "description": "Six-month contract to stabilise an import/export order system. Python, Postgres, Kafka. Hourly rate, no benefits."
+      },
+      "expected": {
+        "sam": {"recommendation_in": ["SKIP"], "relevant": false},
+        "riley": {"recommendation_in": ["SKIP"], "relevant": false}
+      }
+    },
+    {
+      "id": "jd-umbrella-junior",
+      "payload": {
+        "title": "Junior Backend Engineer",
+        "company": "Umbrella",
+        "location": "Remote",
+        "remote": true,
+        "skills": ["python", "postgres"],
+        "salary_min": 90000,
+        "salary_max": 110000,
+        "description": "An entry-level role on the internal tools team. Python and Postgres; 0-2 years of experience."
+      },
+      "expected": {
+        "sam": {"recommendation_in": ["SKIP", "MAYBE"], "relevant": false},
+        "riley": {"recommendation_in": ["SKIP"], "relevant": false}
+      }
+    },
+    {
+      "id": "jd-soylent-frontend",
+      "payload": {
+        "title": "Senior Frontend Engineer",
+        "company": "Soylent",
+        "location": "Remote",
+        "remote": true,
+        "skills": ["typescript", "react", "css"],
+        "salary_min": 160000,
+        "salary_max": 200000,
+        "description": "Build the customer dashboard in React and TypeScript. Requirements: 5+ years of frontend engineering, a strong eye for accessible design."
+      },
+      "expected": {
+        "sam": {"recommendation_in": ["SKIP"], "relevant": false},
+        "riley": {"recommendation_in": ["SKIP"], "relevant": false}
+      }
+    },
+    {
+      "id": "jd-stealth-backend",
+      "payload": {
+        "title": "Senior Backend Engineer",
+        "company": "Stealth Co",
+        "location": "Remote",
+        "remote": true,
+        "skills": ["python", "postgres", "kafka"],
+        "salary_min": 180000,
+        "salary_max": 220000,
+        "description": "Early-stage company in stealth. Python, Postgres, Kafka."
+      },
+      "expected": {
+        "sam": {"recommendation_in": ["SKIP"], "relevant": false, "filtered": true},
+        "riley": {"recommendation_in": ["SKIP"], "relevant": false}
+      }
+    },
+    {
+      "id": "jd-cyberdyne-streaming",
+      "payload": {
+        "title": "Senior Data Engineer, Streaming",
+        "company": "Cyberdyne",
+        "location": "Remote",
+        "remote": true,
+        "skills": ["python", "kafka", "spark", "postgres"],
+        "salary_min": 175000,
+        "salary_max": 215000,
+        "description": "Own the streaming layer: Kafka into Spark Structured Streaming, landing in Postgres and the lake. Requirements: Kafka, Spark, Python; Postgres a plus."
+      },
+      "expected": {
+        "sam": {"recommendation_in": ["APPLY", "MAYBE"], "relevant": true},
+        "riley": {"recommendation_in": ["APPLY", "MAYBE"], "relevant": true}
+      }
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "name": "rules",
+  "description": "No model: keyword routing, phrase-rule extraction, keyword-overlap matching, no drafting. The deterministic floor every model is compared against, and the baseline CI can run with nothing installed.",
+  "default": {"provider": "rules"}
+}

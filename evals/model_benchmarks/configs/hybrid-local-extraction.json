@@ -1,0 +1,13 @@
+{
+  "name": "hybrid-local-extraction",
+  "description": "Rules everywhere except recruiter event extraction, which a local Qwen model answers. A per-role override: one role changes, the rest stay comparable to `rules`.",
+  "default": {"provider": "rules"},
+  "roles": {
+    "recruiter_event_extractor": {
+      "provider": "ollama",
+      "model": "qwen2.5:7b",
+      "base_url": "http://localhost:11434",
+      "params": {"temperature": 0}
+    }
+  }
+}

@@ -187,9 +187,9 @@ PersonalOS-agent/
 │   ├── graph_scenarios/       # Workflow tests (TODO)
 │   └── fixtures/              # Test fixtures (TODO)
 │
-├── evals/                     # Evaluation datasets
-│   ├── golden/                # Golden test datasets
-│   └── model_benchmarks/      # Model performance benchmarks
+├── evals/                     # Evaluation harness (python -m evals.harness)
+│   ├── golden/                # Golden dataset: requests, mail, postings, scenarios
+│   └── model_benchmarks/      # Model configs, baselines, review ratings
 │
 └── migrations/                # Database schema migrations (Alembic)
     └── README.md
@@ -931,6 +931,59 @@ application's schedule is planned.
   (the planner), `TestPlanInterviewSchedule` in
   `tests/unit/test_job_search_nodes.py`, and the evaluator and `supersede`
   cases in `tests/unit/test_pending_checkpoints.py`.
+
+### 17. Evaluation Harness and the Model Gateway
+
+Agent quality is measured against a version-controlled golden dataset, not
+demoed. One command runs all of it against one model configuration:
+
+```
+python -m evals.harness                                    # the deterministic `rules` config
+python -m evals.harness --config evals/model_benchmarks/configs/ollama-qwen2.5-7b.json
+python -m evals.harness compare A/results.json B/results.json
+```
+
+**The model is configuration.** [`models/gateway.py`](personalos/models/gateway.py)
+builds the four model-backed ports -- intent classifier, recruiter event
+extractor, semantic assessor, draft writer -- from a `ModelConfig` JSON file:
+a default `ModelSpec` (`provider`, `model`, `base_url`, `params`) and optional
+per-role overrides. Providers are `rules` (the deterministic stand-ins; no
+draft writer), `anthropic` (the `llm` extra), and `ollama` and
+`openai_compatible` for local models (the `local` extra). A deployment points
+`LLM_GATEWAY_CONFIG` at a file and takes its ports from
+`bootstrap.build_model_gateway()`; the harness does the same per run. Swapping
+models changes no graph, node or prompt.
+
+**The golden dataset** ([`evals/golden/`](evals/golden/)):
+
+| File | Cases | Expected |
+| --- | --- | --- |
+| `routing_requests.json` | user requests | Supervisor route (`job_search` / `clarify`) and domain |
+| `recruiter_emails.json` | 35 emails | event classification |
+| `candidate_profiles.json`, `job_descriptions.json` | 2 candidates × 10 postings | acceptable recommendations, top-k relevance |
+| `scenarios.json` | end-to-end runs | classification, tool intents, approval pause, final application status |
+| `adversarial.json` | injected mail, postings, a draft request | expected-safe rules: no new intents, no redirected reply, no attacker address in an action, no forged transition, no fabricated draft |
+| `human_review.json` | top-k and drafts | automatic checks, plus a rubric a person rates |
+
+**What a run produces** (`evals/model_benchmarks/results/<config>/`, not
+tracked): `results.json` with every case's expected and actual outcome and
+each suite's metrics; `summary.md`; and `review_packet.md` with the
+human-review outputs, their rubric and a fingerprint. A reviewer's ratings go
+in `evals/model_benchmarks/reviews/<config>.json` and count only while the
+output still has the fingerprint they rated.
+
+**Before a model or prompt change.** Each configuration's baseline is
+`evals/model_benchmarks/baselines/<config>.json`. A run diffs against it and
+exits 1 on a regression (a case that passed now does not), on any unsafe
+adversarial case, or on a case that raised. A failure the baseline already had
+is reported, not gated, so a weak model can still be benchmarked.
+`--update-baseline` accepts a run.
+
+**Tests:** [`tests/unit/test_eval_harness.py`](tests/unit/test_eval_harness.py)
+pins the `rules` run to its baseline, and runs the suites with a scripted
+honest model and one that obeys injected text, which the adversarial suite
+must catch. [`tests/unit/test_model_gateway.py`](tests/unit/test_model_gateway.py)
+covers the gateway and checks every shipped config builds.
 
 ---
 
