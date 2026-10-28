@@ -682,7 +682,18 @@ class DictPostingNormalizer:
     anything missing the two fields a posting cannot exist without (a title and
     a company). A provider with its own vocabulary gets its own normalizer
     injected instead of this one.
+
+    The payload is untrusted, so it is validated rather than coerced: a text
+    field holding an object or a list, or a `url` that is not http(s), drops
+    the posting. Stringifying `{"$gt": ""}` into a title, or carrying a
+    `javascript:` link into a submission's target, would turn a malformed
+    payload into data the rest of the system acts on.
     """
+
+    #: Fields whose value must arrive as text. `source_job_id` may also be a
+    #: number; boards disagree on that and both are harmless.
+    _TEXT_FIELDS = ("title", "company", "location", "url", "description")
+    _URL_SCHEMES = ("http://", "https://")
 
     #: Keys accepted for each normalized field, in precedence order. Providers
     #: disagree on names far more often than on meaning.
@@ -714,6 +725,25 @@ class DictPostingNormalizer:
             logger.warning(
                 "dropping posting from provider '%s': missing title or company", raw.provider
             )
+            return None
+        malformed = [
+            field
+            for field in self._TEXT_FIELDS
+            if picked[field] is not None and not isinstance(picked[field], str)
+        ]
+        job_id = picked["source_job_id"]
+        if job_id is not None and (isinstance(job_id, bool) or not isinstance(job_id, str | int)):
+            malformed.append("source_job_id")
+        if malformed:
+            logger.warning(
+                "dropping posting from provider '%s': %s not text",
+                raw.provider,
+                ", ".join(malformed),
+            )
+            return None
+        url = picked["url"]
+        if url is not None and not url.strip().lower().startswith(self._URL_SCHEMES):
+            logger.warning("dropping posting from provider '%s': url is not http(s)", raw.provider)
             return None
 
         try:
@@ -753,7 +783,8 @@ def _as_int(value: Any) -> int | None:
         return None
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: an infinite float, which JSON's 1e400 decodes to.
         return None
 
 
