@@ -109,6 +109,9 @@ class Attr:
     EXTERNAL_REFERENCE = "external_reference"
     MODEL_OPERATION = "model_operation"
     MODEL_NAME = "model_name"
+    #: On a model span: whether the attempt's output validated against its
+    #: schema. Absent when the provider failed before there was an output.
+    SCHEMA_VALID = "schema_valid"
     GRAPH = "graph"
 
 

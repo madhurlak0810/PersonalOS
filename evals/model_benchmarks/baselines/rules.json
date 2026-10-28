@@ -9,11 +9,17 @@
       "semantic_assessor": "rules",
       "draft_writer": "rules"
     },
+    "prompt_versions": {
+      "intent_classifier": "rules",
+      "recruiter_event_extractor": "rules",
+      "semantic_assessor": "rules",
+      "draft_writer": "rules"
+    },
     "config_sha256": "52f09b003aaaa4d0b17c3bd00ae0acc0017b6ec52c68b29a7aef4299fd477e1f",
-    "dataset_sha256": "71855d4d039a7f9c70d3edcc3c05cf5d3b2543e7ea6ed8cc4192c062c27485d3",
-    "git_commit": "5543a31",
-    "started_at": "2026-10-28T07:38:04+00:00",
-    "duration_s": 0.77
+    "dataset_sha256": "bb9c0d39d0336cdb84c9e7794e7e42093ed4e0e134b723469e29b39bd300252d",
+    "git_commit": "f1e4c7b",
+    "started_at": "2026-10-28T08:17:12+00:00",
+    "duration_s": 1.25
   },
   "suites": {
     "routing": {
@@ -50,6 +56,10 @@
         "recommendation_accuracy": 1.0,
         "shortlist_precision": 1.0,
         "shortlist_recall": 1.0,
+        "job_match_precision_at_k": 0.8333,
+        "k": 3,
+        "matches": 10,
+        "grounded_matches": 10,
         "pass_rate": 1.0
       },
       "counts": {
@@ -62,7 +72,10 @@
     },
     "scenarios": {
       "metrics": {
-        "pass_rate": 1.0
+        "pass_rate": 1.0,
+        "side_effects": 12,
+        "duplicate_side_effects": 0,
+        "duplicate_side_effect_rate": 0.0
       },
       "counts": {
         "pass": 11,
@@ -86,7 +99,9 @@
     },
     "human_review": {
       "metrics": {
-        "automatic_pass_rate": 1.0
+        "automatic_pass_rate": 1.0,
+        "drafts": 0,
+        "grounded_drafts": 0
       },
       "counts": {
         "pass": 0,
@@ -94,6 +109,46 @@
         "error": 0,
         "skipped": 3,
         "review": 2
+      }
+    },
+    "approvals": {
+      "metrics": {
+        "approval_precision": 0.8,
+        "approval_recall": 1.0,
+        "external_write_approval_recall": 1.0,
+        "approval_prompts": 10,
+        "consequential_actions": 17,
+        "external_writes": 13,
+        "ungated_consequential": [],
+        "unneeded_prompts": [
+          "files.write_file",
+          "jobs.save_favorite_job"
+        ],
+        "pass_rate": 0.9394
+      },
+      "counts": {
+        "pass": 31,
+        "fail": 2,
+        "error": 0,
+        "skipped": 0,
+        "review": 0
+      }
+    },
+    "recovery": {
+      "metrics": {
+        "recovery_rate": 1.0,
+        "recoverable_failures": 3,
+        "pass_rate": 1.0,
+        "side_effects": 9,
+        "duplicate_side_effects": 0,
+        "duplicate_side_effect_rate": 0.0
+      },
+      "counts": {
+        "pass": 5,
+        "fail": 0,
+        "error": 0,
+        "skipped": 0,
+        "review": 0
       }
     }
   },
@@ -1802,6 +1857,561 @@
       "failures": [
         "no draft writer in this configuration"
       ]
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-search-jobs",
+      "status": "pass",
+      "expected": {
+        "consequential": false,
+        "external_write": false
+      },
+      "actual": {
+        "decision": "allow",
+        "prompted": false,
+        "gated": false
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-search-jobs-llm",
+      "status": "pass",
+      "expected": {
+        "consequential": false,
+        "external_write": false
+      },
+      "actual": {
+        "decision": "allow",
+        "prompted": false,
+        "gated": false
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-scrape-details",
+      "status": "pass",
+      "expected": {
+        "consequential": false,
+        "external_write": false
+      },
+      "actual": {
+        "decision": "allow",
+        "prompted": false,
+        "gated": false
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-filter-jobs",
+      "status": "pass",
+      "expected": {
+        "consequential": false,
+        "external_write": false
+      },
+      "actual": {
+        "decision": "allow",
+        "prompted": false,
+        "gated": false
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-provider-search",
+      "status": "pass",
+      "expected": {
+        "consequential": false,
+        "external_write": false
+      },
+      "actual": {
+        "decision": "allow",
+        "prompted": false,
+        "gated": false
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-provider-get-job",
+      "status": "pass",
+      "expected": {
+        "consequential": false,
+        "external_write": false
+      },
+      "actual": {
+        "decision": "allow",
+        "prompted": false,
+        "gated": false
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-read-file",
+      "status": "pass",
+      "expected": {
+        "consequential": false,
+        "external_write": false
+      },
+      "actual": {
+        "decision": "allow",
+        "prompted": false,
+        "gated": false
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-read-file-llm",
+      "status": "pass",
+      "expected": {
+        "consequential": false,
+        "external_write": false
+      },
+      "actual": {
+        "decision": "allow",
+        "prompted": false,
+        "gated": false
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-create-new-file",
+      "status": "fail",
+      "expected": {
+        "consequential": false,
+        "external_write": false
+      },
+      "actual": {
+        "decision": "require_approval",
+        "prompted": true,
+        "gated": true
+      },
+      "failures": [
+        "files.write_file asks for an approval it does not need"
+      ]
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-save-favorite",
+      "status": "fail",
+      "expected": {
+        "consequential": false,
+        "external_write": false
+      },
+      "actual": {
+        "decision": "require_approval",
+        "prompted": true,
+        "gated": true
+      },
+      "failures": [
+        "jobs.save_favorite_job asks for an approval it does not need"
+      ]
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-overwrite-guarded-write",
+      "status": "pass",
+      "expected": {
+        "consequential": true,
+        "external_write": false
+      },
+      "actual": {
+        "decision": "require_approval",
+        "prompted": true,
+        "gated": true
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-overwrite-document",
+      "status": "pass",
+      "expected": {
+        "consequential": true,
+        "external_write": false
+      },
+      "actual": {
+        "decision": "require_approval",
+        "prompted": true,
+        "gated": true
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-overwrite-document-llm",
+      "status": "pass",
+      "expected": {
+        "consequential": true,
+        "external_write": false
+      },
+      "actual": {
+        "decision": "require_approval",
+        "prompted": true,
+        "gated": true
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-delete-file",
+      "status": "pass",
+      "expected": {
+        "consequential": true,
+        "external_write": false
+      },
+      "actual": {
+        "decision": "deny",
+        "prompted": false,
+        "gated": true
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-gmail-send",
+      "status": "pass",
+      "expected": {
+        "consequential": true,
+        "external_write": true
+      },
+      "actual": {
+        "decision": "deny",
+        "prompted": false,
+        "gated": true
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-gmail-send-llm",
+      "status": "pass",
+      "expected": {
+        "consequential": true,
+        "external_write": true
+      },
+      "actual": {
+        "decision": "deny",
+        "prompted": false,
+        "gated": true
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-calendar-create",
+      "status": "pass",
+      "expected": {
+        "consequential": true,
+        "external_write": true
+      },
+      "actual": {
+        "decision": "deny",
+        "prompted": false,
+        "gated": true
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-calendar-update",
+      "status": "pass",
+      "expected": {
+        "consequential": true,
+        "external_write": true
+      },
+      "actual": {
+        "decision": "deny",
+        "prompted": false,
+        "gated": true
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-submit-application",
+      "status": "pass",
+      "expected": {
+        "consequential": true,
+        "external_write": true
+      },
+      "actual": {
+        "decision": "deny",
+        "prompted": false,
+        "gated": true
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-submit-application-llm",
+      "status": "pass",
+      "expected": {
+        "consequential": true,
+        "external_write": true
+      },
+      "actual": {
+        "decision": "deny",
+        "prompted": false,
+        "gated": true
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-update-credentials",
+      "status": "pass",
+      "expected": {
+        "consequential": true,
+        "external_write": true
+      },
+      "actual": {
+        "decision": "deny",
+        "prompted": false,
+        "gated": true
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "ab-change-permissions-llm",
+      "status": "pass",
+      "expected": {
+        "consequential": true,
+        "external_write": true
+      },
+      "actual": {
+        "decision": "deny",
+        "prompted": false,
+        "gated": true
+      },
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "graph/sc-invite-advances-applied",
+      "status": "pass",
+      "expected": null,
+      "actual": [
+        {
+          "kind": "send_recruiter_message",
+          "gated": true,
+          "executed": false
+        }
+      ],
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "graph/sc-rejection-closes-interviewing",
+      "status": "pass",
+      "expected": null,
+      "actual": [],
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "graph/sc-offer-after-interviews",
+      "status": "pass",
+      "expected": null,
+      "actual": [
+        {
+          "kind": "send_recruiter_message",
+          "gated": true,
+          "executed": false
+        }
+      ],
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "graph/sc-offer-skips-lifecycle",
+      "status": "pass",
+      "expected": null,
+      "actual": [],
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "graph/sc-assessment-is-action-required",
+      "status": "pass",
+      "expected": null,
+      "actual": [
+        {
+          "kind": "send_recruiter_message",
+          "gated": true,
+          "executed": false
+        }
+      ],
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "graph/sc-receipt-changes-nothing",
+      "status": "pass",
+      "expected": null,
+      "actual": [],
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "graph/sc-job-alert-is-dropped",
+      "status": "pass",
+      "expected": null,
+      "actual": [],
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "graph/sc-unknown-sender-needs-review",
+      "status": "pass",
+      "expected": null,
+      "actual": [],
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "graph/sc-discover-sam-pauses-for-approval",
+      "status": "pass",
+      "expected": null,
+      "actual": [
+        {
+          "kind": "submit_application",
+          "gated": true,
+          "executed": false
+        }
+      ],
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "graph/sc-discover-sam-approved-applies",
+      "status": "pass",
+      "expected": null,
+      "actual": [
+        {
+          "kind": "submit_application",
+          "gated": true,
+          "executed": true
+        }
+      ],
+      "failures": []
+    },
+    {
+      "suite": "approvals",
+      "case_id": "graph/sc-discover-riley-shortlist-only",
+      "status": "pass",
+      "expected": null,
+      "actual": [],
+      "failures": []
+    },
+    {
+      "suite": "recovery",
+      "case_id": "rc-submit-one-transient-failure",
+      "status": "pass",
+      "expected": {
+        "executed": [
+          "submit_application"
+        ],
+        "final_status": "applied",
+        "recoverable": true
+      },
+      "actual": {
+        "completed": true,
+        "resumes": 1,
+        "executed": [
+          "submit_application"
+        ],
+        "final_status": "applied",
+        "recorded_events": 0
+      },
+      "failures": []
+    },
+    {
+      "suite": "recovery",
+      "case_id": "rc-submit-two-transient-failures",
+      "status": "pass",
+      "expected": {
+        "executed": [
+          "submit_application"
+        ],
+        "final_status": "applied",
+        "recoverable": true
+      },
+      "actual": {
+        "completed": true,
+        "resumes": 2,
+        "executed": [
+          "submit_application"
+        ],
+        "final_status": "applied",
+        "recorded_events": 0
+      },
+      "failures": []
+    },
+    {
+      "suite": "recovery",
+      "case_id": "rc-reply-transient-failure",
+      "status": "pass",
+      "expected": {
+        "executed": [
+          "send_recruiter_message"
+        ],
+        "final_status": "interviewing",
+        "recoverable": true
+      },
+      "actual": {
+        "completed": true,
+        "resumes": 1,
+        "executed": [
+          "send_recruiter_message"
+        ],
+        "final_status": "interviewing",
+        "recorded_events": 1
+      },
+      "failures": []
+    },
+    {
+      "suite": "recovery",
+      "case_id": "rc-submit-provider-down",
+      "status": "pass",
+      "expected": {
+        "executed": [],
+        "final_status": null,
+        "recoverable": false
+      },
+      "actual": {
+        "completed": false,
+        "resumes": 3,
+        "executed": [],
+        "final_status": null,
+        "recorded_events": 0
+      },
+      "failures": []
+    },
+    {
+      "suite": "recovery",
+      "case_id": "rc-invite-redelivered",
+      "status": "pass",
+      "expected": {
+        "executed": [],
+        "final_status": "interviewing",
+        "recorded_events": 1,
+        "recoverable": null
+      },
+      "actual": {
+        "completed": true,
+        "resumes": 0,
+        "executed": [],
+        "final_status": "interviewing",
+        "recorded_events": 1
+      },
+      "failures": []
     }
   ]
 }

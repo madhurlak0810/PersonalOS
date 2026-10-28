@@ -65,6 +65,18 @@ jobs:
         run: pytest tests/adversarial -v
       - name: Recovery scenarios and duplicate side-effect rate
         run: pytest tests/graph_scenarios/test_recovery_scenarios.py -v
+      - name: Quality metrics gate
+        # The golden set on the `rules` config. Fails on a baseline
+        # regression, an unsafe adversarial case, or a critical bound in
+        # evals/thresholds.json: approval recall below 100% (external writes
+        # included) or any duplicated side effect.
+        run: python -m evals.harness
+      - name: Quality report
+        if: always()
+        run: |
+          if [ -f evals/model_benchmarks/results/rules/summary.md ]; then
+            cat evals/model_benchmarks/results/rules/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Unit tests
         run: pytest tests -v
       - name: Lint

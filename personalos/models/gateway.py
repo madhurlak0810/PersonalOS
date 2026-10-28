@@ -31,6 +31,7 @@ Provider packages are imported when a model is built, never at module scope,
 so importing this module -- and running on `rules` -- needs none of them.
 """
 
+import hashlib
 import json
 import os
 from collections.abc import Callable, Sequence
@@ -46,9 +47,13 @@ from personalos.domain.job_search import (
     SearchProfile,
     SemanticAssessment,
 )
-from personalos.models.artifact_drafting import StructuredLLMDraftWriter
-from personalos.models.job_matching import StructuredLLMSemanticAssessor
+from personalos.models.artifact_drafting import (
+    DRAFT_WRITER_SYSTEM_PROMPT,
+    StructuredLLMDraftWriter,
+)
+from personalos.models.job_matching import ASSESSOR_SYSTEM_PROMPT, StructuredLLMSemanticAssessor
 from personalos.models.recruiter_events import (
+    EXTRACTOR_SYSTEM_PROMPT,
     RuleBasedRecruiterEventExtractor,
     StructuredLLMRecruiterEventExtractor,
 )
@@ -57,7 +62,9 @@ from personalos.models.routing import (
     KeywordIntentClassifier,
     StructuredChatModel,
     StructuredLLMIntentClassifier,
+    _render_system_prompt,
 )
+from personalos.models.structured import REPAIR_PROMPT
 
 Provider = Literal["rules", "anthropic", "ollama", "openai_compatible"]
 
@@ -119,6 +126,35 @@ class ModelConfig(BaseModel):
     def load(cls, path: str | Path) -> "ModelConfig":
         """Read a configuration from a JSON file."""
         return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def _system_prompts() -> dict[ModelRole, str]:
+    """The system prompt each role's model is given, as the ports render it."""
+    return {
+        ModelRole.INTENT_CLASSIFIER: _render_system_prompt(),
+        ModelRole.RECRUITER_EVENT_EXTRACTOR: EXTRACTOR_SYSTEM_PROMPT,
+        ModelRole.SEMANTIC_ASSESSOR: ASSESSOR_SYSTEM_PROMPT,
+        ModelRole.DRAFT_WRITER: DRAFT_WRITER_SYSTEM_PROMPT,
+    }
+
+
+def prompt_versions(config: ModelConfig) -> dict[str, str]:
+    """`role -> prompt version`, for every role: which prompts a run actually used.
+
+    A version is the first 12 hex digits of the SHA-256 of the role's system
+    prompt and the schema-repair prompt, so editing either is a new version
+    and two runs are comparable exactly when their versions agree. A `rules`
+    role has no prompt and reports `rules`.
+    """
+    prompts = _system_prompts()
+    versions = {}
+    for role in ModelRole:
+        if config.spec_for(role).provider == "rules":
+            versions[role.value] = "rules"
+            continue
+        digest = hashlib.sha256(f"{prompts[role]}\n{REPAIR_PROMPT}".encode()).hexdigest()
+        versions[role.value] = digest[:12]
+    return versions
 
 
 #: Builds a chat model for a spec whose provider is in `CHAT_PROVIDERS`.
@@ -245,6 +281,7 @@ __all__ = [
     "ModelRole",
     "ModelSpec",
     "ModelConfig",
+    "prompt_versions",
     "ChatModelFactory",
     "SemanticAssessmentUnavailable",
     "DecliningSemanticAssessor",

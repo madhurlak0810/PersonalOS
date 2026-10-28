@@ -14,6 +14,13 @@ anything.
 | `scenarios` | `scenarios.json` | compiled Job Search, end to end | classification, intents, pause point, final status |
 | `adversarial` | `adversarial.json` | as `scenarios`, with injected text | safety rules only |
 | `human_review` | `human_review.json` | top-k and drafts | automatic checks; the rest waits for a reviewer |
+| `approvals` | `approval_boundaries.json`, `scenarios.json` | policy engine; compiled Job Search | approval precision / recall at consequence boundaries |
+| `recovery` | `recovery.json` | compiled Job Search, failed and resumed | end state, recovery, duplicated side effects |
+
+Suites that run workflows to the end also count the side effects they
+observe into a `SideEffectLedger` (`duplicate_side_effect_rate`), and
+`evals.metrics` turns the lot, with the spans the run emitted, into the
+quality report.
 """
 
 import hashlib
@@ -27,8 +34,19 @@ from personalos.domain.artifacts import validate_draft
 from personalos.domain.job_search import ScoredPosting, ShortlistEntry
 from personalos.domain.models import ArtifactType
 from personalos.models.gateway import ModelGateway
+from personalos.policy.engine import default_policy_engine
+from personalos.policy.intents import Decision, IntentOrigin, ToolIntent
+from personalos.policy.rules import IDEMPOTENCY_KEY_ARG
+from tests.fixtures.side_effects import (
+    APPLICATION_TRANSITION,
+    COMMUNICATION_EVENT,
+    EXTERNAL_WRITE,
+    ScopedLedger,
+    SideEffectLedger,
+)
 
 from . import dataset, world
+from .metrics import ActionObservation, approval_metrics
 from .recruiter_event_classification import load_golden, score
 
 PASS, FAIL, SKIPPED, ERROR, REVIEW = "pass", "fail", "skipped", "error", "review"
@@ -95,6 +113,39 @@ async def _timed(run: Callable[[], Awaitable[CaseResult]], suite: str, case_id: 
 def _rate(cases: list[CaseResult]) -> float:
     scored = [case for case in cases if case.status in (PASS, FAIL, ERROR)]
     return round(sum(case.status == PASS for case in scored) / len(scored), 4) if scored else 0.0
+
+
+def _effect_metrics(ledger: SideEffectLedger) -> dict[str, float]:
+    return {
+        "side_effects": ledger.total,
+        "duplicate_side_effects": ledger.duplicates,
+        "duplicate_side_effect_rate": round(ledger.duplicate_side_effect_rate, 4),
+    }
+
+
+def record_effects(
+    ledger: SideEffectLedger | ScopedLedger, env: world.JobSearchWorld, finals: list[dict]
+) -> None:
+    """Every outward effect a world observed, by what makes two of them the same.
+
+    Read from the fakes and from what the recorder reported creating, never
+    from what the graph says it did.
+    """
+    ledger.record_all(
+        EXTERNAL_WRITE, (intent.idempotency_key for intent, _ in env.action_executor.executed)
+    )
+    ledger.record_all(
+        APPLICATION_TRANSITION,
+        ((app.application_id, app.status.value) for app in env.application_store.created),
+    )
+    for final in finals:
+        for record in final.get("recruiter_event_records") or []:
+            if record["created"]:
+                ledger.record(COMMUNICATION_EVENT, record["dedupe_key"])
+            if record.get("transitioned"):
+                ledger.record(
+                    APPLICATION_TRANSITION, (str(record["application_id"]), record["status"])
+                )
 
 
 def fingerprint(value: Any) -> str:
@@ -287,14 +338,22 @@ async def recruiter_events(gateway: ModelGateway) -> SuiteResult:
 # --- job_matching -----------------------------------------------------------
 
 
+#: The k of `job_match_precision_at_k`: how many of the top postings a
+#: candidate is expected to read.
+PRECISION_AT_K = 3
+
+
 async def job_matching(gateway: ModelGateway) -> SuiteResult:
     postings = dataset.job_descriptions()
     results: list[CaseResult] = []
-    precision, recall = [], []
+    precision, recall, precision_at_k = [], [], []
+    matches = grounded = 0
     for name in dataset.candidates():
         run_id = f"match-{name}"
         try:
-            observed, *_ = await run_discovery(gateway, {"id": run_id, "candidate": name})
+            observed, _, _, candidate, assessed = await run_discovery(
+                gateway, {"id": run_id, "candidate": name}
+            )
         except Exception as exc:  # noqa: BLE001 - recorded per posting below
             for posting_id in postings:
                 results.append(
@@ -341,6 +400,10 @@ async def job_matching(gateway: ModelGateway) -> SuiteResult:
         shortlisted = set(observed["shortlist"])
         precision.append(len(shortlisted & relevant) / len(shortlisted) if shortlisted else 0.0)
         recall.append(len(shortlisted & relevant) / len(relevant) if relevant else 1.0)
+        top_k = [item["company"] for item in observed["ranked"][:PRECISION_AT_K]]
+        precision_at_k.append(sum(company in relevant for company in top_k) / PRECISION_AT_K)
+        matches += len(assessed)
+        grounded += len(assessed) - len(_check_cited(assessed, candidate.evidence))
 
     return SuiteResult(
         "job_matching",
@@ -349,6 +412,12 @@ async def job_matching(gateway: ModelGateway) -> SuiteResult:
             "recommendation_accuracy": _rate(results),
             "shortlist_precision": round(sum(precision) / len(precision), 4) if precision else 0.0,
             "shortlist_recall": round(sum(recall) / len(recall), 4) if recall else 0.0,
+            "job_match_precision_at_k": (
+                round(sum(precision_at_k) / len(precision_at_k), 4) if precision_at_k else 0.0
+            ),
+            "k": PRECISION_AT_K,
+            "matches": matches,
+            "grounded_matches": grounded,
             "pass_rate": _rate(results),
         },
     )
@@ -378,18 +447,22 @@ def _check_expected(expected: dict[str, Any], actual: dict[str, Any]) -> list[st
 
 async def scenarios(gateway: ModelGateway) -> SuiteResult:
     data = dataset.load("scenarios.json")
+    ledger = SideEffectLedger()
 
     async def one(case: dict[str, Any]) -> CaseResult:
         if case["kind"] == "inbound_mail":
-            actual, *_ = await run_inbound(gateway, case, data["received_at"])
+            actual, final, env = await run_inbound(gateway, case, data["received_at"])
         else:
-            actual, *_ = await run_discovery(gateway, case)
+            actual, final, env, *_ = await run_discovery(gateway, case)
             actual = {key: value for key, value in actual.items() if key != "ranked"}
+        record_effects(ledger.scoped(case["id"]), env, [final])
         expected = case["expected"]
         return _judge("scenarios", case["id"], expected, actual, _check_expected(expected, actual))
 
     results = [await _timed(lambda c=c: one(c), "scenarios", c["id"]) for c in data["scenarios"]]
-    return SuiteResult("scenarios", results, {"pass_rate": _rate(results)})
+    return SuiteResult(
+        "scenarios", results, {"pass_rate": _rate(results), **_effect_metrics(ledger)}
+    )
 
 
 # --- adversarial ------------------------------------------------------------
@@ -600,6 +673,7 @@ async def human_review(gateway: ModelGateway) -> SuiteResult:
 
     results = [await _timed(lambda c=c: one(c), "human_review", c["id"]) for c in data["cases"]]
     automatic = [r for r in results if r.status in (REVIEW, FAIL, ERROR)]
+    drafts = [r.actual for r in results if isinstance(r.actual, dict) and "valid" in r.actual]
     return SuiteResult(
         "human_review",
         results,
@@ -608,7 +682,249 @@ async def human_review(gateway: ModelGateway) -> SuiteResult:
                 round(sum(r.status == REVIEW for r in automatic) / len(automatic), 4)
                 if automatic
                 else 0.0
+            ),
+            "drafts": len(drafts),
+            # `validate_draft` flags nothing but claims it cannot trace to evidence.
+            "grounded_drafts": sum(draft["valid"] for draft in drafts),
+        },
+    )
+
+
+# --- approvals --------------------------------------------------------------
+
+
+def _policy_observation(case: dict[str, Any]) -> tuple[ActionObservation, str]:
+    """Put one labelled tool call to the policy engine the application boots with."""
+    server, tool = case["tool"].split(".", 1)
+    arguments = dict(case["arguments"])
+    if case["mutating"]:
+        arguments.setdefault(IDEMPOTENCY_KEY_ARG, f"eval-{case['id']}")
+    intent = ToolIntent(
+        server=server,
+        tool=tool,
+        arguments=arguments,
+        origin=IntentOrigin(case["origin"]),
+        mutating=case["mutating"],
+        requested_by="eval:approvals",
+    )
+    decision = default_policy_engine().evaluate_intent(intent).decision
+    observation = ActionObservation(
+        action=case["tool"],
+        consequential=case["consequential"],
+        external_write=case["external_write"],
+        prompted=decision is Decision.REQUIRE_APPROVAL,
+        gated=decision is not Decision.ALLOW,
+    )
+    return observation, decision.value
+
+
+def _judge_gate(observation: ActionObservation) -> list[str]:
+    if observation.consequential and not observation.gated:
+        return [f"{observation.action} would run with no approval"]
+    if not observation.consequential and observation.prompted:
+        return [f"{observation.action} asks for an approval it does not need"]
+    return []
+
+
+async def approvals(gateway: ModelGateway) -> SuiteResult:
+    """Approval precision and recall at the consequence boundaries.
+
+    Two boundaries, scored together. The policy engine's verdict on each
+    labelled tool call in `approval_boundaries.json`; and every action the
+    compiled Job Search graph proposes in the `scenarios.json` runs, which is
+    gated when an approval request was raised for it before anything ran.
+    """
+    data = dataset.load("approval_boundaries.json")
+    labels = data["action_kinds"]
+    observations: list[ActionObservation] = []
+    results: list[CaseResult] = []
+
+    async def policy_case(case: dict[str, Any]) -> CaseResult:
+        observation, verdict = _policy_observation(case)
+        observations.append(observation)
+        expected = {
+            "consequential": case["consequential"],
+            "external_write": case["external_write"],
+        }
+        actual = {"decision": verdict, "prompted": observation.prompted, "gated": observation.gated}
+        return _judge("approvals", case["id"], expected, actual, _judge_gate(observation))
+
+    for case in data["cases"]:
+        results.append(await _timed(lambda c=case: policy_case(c), "approvals", case["id"]))
+
+    scenario_data = dataset.load("scenarios.json")
+
+    async def graph_case(case: dict[str, Any]) -> CaseResult:
+        if case["kind"] == "inbound_mail":
+            _, final, env = await run_inbound(gateway, case, scenario_data["received_at"])
+        else:
+            _, final, env, *_ = await run_discovery(gateway, case)
+        requested = {str(r["action_id"]) for r in final.get("approval_requests") or []}
+        executed = {str(intent.action_id) for intent, _ in env.action_executor.executed}
+        failures, actual = [], []
+        for intent in intents(final):
+            kind = intent["kind"]
+            if kind not in labels:
+                failures.append(f"{kind} has no label in approval_boundaries.json")
+                continue
+            gated = str(intent["action_id"]) in requested
+            observation = ActionObservation(
+                action=kind,
+                consequential=labels[kind]["consequential"],
+                external_write=labels[kind]["external_write"],
+                prompted=gated,
+                gated=gated,
             )
+            observations.append(observation)
+            failures += _judge_gate(observation)
+            actual.append(
+                {"kind": kind, "gated": gated, "executed": str(intent["action_id"]) in executed}
+            )
+        return _judge("approvals", f"graph/{case['id']}", None, actual, failures)
+
+    for case in scenario_data["scenarios"]:
+        case_id = f"graph/{case['id']}"
+        results.append(await _timed(lambda c=case: graph_case(c), "approvals", case_id))
+
+    return SuiteResult(
+        "approvals", results, {**approval_metrics(observations), "pass_rate": _rate(results)}
+    )
+
+
+# --- recovery ---------------------------------------------------------------
+
+
+class InjectedFault(RuntimeError):
+    """The failure a recovery case injects. Its own type, so nothing mistakes it for a bug."""
+
+
+def _fail_first(env: world.JobSearchWorld, failures: int, error: str) -> None:
+    """Make the world's action executor raise `failures` times before it works.
+
+    It raises before the fake records anything, so the effect never landed:
+    the failure a retry is safe to repeat.
+    """
+    execute = env.action_executor.execute
+    remaining = [failures]
+
+    async def flaky(intent, decision):
+        if remaining[0] > 0:
+            remaining[0] -= 1
+            raise InjectedFault(error)
+        return await execute(intent, decision)
+
+    env.action_executor.execute = flaky
+
+
+def _recovery_world(
+    gateway: ModelGateway, case: dict[str, Any]
+) -> tuple[world.JobSearchWorld, Any]:
+    approve = case.get("approval") == "approved"
+    if case["kind"] == "inbound_mail":
+        application = dataset.application(case["application"])
+        env = world.job_search(gateway, application=application, approve=approve)
+        received_at = dataset.load("recovery.json")["received_at"]
+        message = dataset.message(case["id"], case["message"], received_at)
+        return env, world.inbound_input(message)
+    candidate = dataset.candidates()[case["candidate"]]
+    env = world.job_search(
+        gateway,
+        profile=candidate.profile,
+        evidence=candidate.evidence,
+        postings=dataset.raw_postings(case.get("postings", "all")),
+        approve=approve,
+    )
+    return env, world.discovery_input(prepare_application=case.get("prepare_application", False))
+
+
+async def _run_resuming(env, graph_input, config, max_resumes: int) -> tuple[list[dict], int, bool]:
+    """Invoke, then resume from the checkpoint after each failure, as a restarted worker would.
+
+    Returns the final states reached, how many resumes it took, and whether
+    the run got to the end.
+    """
+    try:
+        return [await env.graph.ainvoke(graph_input, config)], 0, True
+    except InjectedFault:
+        pass
+    for resume in range(1, max_resumes + 1):
+        try:
+            return [await env.graph.ainvoke(None, config)], resume, True
+        except InjectedFault:
+            continue
+    return [], max_resumes, False
+
+
+async def recovery(gateway: ModelGateway) -> SuiteResult:
+    data = dataset.load("recovery.json")
+    ledger = SideEffectLedger()
+
+    async def one(case: dict[str, Any]) -> CaseResult:
+        env, graph_input = _recovery_world(gateway, case)
+        fault = case["fault"]
+        if fault["kind"] == "executor":
+            _fail_first(env, fault["failures"], fault["error"])
+            finals, resumes, completed = await _run_resuming(
+                env, graph_input, world.thread(case["id"]), case["max_resumes"]
+            )
+        else:
+            # A redelivery is a new run per delivery, as the inbox poller starts one.
+            finals = [
+                await env.graph.ainvoke(graph_input, world.thread(f"{case['id']}-{n}"))
+                for n in range(fault["times"])
+            ]
+            resumes, completed = 0, True
+        record_effects(ledger.scoped(case["id"]), env, finals)
+
+        status = world.final_status(env, inbound=case["kind"] == "inbound_mail")
+        recorded = sum(
+            record["created"]
+            for final in finals
+            for record in final.get("recruiter_event_records") or []
+        )
+        actual = {
+            "completed": completed,
+            "resumes": resumes,
+            "executed": [intent.kind.value for intent, _ in env.action_executor.executed],
+            "final_status": status.value if status else None,
+            "recorded_events": recorded,
+        }
+        expected = case["expected"]
+        failures = [
+            f"{key} {actual[key]!r}, expected {want!r}"
+            for key, want in expected.items()
+            if actual[key] != want
+        ]
+        if case["recoverable"] is not None and completed != case["recoverable"]:
+            failures.append(
+                "did not finish by resuming" if case["recoverable"] else "finished; expected not to"
+            )
+        return _judge(
+            "recovery",
+            case["id"],
+            {**expected, "recoverable": case["recoverable"]},
+            actual,
+            failures,
+        )
+
+    results = [await _timed(lambda c=c: one(c), "recovery", c["id"]) for c in data["cases"]]
+    recoverable = [
+        result
+        for case, result in zip(data["cases"], results, strict=True)
+        if case["recoverable"] and result.actual
+    ]
+    return SuiteResult(
+        "recovery",
+        results,
+        {
+            "recovery_rate": (
+                round(sum(r.actual["completed"] for r in recoverable) / len(recoverable), 4)
+                if recoverable
+                else 0.0
+            ),
+            "recoverable_failures": len(recoverable),
+            "pass_rate": _rate(results),
+            **_effect_metrics(ledger),
         },
     )
 
@@ -620,6 +936,8 @@ SUITES: dict[str, Suite] = {
     "scenarios": scenarios,
     "adversarial": adversarial,
     "human_review": human_review,
+    "approvals": approvals,
+    "recovery": recovery,
 }
 
 __all__ = [
@@ -631,5 +949,7 @@ __all__ = [
     "CaseResult",
     "SuiteResult",
     "SUITES",
+    "PRECISION_AT_K",
     "fingerprint",
+    "record_effects",
 ]
