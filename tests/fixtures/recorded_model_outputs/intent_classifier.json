@@ -1,0 +1,34 @@
+{
+  "valid_job": {
+    "description": "A clear job-search request, decoded into the schema on the first try.",
+    "outputs": [
+      {"domain": "job", "confidence": 0.93, "reasoning": "asks to find backend roles"}
+    ]
+  },
+  "repaired": {
+    "description": "The first answer invents a field; the repair turn gets a valid one.",
+    "outputs": [
+      {"domain": "job", "confidence": 0.9, "next_step": "search_linkedin"},
+      {"domain": "job", "confidence": 0.88, "reasoning": "asks to find backend roles"}
+    ]
+  },
+  "invalid_twice": {
+    "description": "A domain outside the enum, then a confidence outside [0, 1]: repair fails.",
+    "outputs": [
+      {"domain": "cryptocurrency", "confidence": 0.99},
+      {"domain": "job", "confidence": 1.7}
+    ]
+  },
+  "low_confidence": {
+    "description": "A vague request the model is honestly unsure about.",
+    "outputs": [
+      {"domain": "job", "confidence": 0.31, "reasoning": "could be about anything"}
+    ]
+  },
+  "unsupported_domain": {
+    "description": "A confident classification into a reserved, not-yet-enabled domain.",
+    "outputs": [
+      {"domain": "calendar", "confidence": 0.95, "reasoning": "asks to move a meeting"}
+    ]
+  }
+}

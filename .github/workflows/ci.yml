@@ -54,6 +54,10 @@ jobs:
           pip install -e ".[dev,test]"
       - name: Boundary tests
         run: pytest tests/architecture -v
+      - name: Node contract gate
+        # Fails if a node registered in any graph has no typed contract in
+        # personalos.graphs.contracts or no @covers_node contract test.
+        run: pytest tests/contracts/test_node_contract_coverage.py -v
       - name: Unit tests
         run: pytest tests -v
       - name: Lint

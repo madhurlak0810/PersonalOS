@@ -1,0 +1,36 @@
+{
+  "valid_resume": {
+    "description": "A resume whose every claim cites the record.",
+    "outputs": [
+      {
+        "artifact_type": "resume",
+        "segments": [
+          {"text": "Senior Software Engineer, Acme Corp (2019-2023)", "evidence_ids": ["experience.acme"]},
+          {
+            "text": "Designed and shipped Python APIs on Postgres handling 1,200 requests per second, reducing p95 latency by 40%.",
+            "evidence_ids": ["experience.acme"]
+          }
+        ]
+      }
+    ]
+  },
+  "repaired": {
+    "description": "An artifact type outside the enum, then a valid resume.",
+    "outputs": [
+      {"artifact_type": "biography", "segments": []},
+      {
+        "artifact_type": "resume",
+        "segments": [
+          {"text": "Senior Software Engineer, Acme Corp (2019-2023)", "evidence_ids": ["experience.acme"]}
+        ]
+      }
+    ]
+  },
+  "invalid_twice": {
+    "description": "Neither answer is the schema: no packet is built.",
+    "outputs": [
+      {"artifact_type": "biography", "segments": []},
+      {"artifact_type": "resume", "segments": [{"evidence_ids": ["experience.acme"]}]}
+    ]
+  }
+}

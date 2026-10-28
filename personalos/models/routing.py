@@ -25,6 +25,7 @@ without the graph changing at all.
 from typing import Any, Protocol
 
 from personalos.domain.routing import RouteDecision, RouteDomain
+from personalos.models.structured import DEFAULT_MAX_ATTEMPTS, invoke_structured
 from personalos.observability.tracing import model_name, model_span
 
 #: Confidence returned when at least one keyword for a domain matches.
@@ -113,33 +114,40 @@ class StructuredLLMIntentClassifier:
     rests on: the graph is not parsing prose and hoping for a domain name, and
     a domain outside `RouteDomain` cannot be returned in the first place.
 
-    A structured-output call can still fail (a provider error, or output that
-    will not validate). That is deliberately left to propagate: the Supervisor
-    graph already treats a raising classifier as zero-confidence and asks for
-    clarification, which is the same place a genuinely ambiguous message ends
-    up, and is better than this layer inventing a domain to return.
+    A structured-output call can still fail. Output that will not validate is
+    asked for again, with the validation error, up to `max_attempts` times --
+    the repair step `StructuredLLMRecruiterEventExtractor` also takes. After
+    that, and at once for a provider error, the failure propagates: the
+    Supervisor graph already treats a raising classifier as zero-confidence and
+    asks for clarification, which is the same place a genuinely ambiguous
+    message ends up, and is better than this layer inventing a domain to return.
     """
 
-    def __init__(self, model: StructuredChatModel, *, system_prompt: str | None = None):
+    def __init__(
+        self,
+        model: StructuredChatModel,
+        *,
+        system_prompt: str | None = None,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    ):
         if model is None:
             raise ValueError("StructuredLLMIntentClassifier requires a chat model")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
         self.system_prompt = system_prompt or _render_system_prompt()
+        self.max_attempts = max_attempts
         self._structured = model.with_structured_output(RouteDecision)
         self._model_name = model_name(model)
 
     def classify(self, message: str) -> RouteDecision:
-        with model_span("classify_intent", model=self._model_name):
-            raw = self._structured.invoke(
-                [
-                    ("system", self.system_prompt),
-                    ("human", message or ""),
-                ]
-            )
-        # Providers may hand back the decoded model or the plain dict behind
-        # it; validating both ways means only a real RouteDecision leaves here.
-        if isinstance(raw, RouteDecision):
-            return raw
-        return RouteDecision.model_validate(raw)
+        return invoke_structured(
+            self._structured,
+            [("system", self.system_prompt), ("human", message or "")],
+            RouteDecision,
+            span="classify_intent",
+            model=self._model_name,
+            max_attempts=self.max_attempts,
+        )
 
 
 class KeywordIntentClassifier:

@@ -59,11 +59,11 @@ _DEFAULT_ACTOR_ID = "system"
 
 #: langgraph node/edge names, so they aren't inline string literals in two
 #: places.
-_LOAD_CONTEXT = "load_context"
-_CLASSIFY_INTENT = "classify_intent"
-_PLAN_WORK = "plan_work"
-_RUN_JOB_SUBGRAPH = "run_job_subgraph"
-_CLARIFY = "clarify"
+LOAD_CONTEXT = "load_context"
+CLASSIFY_INTENT = "classify_intent"
+PLAN_WORK = "plan_work"
+RUN_JOB_SUBGRAPH = "run_job_subgraph"
+CLARIFY = "clarify"
 
 
 class JobSubgraphRunner(Protocol):
@@ -164,29 +164,29 @@ class SupervisorGraph:
         """Assemble and compile the graph with this instance's checkpointer and store."""
         graph = StateGraph(SupervisorState)
         graph.add_node(
-            _LOAD_CONTEXT, traced_node(_LOAD_CONTEXT, self._load_context, graph="supervisor")
+            LOAD_CONTEXT, traced_node(LOAD_CONTEXT, self._load_context, graph="supervisor")
         )
         graph.add_node(
-            _CLASSIFY_INTENT,
-            traced_node(_CLASSIFY_INTENT, self._classify_intent, graph="supervisor"),
+            CLASSIFY_INTENT,
+            traced_node(CLASSIFY_INTENT, self._classify_intent, graph="supervisor"),
         )
-        graph.add_node(_PLAN_WORK, traced_node(_PLAN_WORK, self._plan_work, graph="supervisor"))
+        graph.add_node(PLAN_WORK, traced_node(PLAN_WORK, self._plan_work, graph="supervisor"))
         graph.add_node(
-            _RUN_JOB_SUBGRAPH,
-            traced_node(_RUN_JOB_SUBGRAPH, self._run_job_subgraph, graph="supervisor"),
+            RUN_JOB_SUBGRAPH,
+            traced_node(RUN_JOB_SUBGRAPH, self._run_job_subgraph, graph="supervisor"),
         )
-        graph.add_node(_CLARIFY, traced_node(_CLARIFY, self._clarify, graph="supervisor"))
+        graph.add_node(CLARIFY, traced_node(CLARIFY, self._clarify, graph="supervisor"))
 
-        graph.add_edge(START, _LOAD_CONTEXT)
-        graph.add_edge(_LOAD_CONTEXT, _CLASSIFY_INTENT)
+        graph.add_edge(START, LOAD_CONTEXT)
+        graph.add_edge(LOAD_CONTEXT, CLASSIFY_INTENT)
         graph.add_conditional_edges(
-            _CLASSIFY_INTENT,
+            CLASSIFY_INTENT,
             self._route_after_classification,
-            {_PLAN_WORK: _PLAN_WORK, _CLARIFY: _CLARIFY},
+            {PLAN_WORK: PLAN_WORK, CLARIFY: CLARIFY},
         )
-        graph.add_edge(_PLAN_WORK, _RUN_JOB_SUBGRAPH)
-        graph.add_edge(_RUN_JOB_SUBGRAPH, END)
-        graph.add_edge(_CLARIFY, END)
+        graph.add_edge(PLAN_WORK, RUN_JOB_SUBGRAPH)
+        graph.add_edge(RUN_JOB_SUBGRAPH, END)
+        graph.add_edge(CLARIFY, END)
 
         return graph.compile(checkpointer=self.checkpointer, store=self.store)
 
@@ -229,15 +229,15 @@ class SupervisorGraph:
         """Below the confidence threshold, or outside the supported domains: clarify."""
         raw_decision = state.get("route_decision")
         if raw_decision is None:
-            return _CLARIFY
+            return CLARIFY
         decision = route_decision_from_mapping(raw_decision)
         if decision.confidence < self.confidence_threshold:
-            return _CLARIFY
+            return CLARIFY
         try:
             ensure_supported_domain(decision)
         except UnsupportedRouteDomain:
-            return _CLARIFY
-        return _PLAN_WORK
+            return CLARIFY
+        return PLAN_WORK
 
     def _plan_work(self, state: SupervisorState) -> dict[str, Any]:
         """Produce the bounded task DAG for a confidently-routed, supported domain."""

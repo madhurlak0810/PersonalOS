@@ -26,7 +26,8 @@ from personalos.domain.job_search import EvidenceRecord, NormalizedPosting, Sear
 from personalos.domain.models import ArtifactType
 from personalos.models.job_matching import MAX_DESCRIPTION_CHARS
 from personalos.models.routing import DEFAULT_CLASSIFIER_MODEL, StructuredChatModel
-from personalos.observability.tracing import model_name, model_span
+from personalos.models.structured import DEFAULT_MAX_ATTEMPTS, ainvoke_structured
+from personalos.observability.tracing import model_name
 
 DRAFT_WRITER_SYSTEM_PROMPT = """\
 You tailor a candidate's application documents to a job posting.
@@ -59,15 +60,26 @@ segment must cite at least one entry. Do not invent evidence ids."""
 class StructuredLLMDraftWriter:
     """Writes a draft by constraining a chat model to `DraftProposal`.
 
-    Failures (a provider error, output that will not validate) propagate. A
-    draft is not something to approximate: no document is better than one
-    this layer made up to fill the gap.
+    Output that will not validate is asked for again (see
+    `personalos.models.structured`); after `max_attempts`, and at once for a
+    provider error, the failure propagates. A draft is not something to
+    approximate: no document is better than one this layer made up to fill
+    the gap.
     """
 
-    def __init__(self, model: StructuredChatModel, *, system_prompt: str | None = None):
+    def __init__(
+        self,
+        model: StructuredChatModel,
+        *,
+        system_prompt: str | None = None,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    ):
         if model is None:
             raise ValueError("StructuredLLMDraftWriter requires a chat model")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
         self.system_prompt = system_prompt or DRAFT_WRITER_SYSTEM_PROMPT
+        self.max_attempts = max_attempts
         self._structured = model.with_structured_output(DraftProposal)
         self._model_name = model_name(model)
 
@@ -78,16 +90,18 @@ class StructuredLLMDraftWriter:
         profile: SearchProfile,
         evidence: Sequence[EvidenceRecord],
     ) -> DraftProposal:
-        with model_span("draft_artifact", model=self._model_name, artifact_type=artifact_type):
-            raw = await self._structured.ainvoke(
-                [
-                    ("system", self.system_prompt),
-                    ("human", render_draft_input(artifact_type, posting, profile, evidence)),
-                ]
-            )
-        if isinstance(raw, DraftProposal):
-            return raw
-        return DraftProposal.model_validate(raw)
+        return await ainvoke_structured(
+            self._structured,
+            [
+                ("system", self.system_prompt),
+                ("human", render_draft_input(artifact_type, posting, profile, evidence)),
+            ],
+            DraftProposal,
+            span="draft_artifact",
+            model=self._model_name,
+            max_attempts=self.max_attempts,
+            artifact_type=artifact_type,
+        )
 
 
 def render_draft_input(
