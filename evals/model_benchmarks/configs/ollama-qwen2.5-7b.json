@@ -1,0 +1,10 @@
+{
+  "name": "ollama-qwen2.5-7b",
+  "description": "Qwen 2.5 7B Instruct served by a local Ollama (ollama pull qwen2.5:7b). Needs the local extra.",
+  "default": {
+    "provider": "ollama",
+    "model": "qwen2.5:7b",
+    "base_url": "http://localhost:11434",
+    "params": {"temperature": 0, "num_ctx": 8192}
+  }
+}

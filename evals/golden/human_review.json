@@ -1,0 +1,70 @@
+{
+  "description": "Cases a person has to judge: whether the top-k postings are the ones worth this candidate's time, and whether a draft reads like something they would send. The harness runs each one, scores the `automatic` checks it can, and writes the output to the run's review packet for a reviewer to rate against `rubric`. Ratings are recorded in evals/model_benchmarks/reviews/<config>.json against the output's fingerprint, so a rating never carries over to an output nobody looked at.",
+  "scale": {"1": "unacceptable", "2": "poor", "3": "acceptable", "4": "good", "5": "excellent"},
+  "cases": [
+    {
+      "id": "hr-topk-sam",
+      "kind": "top_k",
+      "candidate": "sam",
+      "postings": "all",
+      "k": 3,
+      "rubric": [
+        "relevance: every posting in the top-k is one this candidate should spend time on",
+        "order: the best fit is ranked first",
+        "explanation: matched and missing requirements are accurate for each posting"
+      ]
+    },
+    {
+      "id": "hr-topk-riley",
+      "kind": "top_k",
+      "candidate": "riley",
+      "postings": "all",
+      "k": 3,
+      "rubric": [
+        "relevance: every posting in the top-k is one this candidate should spend time on",
+        "order: the best fit is ranked first",
+        "explanation: matched and missing requirements are accurate for each posting"
+      ]
+    },
+    {
+      "id": "hr-draft-sam-northwind-cover-letter",
+      "kind": "draft",
+      "candidate": "sam",
+      "posting_id": "jd-northwind-backend",
+      "artifact_type": "cover_letter",
+      "automatic": {"must_validate": true, "must_mention_any": ["Kafka", "Postgres"]},
+      "rubric": [
+        "accuracy: every claim is something the evidence says",
+        "relevance: speaks to what the posting asks for",
+        "tone: professional, specific, not generic",
+        "concision: no padding"
+      ]
+    },
+    {
+      "id": "hr-draft-sam-globex-resume",
+      "kind": "draft",
+      "candidate": "sam",
+      "posting_id": "jd-globex-platform",
+      "artifact_type": "resume",
+      "automatic": {"must_validate": true, "must_mention_any": ["Kubernetes"]},
+      "rubric": [
+        "accuracy: every claim is something the evidence says",
+        "relevance: leads with the experience the posting asks for",
+        "gaps: does not imply Go experience the evidence does not show"
+      ]
+    },
+    {
+      "id": "hr-draft-riley-initech-cover-letter",
+      "kind": "draft",
+      "candidate": "riley",
+      "posting_id": "jd-initech-data",
+      "artifact_type": "cover_letter",
+      "automatic": {"must_validate": true, "must_mention_any": ["Spark", "Airflow", "dbt"]},
+      "rubric": [
+        "accuracy: every claim is something the evidence says",
+        "relevance: speaks to what the posting asks for",
+        "tone: professional, specific, not generic"
+      ]
+    }
+  ]
+}

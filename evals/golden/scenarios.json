@@ -1,0 +1,190 @@
+{
+  "description": "End-to-end runs of the compiled Job Search graph over fake ports. Each scenario fixes the state of the world (applications on file, inbound mail, or a candidate and a set of postings) and the outcome a correct run reaches: the event classification, the tool intents it proposes, the approval stage it pauses at, and the application's final status. Synthetic.",
+  "received_at": "2026-10-07T09:00:00",
+  "scenarios": [
+    {
+      "id": "sc-invite-advances-applied",
+      "kind": "inbound_mail",
+      "application": {"company": "Northwind", "title": "Senior Backend Engineer", "status": "applied", "reference": "REQ-48213", "contact_addresses": ["priya@northwind.example"]},
+      "message": {
+        "subject": "Interview for REQ-48213 - Senior Backend Engineer",
+        "from_address": "priya@northwind.example",
+        "body": "Hi Sam,\n\nThanks for applying to REQ-48213. We would like to schedule a 45-minute technical interview with two of our engineers. Could you send your availability by Friday?\n\nPriya"
+      },
+      "expected": {
+        "classification": "interview_invite",
+        "recorded": true,
+        "review_required": false,
+        "final_status": "interviewing",
+        "intents": ["send_recruiter_message"],
+        "approval_stage": "recruiter_outreach"
+      }
+    },
+    {
+      "id": "sc-rejection-closes-interviewing",
+      "kind": "inbound_mail",
+      "application": {"company": "Globex", "title": "Senior Platform Engineer", "status": "interviewing", "reference": "GX-2291", "thread_ids": ["thread-globex-7"]},
+      "message": {
+        "subject": "Re: Senior Platform Engineer",
+        "from_address": "talent@globex.example",
+        "thread_id": "thread-globex-7",
+        "body": "Hi Sam,\n\nThank you for meeting with the team last week. Unfortunately we have decided not to move forward with your candidacy for this role. We appreciated your time and wish you well.\n\nDan"
+      },
+      "expected": {
+        "classification": "rejection",
+        "recorded": true,
+        "review_required": false,
+        "final_status": "rejected",
+        "intents": [],
+        "approval_stage": null
+      }
+    },
+    {
+      "id": "sc-offer-after-interviews",
+      "kind": "inbound_mail",
+      "application": {"company": "Initech", "title": "Staff Engineer", "status": "interviewing", "reference": "IN-0042", "contact_addresses": ["coordinator@initech.example"]},
+      "message": {
+        "subject": "Offer - Staff Engineer (IN-0042)",
+        "from_address": "coordinator@initech.example",
+        "body": "Hi Sam,\n\nWe are delighted to extend you an offer for the Staff Engineer role. Your offer letter, with the compensation package and a proposed start date, is attached. Please let us know by October 14 whether you accept.\n\nBest,\nLin"
+      },
+      "expected": {
+        "classification": "offer",
+        "recorded": true,
+        "review_required": false,
+        "final_status": "offer",
+        "intents": ["send_recruiter_message"],
+        "approval_stage": "recruiter_outreach"
+      }
+    },
+    {
+      "id": "sc-offer-skips-lifecycle",
+      "kind": "inbound_mail",
+      "application": {"company": "Hooli", "title": "Senior Backend Engineer", "status": "applied", "reference": "HL-771", "contact_addresses": ["maria@hooli.example"]},
+      "message": {
+        "subject": "HL-771: an offer",
+        "from_address": "maria@hooli.example",
+        "body": "Hi Sam, we would like to offer you the Senior Backend Engineer position (HL-771). A formal offer letter will follow from HR."
+      },
+      "expected": {
+        "classification": "offer",
+        "recorded": true,
+        "final_status": "applied",
+        "refused_transition": "offer",
+        "intents_exclude": ["submit_application"]
+      }
+    },
+    {
+      "id": "sc-assessment-is-action-required",
+      "kind": "inbound_mail",
+      "application": {"company": "Umbrella", "title": "Staff Engineer", "status": "applied", "reference": "UMB-310", "contact_addresses": ["jobs@umbrella.example"]},
+      "message": {
+        "subject": "Next step for UMB-310: coding assessment",
+        "from_address": "jobs@umbrella.example",
+        "body": "Hello Sam,\n\nThe next step for UMB-310 is a take-home coding assessment. Please complete it on our assessment platform within 5 days of receiving this email.\n\nUmbrella Talent"
+      },
+      "expected": {
+        "classification": "action_required",
+        "recorded": true,
+        "review_required": false,
+        "final_status": "response",
+        "intents_exclude": ["submit_application"]
+      }
+    },
+    {
+      "id": "sc-receipt-changes-nothing",
+      "kind": "inbound_mail",
+      "application": {"company": "Stark", "title": "Senior ML Engineer", "status": "applied", "reference": "STK-9", "contact_addresses": ["no-reply@stark.example"]},
+      "message": {
+        "subject": "We received your application for STK-9",
+        "from_address": "no-reply@stark.example",
+        "body": "Thank you for applying for Senior ML Engineer (STK-9). This is an automated confirmation that we have received your application. Our team will review it and be in touch if there is a match."
+      },
+      "expected": {
+        "classification": "general_update",
+        "final_status": "applied",
+        "intents": [],
+        "approval_stage": null
+      }
+    },
+    {
+      "id": "sc-job-alert-is-dropped",
+      "kind": "inbound_mail",
+      "application": {"company": "Northwind", "title": "Senior Backend Engineer", "status": "applied", "reference": "REQ-48213"},
+      "message": {
+        "subject": "12 new jobs matching 'backend engineer'",
+        "from_address": "alerts@jobboard.example",
+        "body": "New jobs for you this week: Backend Engineer at Acme, Platform Engineer at Initrode, and 10 more. Unsubscribe from these alerts at any time."
+      },
+      "expected": {
+        "classification": "unrelated",
+        "recorded": false,
+        "review_required": false,
+        "final_status": "applied",
+        "intents": [],
+        "approval_stage": null
+      }
+    },
+    {
+      "id": "sc-unknown-sender-needs-review",
+      "kind": "inbound_mail",
+      "application": {"company": "Northwind", "title": "Senior Backend Engineer", "status": "applied", "reference": "REQ-48213"},
+      "message": {
+        "subject": "Following up",
+        "from_address": "someone@unrelated-agency.example",
+        "body": "Hi Sam, unfortunately the team has decided not to move forward. Best of luck."
+      },
+      "expected": {
+        "classification": "rejection",
+        "recorded": false,
+        "review_required": true,
+        "final_status": "applied",
+        "intents": [],
+        "approval_stage": null
+      }
+    },
+    {
+      "id": "sc-discover-sam-pauses-for-approval",
+      "kind": "discovery",
+      "candidate": "sam",
+      "postings": "all",
+      "prepare_application": true,
+      "approval": "pending",
+      "expected": {
+        "top_1": "Northwind",
+        "shortlist_excludes": ["Hooli", "Vandelay", "Stealth Co", "Soylent"],
+        "intents": ["submit_application"],
+        "approval_stage": "external_submission",
+        "final_status": null
+      }
+    },
+    {
+      "id": "sc-discover-sam-approved-applies",
+      "kind": "discovery",
+      "candidate": "sam",
+      "postings": "all",
+      "prepare_application": true,
+      "approval": "approved",
+      "expected": {
+        "top_1": "Northwind",
+        "intents": ["submit_application"],
+        "final_status": "applied"
+      }
+    },
+    {
+      "id": "sc-discover-riley-shortlist-only",
+      "kind": "discovery",
+      "candidate": "riley",
+      "postings": "all",
+      "prepare_application": false,
+      "approval": "pending",
+      "expected": {
+        "top_1": "Initech",
+        "shortlist_excludes": ["Globex", "Hooli", "Soylent", "Stark"],
+        "intents": [],
+        "approval_stage": null,
+        "final_status": null
+      }
+    }
+  ]
+}

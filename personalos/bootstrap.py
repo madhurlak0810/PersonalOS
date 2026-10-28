@@ -37,6 +37,7 @@ from personalos.graphs.job_search import JobSearchSubgraphRunner
 from personalos.mcp.adapter import MCPToolInvoker
 from personalos.mcp.base import MCPServer
 from personalos.mcp.manager import MCPServerManager, get_mcp_manager
+from personalos.models.gateway import ModelConfig, ModelGateway
 from personalos.persistence.action_journal import ActionExecutorPort, JournaledActionExecutor
 from personalos.persistence.application_board import ApplicationBoardStore
 from personalos.persistence.application_lifecycle import (
@@ -219,6 +220,19 @@ def build_posting_catalog(session_factory=SessionLocal) -> SqlPostingCatalog:
     return SqlPostingCatalog(session_factory)
 
 
+def build_model_gateway(config_path: str | None = None) -> ModelGateway:
+    """Build the `ModelGateway` every model-backed port is taken from.
+
+    `config_path` (default: `settings.llm_gateway_config`) names a
+    `ModelConfig` JSON file such as those in `evals/model_benchmarks/configs/`;
+    with none set, every role runs on the deterministic `rules` provider.
+    Changing models is changing this file, which is also what
+    `python -m evals.harness --config` measures before the change ships.
+    """
+    path = config_path if config_path is not None else settings.llm_gateway_config
+    return ModelGateway(ModelConfig.load(path) if path else ModelConfig(name="rules"))
+
+
 def build_job_matcher(
     assessor: SemanticAssessor,
     session_factory=SessionLocal,
@@ -228,7 +242,7 @@ def build_job_matcher(
 
     `assessor` is required rather than defaulted so that which model reads
     posting text is chosen where the graph is assembled; pass
-    `personalos.models.job_matching.anthropic_semantic_assessor()` for Claude.
+    `build_model_gateway().semantic_assessor()` for the configured model.
     """
     return HybridJobMatcher(
         evidence_source=SqlEvidenceSource(session_factory), assessor=assessor, config=config
@@ -839,6 +853,7 @@ def build_job_search_subgraph_runner(
 
 
 __all__ = [
+    "build_model_gateway",
     "JOB_SEARCH_WORKFLOW",
     "SUPERVISOR_WORKFLOW",
     "EVENT_HANDLER_WORKFLOW",

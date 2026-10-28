@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str = ""
     otel_service_name: str = ""
 
+    # Models. A `ModelConfig` JSON file naming the provider and model for each
+    # model-backed port (see `personalos.models.gateway` and
+    # `evals/model_benchmarks/configs/`). Empty runs every port on the
+    # deterministic rules. Evaluate a change with `python -m evals.harness
+    # --config <file>` before pointing this at it.
+    llm_gateway_config: str = ""
+
     # MCP Servers
     mcp_files_enabled: bool = True
     mcp_google_enabled: bool = False

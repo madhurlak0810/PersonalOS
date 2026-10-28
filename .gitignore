@@ -10,3 +10,6 @@ venv/
 !.env.example
 *.log
 .vscode/
+
+# Eval harness output; baselines under evals/model_benchmarks/baselines/ are tracked.
+evals/model_benchmarks/results/
