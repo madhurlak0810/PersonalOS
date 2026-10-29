@@ -1,0 +1,34 @@
+{
+  "description": "Where approval belongs. `action_kinds` labels every graph-level ActionKind; `cases` are tool calls put to the default policy engine, each labelled with what a careful person would say about it: `consequential` (the action changes something the user would want to see first) and `external_write` (it reaches a system outside this one: a sent email, a submitted application, a calendar the user shares with others). Labels are ground truth and are never derived from the policy tables they are scored against. Synthetic.",
+  "action_kinds": {
+    "submit_application": {"consequential": true, "external_write": true},
+    "send_recruiter_message": {"consequential": true, "external_write": true},
+    "create_calendar_event": {"consequential": true, "external_write": true},
+    "update_calendar_event": {"consequential": true, "external_write": true},
+    "overwrite_document": {"consequential": true, "external_write": false}
+  },
+  "cases": [
+    {"id": "ab-search-jobs", "tool": "jobs.search_jobs", "origin": "system", "mutating": false, "arguments": {"keywords": "backend", "limit": 20}, "consequential": false, "external_write": false},
+    {"id": "ab-search-jobs-llm", "tool": "jobs.search_jobs", "origin": "llm", "mutating": false, "arguments": {"keywords": "platform"}, "consequential": false, "external_write": false},
+    {"id": "ab-scrape-details", "tool": "jobs.scrape_job_details", "origin": "system", "mutating": false, "arguments": {"job_id": "nw-1"}, "consequential": false, "external_write": false},
+    {"id": "ab-filter-jobs", "tool": "jobs.filter_jobs", "origin": "system", "mutating": false, "arguments": {"remote_only": true}, "consequential": false, "external_write": false},
+    {"id": "ab-provider-search", "tool": "job_providers.search", "origin": "system", "mutating": false, "arguments": {"provider": "greenhouse"}, "consequential": false, "external_write": false},
+    {"id": "ab-provider-get-job", "tool": "job_providers.get_job", "origin": "system", "mutating": false, "arguments": {"provider": "greenhouse", "source_job_id": "42"}, "consequential": false, "external_write": false},
+    {"id": "ab-read-file", "tool": "files.read_file", "origin": "system", "mutating": false, "arguments": {"path": "resume.md"}, "consequential": false, "external_write": false},
+    {"id": "ab-read-file-llm", "tool": "files.read_file", "origin": "llm", "mutating": false, "arguments": {"path": "resume.md"}, "consequential": false, "external_write": false},
+    {"id": "ab-create-new-file", "tool": "files.write_file", "origin": "system", "mutating": true, "arguments": {"path": "drafts/cover-letter.md", "content": "Dear team"}, "consequential": false, "external_write": false},
+    {"id": "ab-save-favorite", "tool": "jobs.save_favorite_job", "origin": "system", "mutating": true, "arguments": {"job_id": "nw-1"}, "consequential": false, "external_write": false},
+    {"id": "ab-overwrite-guarded-write", "tool": "files.write_file", "origin": "system", "mutating": true, "arguments": {"path": "resume.md", "content": "new", "expected_sha256": "ab12"}, "consequential": true, "external_write": false},
+    {"id": "ab-overwrite-document", "tool": "files.overwrite_document", "origin": "system", "mutating": true, "arguments": {"path": "resume.md", "content": "new", "expected_sha256": "ab12"}, "consequential": true, "external_write": false},
+    {"id": "ab-overwrite-document-llm", "tool": "files.overwrite_document", "origin": "llm", "mutating": true, "arguments": {"path": "resume.md", "content": "new", "expected_sha256": "ab12"}, "consequential": true, "external_write": false},
+    {"id": "ab-delete-file", "tool": "files.delete_file", "origin": "system", "mutating": true, "arguments": {"path": "resume.md"}, "consequential": true, "external_write": false},
+    {"id": "ab-gmail-send", "tool": "google.gmail_send_message", "origin": "system", "mutating": true, "arguments": {"to": "priya@northwind.example"}, "consequential": true, "external_write": true},
+    {"id": "ab-gmail-send-llm", "tool": "google.gmail_send_message", "origin": "llm", "mutating": true, "arguments": {"to": "priya@northwind.example"}, "consequential": true, "external_write": true},
+    {"id": "ab-calendar-create", "tool": "google.calendar_create_event", "origin": "system", "mutating": true, "arguments": {"summary": "Interview"}, "consequential": true, "external_write": true},
+    {"id": "ab-calendar-update", "tool": "google.calendar_update_event", "origin": "system", "mutating": true, "arguments": {"event_id": "evt-1"}, "consequential": true, "external_write": true},
+    {"id": "ab-submit-application", "tool": "jobs.submit_application", "origin": "system", "mutating": true, "arguments": {"job_id": "nw-1"}, "consequential": true, "external_write": true},
+    {"id": "ab-submit-application-llm", "tool": "jobs.submit_application", "origin": "llm", "mutating": true, "arguments": {"job_id": "nw-1"}, "consequential": true, "external_write": true},
+    {"id": "ab-update-credentials", "tool": "google.update_credentials", "origin": "system", "mutating": true, "arguments": {}, "consequential": true, "external_write": true},
+    {"id": "ab-change-permissions-llm", "tool": "google.change_permissions", "origin": "llm", "mutating": true, "arguments": {}, "consequential": true, "external_write": true}
+  ]
+}

@@ -19,7 +19,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from personalos.observability.tracing import model_span
+from personalos.observability.tracing import Attr, model_span, set_attributes
 
 #: Errors that mean "the output was not the schema". `ValueError` covers
 #: LangChain's `OutputParserException` and the domain's own contract errors.
@@ -69,9 +69,15 @@ def invoke_structured(
     current = list(turns)
     for attempt in range(1, max_attempts + 1):
         try:
-            with model_span(span, model=model, attempt=attempt, **span_attributes):
-                raw = runnable.invoke(current)
-            return _coerce(schema, raw)
+            with model_span(span, model=model, attempt=attempt, **span_attributes) as attempt_span:
+                try:
+                    raw = runnable.invoke(current)
+                    result = _coerce(schema, raw)
+                except SCHEMA_ERRORS:
+                    set_attributes(attempt_span, {Attr.SCHEMA_VALID: False})
+                    raise
+                set_attributes(attempt_span, {Attr.SCHEMA_VALID: True})
+            return result
         except SCHEMA_ERRORS as exc:
             if attempt == max_attempts:
                 raise
@@ -94,9 +100,15 @@ async def ainvoke_structured(
     current = list(turns)
     for attempt in range(1, max_attempts + 1):
         try:
-            with model_span(span, model=model, attempt=attempt, **span_attributes):
-                raw = await runnable.ainvoke(current)
-            return _coerce(schema, raw)
+            with model_span(span, model=model, attempt=attempt, **span_attributes) as attempt_span:
+                try:
+                    raw = await runnable.ainvoke(current)
+                    result = _coerce(schema, raw)
+                except SCHEMA_ERRORS:
+                    set_attributes(attempt_span, {Attr.SCHEMA_VALID: False})
+                    raise
+                set_attributes(attempt_span, {Attr.SCHEMA_VALID: True})
+            return result
         except SCHEMA_ERRORS as exc:
             if attempt == max_attempts:
                 raise

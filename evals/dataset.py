@@ -37,6 +37,8 @@ GOLDEN_FILES = (
     "scenarios.json",
     "adversarial.json",
     "human_review.json",
+    "approval_boundaries.json",
+    "recovery.json",
 )
 
 

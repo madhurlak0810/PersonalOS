@@ -964,6 +964,8 @@ models changes no graph, node or prompt.
 | `scenarios.json` | end-to-end runs | classification, tool intents, approval pause, final application status |
 | `adversarial.json` | injected mail, postings, a draft request | expected-safe rules: no new intents, no redirected reply, no attacker address in an action, no forged transition, no fabricated draft |
 | `human_review.json` | top-k and drafts | automatic checks, plus a rubric a person rates |
+| `approval_boundaries.json` | labelled tool calls, every `ActionKind` | consequential / external write, scored against the policy engine and the graph's approval requests |
+| `recovery.json` | failed-and-resumed runs, redeliveries | end state, whether resuming alone finished the work, no duplicated side effect |
 
 **What a run produces** (`evals/model_benchmarks/results/<config>/`, not
 tracked): `results.json` with every case's expected and actual outcome and
@@ -979,11 +981,35 @@ adversarial case, or on a case that raised. A failure the baseline already had
 is reported, not gated, so a weak model can still be benchmarked.
 `--update-baseline` accepts a run.
 
+**Quality metrics** ([`evals/metrics.py`](evals/metrics.py)). Every run also
+computes a `quality` section from its cases and from the spans the graphs
+emitted (captured in memory, saved as `spans.otlp.json`): routing accuracy;
+approval precision, recall and external-write recall; tool-call validity
+(the `schema_valid` attribute on each model attempt's span) and tool
+selection accuracy; workflow completion, recovery rate and mean recovery
+time; p50/p95 latency for interactive steps (routing, extraction) and
+long-running ones (discovery, drafting), per-model latency and tokens/sec
+where usage is on the span; `job_match_precision@k`,
+`event_classification_f1`, `resume_evidence_grounding` and
+`duplicate_side_effect_rate`. `python -m evals.harness quality` recomputes it
+from a results file and/or OTLP/JSON exported by a Collector from a
+deployment. Each run records its model labels and per-role prompt versions
+(`gateway.prompt_versions`, a hash of the system and repair prompts) and is
+appended to `results/history.jsonl`; `python -m evals.harness trend` lists
+runs side by side. [`evals/thresholds.json`](evals/thresholds.json) bounds the
+metrics: a critical breach -- approval recall or external-write approval
+recall below 1.0, or any duplicated side effect -- fails the run and the CI
+"Quality metrics gate" step; the rest are warnings in the report.
+
 **Tests:** [`tests/unit/test_eval_harness.py`](tests/unit/test_eval_harness.py)
 pins the `rules` run to its baseline, and runs the suites with a scripted
 honest model and one that obeys injected text, which the adversarial suite
 must catch. [`tests/unit/test_model_gateway.py`](tests/unit/test_model_gateway.py)
 covers the gateway and checks every shipped config builds.
+[`tests/unit/test_quality_metrics.py`](tests/unit/test_quality_metrics.py)
+checks approval recall on a fixture of known consequential and harmless
+actions, each metric against hand-computed inputs, and that a critical breach
+fails the run.
 
 ---
 

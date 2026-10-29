@@ -17,8 +17,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from personalos.models.gateway import ModelConfig
+from personalos.models.gateway import ModelConfig, prompt_versions
 
+from .metrics import INTERACTIVE_STEPS
 from .suites import ERROR, FAIL, PASS, REVIEW, SKIPPED, SuiteResult, fingerprint
 
 SCHEMA_VERSION = 1
@@ -85,6 +86,7 @@ def build_document(
             "config": config.name,
             "description": config.description,
             "models": config.resolved(),
+            "prompt_versions": prompt_versions(config),
             "config_sha256": fingerprint(config.model_dump(mode="json")),
             "dataset_sha256": dataset_sha256,
             "git_commit": _git_commit(),
@@ -182,6 +184,11 @@ def gate_failures(document: dict[str, Any], changes: dict[str, Any]) -> list[str
         f"regression: {item['case']} ({item['was']} -> {item['now']})"
         for item in changes.get("regressions", ())
     ]
+    reasons += [
+        f"threshold: {breach['metric']} {breach['reason']}"
+        for breach in (document.get("quality") or {}).get("breaches", ())
+        if breach["critical"]
+    ]
     for case in document["cases"]:
         if case["suite"] in GATING_SUITES and case["status"] in (FAIL, ERROR):
             reasons.append(f"unsafe: {_key(case)}: {'; '.join(case['failures'])}")
@@ -200,11 +207,18 @@ HEADLINE = {
     "scenarios": "pass_rate",
     "adversarial": "safe_rate",
     "human_review": "automatic_pass_rate",
+    "approvals": "external_write_approval_recall",
+    "recovery": "recovery_rate",
 }
 
 
 def _fmt(value: Any) -> str:
     return f"{value:.3f}" if isinstance(value, float) else str(value)
+
+
+def _quality_lines(document: dict[str, Any]) -> list[str]:
+    quality = document.get("quality")
+    return ["", quality_markdown(quality, heading="##")] if quality else []
 
 
 def summary_markdown(document: dict[str, Any], changes: dict[str, Any], gate: list[str]) -> str:
@@ -234,6 +248,8 @@ def summary_markdown(document: dict[str, Any], changes: dict[str, Any], gate: li
             f"{'' if delta is None else f'{delta:+.3f}'} | {counts[PASS]} | {counts[FAIL]} | "
             f"{counts[ERROR]} | {counts[SKIPPED]} | {counts[REVIEW]} |"
         )
+
+    lines += _quality_lines(document)
 
     lines += ["", "## Against the baseline", ""]
     if changes.get("baseline") is None:
@@ -293,6 +309,159 @@ def summary_markdown(document: dict[str, Any], changes: dict[str, Any], gate: li
         "",
     ]
     return "\n".join(lines)
+
+
+#: Quality metrics in report order, in groups.
+QUALITY_GROUPS = {
+    "Routing and tools": (
+        "routing_accuracy",
+        "tool_call_validity_rate",
+        "tool_selection_accuracy",
+    ),
+    "Approvals": (
+        "approval_precision",
+        "approval_recall",
+        "external_write_approval_recall",
+    ),
+    "Workflows": (
+        "workflow_completion_rate",
+        "recovery_rate",
+        "mean_recovery_time_ms",
+        "duplicate_side_effect_rate",
+    ),
+    "Domain quality": (
+        "job_match_precision_at_k",
+        "event_classification_f1",
+        "resume_evidence_grounding",
+    ),
+    "Latency": (
+        "interactive_p50_ms",
+        "interactive_p95_ms",
+        "long_running_p50_ms",
+        "long_running_p95_ms",
+        "model_p50_ms",
+        "model_p95_ms",
+        "model_tokens_per_sec",
+    ),
+}
+
+
+def _fmt_metric(value: Any) -> str:
+    return "n/a" if value is None else _fmt(value)
+
+
+def quality_markdown(quality: dict[str, Any], *, heading: str = "#") -> str:
+    """The quality section: every metric, its threshold status, and latency per step."""
+    metrics = quality["metrics"]
+    breaches = {breach["metric"]: breach for breach in quality.get("breaches", ())}
+    lines = [f"{heading} Quality metrics", ""]
+    critical = [b for b in breaches.values() if b["critical"]]
+    warnings = [b for b in breaches.values() if not b["critical"]]
+    lines.append(
+        f"{len(critical)} critical breach(es), {len(warnings)} warning(s); "
+        f"{quality.get('spans', 0)} span(s) read."
+    )
+    lines += ["", "| Group | Metric | Value | Threshold |", "| --- | --- | --- | --- |"]
+    for group, names in QUALITY_GROUPS.items():
+        for name in names:
+            breach = breaches.get(name)
+            status = ""
+            if breach:
+                status = f"{'**FAIL**' if breach['critical'] else 'warn'}: {breach['reason']}"
+            lines.append(f"| {group} | {name} | {_fmt_metric(metrics.get(name))} | {status} |")
+
+    latency = quality.get("latency") or {}
+    if latency.get("steps"):
+        lines += [
+            "",
+            f"{heading}# Latency by step",
+            "",
+            "| Step | Kind | Runs | p50 ms | p95 ms |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for step, data in latency["steps"].items():
+            kind = "interactive" if step in INTERACTIVE_STEPS else "long-running"
+            lines.append(
+                f"| {step} | {kind} | {data['count']} | {_fmt_metric(data['p50_ms'])} | "
+                f"{_fmt_metric(data['p95_ms'])} |"
+            )
+        by_model = latency.get("model", {}).get("by_model") or {}
+        if by_model:
+            lines += [
+                "",
+                "| Model | Calls | p50 ms | p95 ms | Tokens/s |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+            lines += [
+                f"| {name} | {data['count']} | {_fmt_metric(data['p50_ms'])} | "
+                f"{_fmt_metric(data['p95_ms'])} | {_fmt_metric(data['tokens_per_sec'])} |"
+                for name, data in by_model.items()
+            ]
+
+    approvals = quality.get("approvals") or {}
+    findings = [
+        f"- ungated consequential action: `{action}`"
+        for action in approvals.get("ungated_consequential") or ()
+    ] + [
+        f"- approval asked for a harmless action: `{action}`"
+        for action in approvals.get("unneeded_prompts") or ()
+    ]
+    if findings:
+        lines += ["", f"{heading}# Approval findings", "", *findings]
+    return "\n".join(lines) + "\n"
+
+
+# --- History ----------------------------------------------------------------
+
+
+def history_entry(document: dict[str, Any]) -> dict[str, Any]:
+    """One line of the run history: what ran, on which models and prompts, and the metrics."""
+    run = document["run"]
+    return {
+        "started_at": run.get("started_at"),
+        "git_commit": run.get("git_commit"),
+        "config": run.get("config"),
+        "config_sha256": run.get("config_sha256"),
+        "dataset_sha256": run.get("dataset_sha256"),
+        "models": run.get("models"),
+        "prompt_versions": run.get("prompt_versions"),
+        "passed": (document.get("verdict") or {}).get("passed"),
+        "metrics": (document.get("quality") or {}).get("metrics", {}),
+    }
+
+
+def append_history(path: Path, document: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(history_entry(document), ensure_ascii=False) + "\n")
+
+
+def load_history(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def trend_markdown(entries: list[dict[str, Any]], metrics: list[str]) -> str:
+    """One row per run, oldest first, with the versions that make two rows comparable."""
+    lines = [
+        "# Quality trend",
+        "",
+        "Rows are comparable only where config, dataset and prompt versions agree.",
+        "",
+        "| Started | Commit | Config | Dataset | Prompts | " + " | ".join(metrics) + " |",
+        "| --- | --- | --- | --- | --- |" + " --- |" * len(metrics),
+    ]
+    for entry in entries:
+        prompts = fingerprint(entry.get("prompt_versions") or {})[:8]
+        values = [_fmt_metric(entry["metrics"].get(name)) for name in metrics]
+        lines.append(
+            f"| {entry.get('started_at')} | {entry.get('git_commit') or '-'} | "
+            f"{entry.get('config')} | {(entry.get('dataset_sha256') or '')[:8]} | {prompts} | "
+            + " | ".join(values)
+            + " |"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def review_packet_markdown(document: dict[str, Any]) -> str:
@@ -388,6 +557,11 @@ __all__ = [
     "diff",
     "gate_failures",
     "summary_markdown",
+    "quality_markdown",
+    "history_entry",
+    "append_history",
+    "load_history",
+    "trend_markdown",
     "review_packet_markdown",
     "compare_markdown",
     "now",

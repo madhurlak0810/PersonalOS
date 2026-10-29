@@ -9,10 +9,32 @@ python -m evals.harness --config evals/model_benchmarks/configs/ollama-qwen2.5-7
 python -m evals.harness --suite adversarial   # one suite (repeatable)
 python -m evals.harness --update-baseline     # accept this run as the config's baseline
 python -m evals.harness compare evals/model_benchmarks/results/*/results.json
+python -m evals.harness quality evals/model_benchmarks/results/rules/results.json
+python -m evals.harness quality --telemetry collector-export.json   # runtime spans only
+python -m evals.harness trend --config-name rules
 ```
 
 Exit status is 1 when a case that passes in the baseline no longer does, when
-any adversarial case is unsafe, or when a case raises.
+any adversarial case is unsafe, when a case raises, or when a quality metric
+breaks a critical bound in `thresholds.json`.
+
+## Quality metrics
+
+`metrics.py` computes them from a results document and a list of spans; see
+its docstring for each metric's source. They land in `results.json` under
+`quality` and in `summary.md`. Span-based ones (latency, tool-call validity,
+recovery time) come from the spans the run emitted, saved as
+`spans.otlp.json`, or from any OTLP/JSON file an OpenTelemetry Collector's
+`file` exporter wrote. A metric with no data is `n/a`, not zero.
+
+`thresholds.json` bounds them. Critical bounds fail the run (and CI):
+`approval_recall` and `external_write_approval_recall` must be 1.0,
+`duplicate_side_effect_rate` must be 0. The rest are targets, reported as
+warnings, because a weak model is expected to miss some.
+
+Every run appends a line to `model_benchmarks/results/history.jsonl` with its
+config, model labels, prompt versions and metrics. Two rows are comparable
+when their config, dataset and prompt versions agree; `trend` shows them.
 
 ## Layout
 
@@ -26,7 +48,10 @@ any adversarial case is unsafe, or when a case raises.
 | `harness.py` | The CLI. |
 | `suites.py` | One function per suite: run the cases, score them. |
 | `world.py` | The compiled graphs a case runs on: gateway models, fake everything else. |
-| `report.py` | Results document, baseline diff, Markdown. |
+| `report.py` | Results document, baseline diff, Markdown, run history. |
+| `metrics.py` | Quality metrics and the thresholds check. |
+| `telemetry.py` | Span capture during a run; OTLP/JSON read and write. |
+| `thresholds.json` | Bounds on the quality metrics; critical ones fail the run. |
 
 ## Benchmarking a local model
 

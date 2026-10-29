@@ -1,0 +1,71 @@
+{
+  "description": "Runs of the compiled Job Search graph that fail partway and are resumed from their checkpoint, as a restarted worker would. `fault` says what goes wrong: the action executor raising `failures` times before it succeeds (`executor`), or the same inbound message delivered `times` times (`redelivery`). `recoverable` is whether a correct system finishes the work by resuming alone, with no manual repair; `max_resumes` is how many resumes it gets. `expected` is the end state, and every case must leave no side effect duplicated. Synthetic.",
+  "received_at": "2026-10-07T09:00:00",
+  "cases": [
+    {
+      "id": "rc-submit-one-transient-failure",
+      "kind": "discovery",
+      "candidate": "sam",
+      "postings": "all",
+      "prepare_application": true,
+      "approval": "approved",
+      "fault": {"kind": "executor", "failures": 1, "error": "provider timed out"},
+      "recoverable": true,
+      "max_resumes": 3,
+      "expected": {"executed": ["submit_application"], "final_status": "applied"}
+    },
+    {
+      "id": "rc-submit-two-transient-failures",
+      "kind": "discovery",
+      "candidate": "sam",
+      "postings": "all",
+      "prepare_application": true,
+      "approval": "approved",
+      "fault": {"kind": "executor", "failures": 2, "error": "connection reset"},
+      "recoverable": true,
+      "max_resumes": 3,
+      "expected": {"executed": ["submit_application"], "final_status": "applied"}
+    },
+    {
+      "id": "rc-reply-transient-failure",
+      "kind": "inbound_mail",
+      "approval": "approved",
+      "application": {"company": "Northwind", "title": "Senior Backend Engineer", "status": "applied", "reference": "REQ-48213", "contact_addresses": ["priya@northwind.example"]},
+      "message": {
+        "subject": "Interview for REQ-48213 - Senior Backend Engineer",
+        "from_address": "priya@northwind.example",
+        "body": "Hi Sam,\n\nThanks for applying to REQ-48213. We would like to schedule a 45-minute technical interview with two of our engineers. Could you send your availability by Friday?\n\nPriya"
+      },
+      "fault": {"kind": "executor", "failures": 1, "error": "smtp 421"},
+      "recoverable": true,
+      "max_resumes": 3,
+      "expected": {"executed": ["send_recruiter_message"], "final_status": "interviewing"}
+    },
+    {
+      "id": "rc-submit-provider-down",
+      "kind": "discovery",
+      "candidate": "sam",
+      "postings": "all",
+      "prepare_application": true,
+      "approval": "approved",
+      "fault": {"kind": "executor", "failures": 99, "error": "provider down"},
+      "recoverable": false,
+      "max_resumes": 3,
+      "expected": {"executed": [], "final_status": null}
+    },
+    {
+      "id": "rc-invite-redelivered",
+      "kind": "inbound_mail",
+      "approval": "pending",
+      "application": {"company": "Northwind", "title": "Senior Backend Engineer", "status": "applied", "reference": "REQ-48213", "contact_addresses": ["priya@northwind.example"]},
+      "message": {
+        "subject": "Interview for REQ-48213 - Senior Backend Engineer",
+        "from_address": "priya@northwind.example",
+        "body": "Hi Sam,\n\nThanks for applying to REQ-48213. We would like to schedule a 45-minute technical interview. Could you send your availability by Friday?\n\nPriya"
+      },
+      "fault": {"kind": "redelivery", "times": 3},
+      "recoverable": null,
+      "expected": {"executed": [], "final_status": "interviewing", "recorded_events": 1}
+    }
+  ]
+}

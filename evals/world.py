@@ -14,6 +14,7 @@ next.
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from personalos.domain.job_search import (
     EvidenceRecord,
@@ -140,7 +141,17 @@ def final_status(world: JobSearchWorld, *, inbound: bool) -> ApplicationStatus |
 
 
 def thread(case_id: str) -> dict[str, Any]:
-    return {"configurable": {"thread_id": f"eval-{case_id}"}}
+    """A case's run config: its thread, and a workflow id derived from the case.
+
+    The workflow id is what puts a node's span in a trace with its thread id
+    on it, and deriving it keeps both the same on every run.
+    """
+    return {
+        "configurable": {
+            "thread_id": f"eval-{case_id}",
+            "workflow_id": str(uuid5(NAMESPACE_URL, f"personalos-evals/{case_id}")),
+        }
+    }
 
 
 def inbound_input(*messages: RecruiterMessage) -> dict[str, Any]:

@@ -42,7 +42,7 @@ from personalos.domain.recruiter_events import (
     parse_deadline,
 )
 from personalos.models.routing import DEFAULT_CLASSIFIER_MODEL, StructuredChatModel
-from personalos.observability.tracing import model_name, model_span
+from personalos.observability.tracing import Attr, model_name, model_span, set_attributes
 
 logger = logging.getLogger(__name__)
 
@@ -339,13 +339,18 @@ class StructuredLLMRecruiterEventExtractor:
             try:
                 with model_span(
                     "extract_recruiter_event", model=self._model_name, attempt=invalid + 1
-                ):
-                    raw = await self._structured.ainvoke(turns)
-                extraction = (
-                    raw
-                    if isinstance(raw, RecruiterEventExtraction)
-                    else RecruiterEventExtraction.model_validate(raw)
-                )
+                ) as attempt_span:
+                    try:
+                        raw = await self._structured.ainvoke(turns)
+                        extraction = (
+                            raw
+                            if isinstance(raw, RecruiterEventExtraction)
+                            else RecruiterEventExtraction.model_validate(raw)
+                        )
+                    except (ValidationError, ValueError, TypeError):
+                        set_attributes(attempt_span, {Attr.SCHEMA_VALID: False})
+                        raise
+                    set_attributes(attempt_span, {Attr.SCHEMA_VALID: True})
             except (ValidationError, ValueError, TypeError) as exc:
                 # ValueError covers LangChain's OutputParserException and the
                 # domain's own contract errors; both mean "not the schema".
