@@ -63,6 +63,7 @@ from personalos.persistence.idempotency import OperationStore, SqlOperationStore
 from personalos.persistence.integration_health import IntegrationHealthStore
 from personalos.persistence.job_postings import SqlPostingCatalog
 from personalos.persistence.leases import DEFAULT_LEASE_TTL_SECONDS, WorkflowLeaseStore
+from personalos.persistence.outbox_emitter import OutboxEventEmitter
 from personalos.persistence.pending_checkpoints import (
     PendingCheckpointStore,
     StorePendingCheckpointScheduler,
@@ -70,6 +71,7 @@ from personalos.persistence.pending_checkpoints import (
 from personalos.persistence.policy_log import SqlPolicyDecisionLog
 from personalos.persistence.recruiter_events import SqlRecruiterEventStore
 from personalos.persistence.repositories import JobRepository
+from personalos.persistence.search_profiles import SqlSearchProfileStore
 from personalos.persistence.workflow_actions import WorkflowActionReader
 from personalos.persistence.workflow_commands import WORKFLOW_COMMAND_EVENT, WorkflowCommandQueue
 from personalos.persistence.workflow_failures import WorkflowFailureStore
@@ -218,6 +220,16 @@ def build_job_providers(
 def build_posting_catalog(session_factory=SessionLocal) -> SqlPostingCatalog:
     """Bind `JobSearchGraph`'s `PostingCatalog` port to the `job_postings` table."""
     return SqlPostingCatalog(session_factory)
+
+
+def build_search_profile_store(session_factory=SessionLocal) -> SqlSearchProfileStore:
+    """Bind `JobSearchGraph`'s `SearchProfileStore` port to `candidate_profiles`."""
+    return SqlSearchProfileStore(session_factory)
+
+
+def build_event_emitter(session_factory=SessionLocal) -> OutboxEventEmitter:
+    """Bind `JobSearchGraph`'s `EventEmitter` port to the outbox."""
+    return OutboxEventEmitter(session_factory)
 
 
 def build_model_gateway(config_path: str | None = None) -> ModelGateway:
@@ -870,6 +882,8 @@ __all__ = [
     "configured_job_providers",
     "build_job_providers",
     "build_posting_catalog",
+    "build_search_profile_store",
+    "build_event_emitter",
     "build_job_matcher",
     "build_artifact_packet_builder",
     "build_document_overwrite_executor",
