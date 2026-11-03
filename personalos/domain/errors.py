@@ -279,6 +279,42 @@ class PartialSideEffect(PersonalOSError):
     failure_class = FailureClass.PARTIAL_SIDE_EFFECT
 
 
+class PortNotConfigured(PersonalOSError):
+    """A step needs a capability this deployment has not wired an adapter for.
+
+    Raised by the stand-ins a worker binds in place of a missing adapter -- a
+    mailbox, a calendar, an embedder -- so a step that reaches one fails loudly
+    instead of carrying on as if the read came back empty or the write landed.
+    Recoverable on purpose: once the adapter is configured and the worker
+    restarted, retrying the step is exactly what should happen. Never retried
+    automatically, since nothing changes between two attempts in one process.
+    `port` is carried into `repr()` so it survives a checkpoint.
+    """
+
+    code = ErrorCode.TOOL_FAILURE
+    http_status = 503
+    default_message = "this deployment has no adapter configured for a capability the step needs"
+    failure_class = FailureClass.PROVIDER_TRANSIENT
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        port: str,
+        context_id: UUID | None = None,
+        details: dict[str, Any] | None = None,
+    ):
+        self.port = port
+        super().__init__(
+            message or f"the '{port}' port is not configured in this deployment",
+            context_id=context_id,
+            details={"port": port, **(details or {})},
+        )
+
+    def repr_fields(self) -> dict[str, str]:
+        return {"port": self.port}
+
+
 class HumanTimeout(PersonalOSError):
     """A human did not answer a request in time."""
 
@@ -312,6 +348,7 @@ __all__ = [
     "ModelSemanticFailure",
     "ProviderPermanentFailure",
     "PartialSideEffect",
+    "PortNotConfigured",
     "HumanTimeout",
     "InternalError",
 ]

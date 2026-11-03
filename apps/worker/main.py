@@ -27,7 +27,9 @@ writes keep each piece of work to one of them.
 
 Which graphs a worker runs is a deployment decision, made by a factory named in
 `settings.worker_graphs` (`module:callable`, taking a session factory and
-returning `WorkerGraphs`). A worker started without one still delivers events
+returning `WorkerGraphs`). The default, `apps.worker.graphs:build_worker_graphs`,
+runs the Supervisor and the Job Search subgraph with every port this build has
+an adapter for. A worker started with the setting emptied still delivers events
 and runs the approval and stall sweeps, and leaves workflow commands queued --
 where `GET /v1/workflows/{id}` reports them -- for a worker that can run them.
 """
@@ -88,11 +90,13 @@ class WorkerGraphs:
     `apps.worker.workflow_commands.process_next` looks them up. The job search
     runner is also what a fired follow-up checkpoint starts its thread on.
     `evaluator` answers the conditions those checkpoints wait on; by default,
-    from the database.
+    from the database. `unbound_ports` names the ports the graphs were built
+    with a not-configured stand-in for, which the worker logs at startup.
     """
 
     runners: Mapping[str, DurableWorkflowRunner] = field(default_factory=dict)
     evaluator: CheckpointConditionEvaluator | None = None
+    unbound_ports: tuple[str, ...] = ()
 
     @property
     def follow_ups(self) -> DurableWorkflowRunner | None:
@@ -209,8 +213,8 @@ class Worker:
             )
         else:
             logger.warning(
-                "this worker has no graphs wired (settings.worker_graphs is empty); "
-                "workflow commands stay queued for a worker that can run them"
+                "this worker has no graphs wired; workflow commands stay queued for a "
+                "worker that can run them"
             )
         if self.dispatcher is not None:
             loops.append(self.dispatcher.run(stop, idle_seconds=self.idle_seconds))
@@ -317,6 +321,19 @@ def load_graph_factory(spec: str) -> GraphFactory:
     return factory
 
 
+def log_wired_graphs(spec: str, graphs: WorkerGraphs) -> None:
+    """Say at startup which graphs this worker runs, and which ports they lack."""
+    if not graphs.runners:
+        logger.warning("no graphs wired%s", f" by '{spec}'" if spec else "")
+        return
+    logger.info("wired graphs from '%s': %s", spec, ", ".join(sorted(graphs.runners)))
+    if graphs.unbound_ports:
+        logger.warning(
+            "unbound ports (steps that need them fail with a retryable PortNotConfigured): %s",
+            ", ".join(graphs.unbound_ports),
+        )
+
+
 def main(graph_factory: str | None = None) -> None:
     """Run a worker until SIGINT or SIGTERM, finishing the step in hand first.
 
@@ -329,6 +346,7 @@ def main(graph_factory: str | None = None) -> None:
     configure_tracing_from_settings("personalos-worker")
     register_mcp_servers()
     graphs = load_graph_factory(spec)(SessionLocal) if spec else WorkerGraphs()
+    log_wired_graphs(spec, graphs)
     worker = build_worker(SessionLocal, graphs)
 
     async def run() -> None:
@@ -349,6 +367,7 @@ __all__ = [
     "build_scheduler",
     "build_worker",
     "load_graph_factory",
+    "log_wired_graphs",
     "main",
 ]
 

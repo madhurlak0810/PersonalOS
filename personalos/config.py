@@ -88,11 +88,12 @@ class Settings(BaseSettings):
     # follow-up checkpoints and approvals that have come due. These are
     # polling cadences: what is due is read from the database each time.
     # `worker_graphs` names the factory that composes the graphs the worker
-    # runs, as `module:callable`; see `apps.worker.main.WorkerGraphs`.
+    # runs, as `module:callable`; see `apps.worker.main.WorkerGraphs`. The
+    # default runs the Supervisor and Job Search; empty runs no graphs.
     worker_idle_seconds: float = 1.0
     worker_checkpoint_sweep_seconds: int = 60
     worker_approval_expiry_sweep_seconds: int = 300
-    worker_graphs: str = ""
+    worker_graphs: str = "apps.worker.graphs:build_worker_graphs"
 
     # Google Integration
     google_api_key: str = ""
