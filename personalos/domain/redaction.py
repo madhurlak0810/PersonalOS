@@ -128,11 +128,23 @@ _TEXT_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
             r"(?i)(?<![A-Za-z0-9])"
-            r"((?:refresh|access|id|auth|session|bearer)[_-]?token"
+            r"((?:refresh|access|id|auth|session|security|bearer)[_-]?token"
             r"|client[_-]?secret|(?:x[_-])?api[_-]?key|password|passwd"
             r"|secret[_-]?key|private[_-]?key)" + _NAME_VALUE_SEPARATOR + r"[^\s\"'&,;}\]]+"
         ),
         rf"\1\2{REDACTED}",
+    ),
+    # A credential carried as a URL query parameter -- a presigned S3/GCS/Azure
+    # URL, or a provider that takes its key as `?key=`. httpx puts the full
+    # request URL in an `HTTPStatusError` message. Anchored to `?`/`&` so only
+    # a parameter *name* matches: `cache key=` in prose is left alone.
+    (
+        re.compile(
+            r"(?i)([?&](?:amp;)?"
+            r"(?:key|sig|signature|x-(?:amz|goog)-(?:signature|credential|security-token))"
+            r"=)(?!\[REDACTED\])[^\s\"'&#,;}\]]+"
+        ),
+        rf"\1{REDACTED}",
     ),
     # A bare `token=` / `secret=`. Anchored so `lease_token=` and
     # `idempotency-token=` -- identifiers, not credentials -- are left alone.
