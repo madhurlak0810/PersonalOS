@@ -56,6 +56,8 @@ def redactor() -> Redactor:
         f"X-Api-Key: {OPAQUE}",
         f"password={OPAQUE}",
         f"https://app.example/callback?code={OPAQUE}&state=xyz",
+        f"X-Amz-Security-Token: {OPAQUE}",
+        f"AWS_SECURITY_TOKEN={OPAQUE}",
     ],
 )
 def test_secret_bearing_text_is_redacted(redactor: Redactor, text: str):
@@ -85,6 +87,47 @@ def test_well_known_token_shapes_are_redacted_with_no_surrounding_context(
     assert redacted == f"upstream said: {REDACTED} was rejected"
 
 
+@pytest.mark.parametrize(
+    "param",
+    [
+        "key",
+        "sig",
+        "signature",
+        "X-Amz-Signature",
+        "X-Amz-Credential",
+        "X-Amz-Security-Token",
+        "X-Goog-Signature",
+        "X-Goog-Credential",
+    ],
+)
+@pytest.mark.parametrize("query_before", ["?", "?v=1&", "?v=1&amp;"])
+def test_a_credential_query_parameter_is_redacted(
+    redactor: Redactor, param: str, query_before: str
+):
+    """httpx quotes the full request URL in an `HTTPStatusError` message."""
+    url = f"https://host.example/obj{query_before}{param}={OPAQUE}&next=2"
+
+    redacted = redactor.redact_text(f"Client error '403 Forbidden' for url '{url}'")
+
+    assert OPAQUE not in redacted
+    assert f"{param}={REDACTED}&next=2'" in redacted
+
+
+def test_a_presigned_url_keeps_its_non_secret_parameters(redactor: Redactor):
+    url = (
+        "https://b.s3.amazonaws.com/o?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        f"&X-Amz-Credential={OPAQUE}%2F20261102%2Fus-east-1%2Fs3%2Faws4_request"
+        f"&X-Amz-Date=20261102T000000Z&X-Amz-Security-Token={OPAQUE}"
+        f"&X-Amz-Signature={OPAQUE}"
+    )
+
+    assert redactor.redact_text(url) == (
+        "https://b.s3.amazonaws.com/o?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        f"&X-Amz-Credential={REDACTED}&X-Amz-Date=20261102T000000Z"
+        f"&X-Amz-Security-Token={REDACTED}&X-Amz-Signature={REDACTED}"
+    )
+
+
 def test_a_pem_private_key_is_removed_whole(redactor: Redactor):
     pem = "-----BEGIN PRIVATE KEY-----\nMIIFAKEFAKE\nFAKEFAKE==\n-----END PRIVATE KEY-----"
     assert redactor.redact_text(f"key was {pem} end") == f"key was {REDACTED} end"
@@ -101,6 +144,9 @@ def test_a_pem_private_key_is_removed_whole(redactor: Redactor):
         "The candidate passed the token ring networking interview",
         "authorization is required for this action",
         "workflow_id=11111111-1111-1111-1111-111111111111 actor_id=system",
+        "cache key=apply-acme-2026-10-01",
+        "https://host.example/list?prefix=a&key-marker=zz&max-keys=10",
+        "https://host.example/search?q=key&keyword=python&page=2",
         "",
     ],
 )
@@ -113,7 +159,8 @@ def test_redaction_is_idempotent(redactor: Redactor):
     redactor.register_secret(OPAQUE)
     text = (
         f"Authorization: Bearer {OPAQUE}\nCookie: sid={OPAQUE}; theme=dark\n"
-        f"export TOKEN={OPAQUE} api_key={OPAQUE} https://x/cb?code={OPAQUE}&state=s"
+        f"export TOKEN={OPAQUE} api_key={OPAQUE} https://x/cb?code={OPAQUE}&state=s\n"
+        f"https://x/o?key={OPAQUE}&X-Amz-Signature={OPAQUE}"
     )
 
     once = redactor.redact_text(text)
