@@ -95,13 +95,17 @@ def test_schema_creates_all_three_tables_with_documented_shape(tmp_path):
             "embedding",
             "embedding_model",
             "embedding_version",
+            "document_id",
+            "retired_at",
             "created_at",
             "updated_at",
         } == evidence_columns
+        # Unique among active chunks only: a partial unique index, not a constraint.
         evidence_unique_columns = {
             column
-            for uc in inspector.get_unique_constraints("evidence_chunks")
-            for column in uc["column_names"]
+            for index in inspector.get_indexes("evidence_chunks")
+            if index["unique"]
+            for column in index["column_names"]
         }
         assert {"user_id", "source_type", "source_ref", "chunk_index"} <= evidence_unique_columns
 

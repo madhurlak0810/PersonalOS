@@ -93,6 +93,12 @@ python -m personalos.cli api --reload
 
 `FILES_ALLOWED_ROOTS` is a JSON list of absolute paths; left empty, every file read and write is rejected. Secrets (refresh tokens, API keys, the OAuth client secret) go in the OS keychain, never in `.env`.
 
+Load your resume (PDF, DOCX, Markdown or text) into the evidence index that job matching and tailored drafts cite. The path must be inside `FILES_ALLOWED_ROOTS`; re-running on an unchanged file is a no-op. `POST /v1/evidence/documents` with `{"path": ...}` does the same over HTTP.
+
+```bash
+python -m personalos.cli ingest-resume resume.pdf
+```
+
 Run the checks CI runs:
 
 ```bash

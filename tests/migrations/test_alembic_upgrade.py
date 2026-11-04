@@ -55,6 +55,7 @@ EXPECTED_TABLES = {
     "message_embeddings",
     "pending_checkpoints",
     "credentials",
+    "documents",
 }
 
 

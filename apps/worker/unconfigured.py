@@ -104,7 +104,9 @@ class NotConfiguredEmbedder(_NotConfigured):
     """`Embedder` for evidence retrieval, which every tailored packet starts with."""
 
     port = EMBEDDER_PORT
+    hint = "set EMBEDDING_PROVIDER to an embedder this build has"
     model = "not_configured"
+    version = "0"
 
     async def embed(self, text: str) -> list[float]:
         raise self._refuse("embed")

@@ -59,6 +59,9 @@ class Embedder(Protocol):
     #: The model the vectors come from. Must match `evidence_chunks.embedding_model`
     #: for the chunks to be comparable at all.
     model: str
+    #: The version of `model`'s vectors, stored as `evidence_chunks.embedding_version`
+    #: by ingestion. Retrieval pins `model` only.
+    version: str
 
     async def embed(self, text: str) -> list[float]:
         """Return the embedding of `text`."""
@@ -198,7 +201,8 @@ class TailoredPacketBuilder:
         if not evidence:
             raise JobSearchContractError(
                 f"no resume or project evidence was retrieved for posting "
-                f"'{posting.dedupe_key}'; a draft with nothing to cite cannot be written"
+                f"'{posting.dedupe_key}'; a draft with nothing to cite cannot be written "
+                f"(load the candidate's resume with `ingest-resume`)"
             )
 
         context_terms = [

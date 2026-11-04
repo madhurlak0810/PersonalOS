@@ -10,6 +10,8 @@ Supervisor and the Job Search subgraph on the durable Postgres checkpointer
   when unset) for intent routing, semantic assessment and recruiter mail;
 - the persistence stores for profiles, postings, evidence, drafts, recruiter
   events, lifecycle transitions, durable waits and the outbox;
+- the embedder `EMBEDDING_PROVIDER` names, the same one `ingest-resume`
+  stores evidence vectors with;
 - the Greenhouse boards in `GREENHOUSE_BOARDS`, through the gateway.
 
 The ports with no adapter yet are bound to the `apps.worker.unconfigured`
@@ -47,6 +49,7 @@ from personalos.bootstrap import (
     build_calendar_action_executor,
     build_document_overwrite_executor,
     build_durable_checkpointer,
+    build_embedder,
     build_event_emitter,
     build_integration_health_store,
     build_job_matcher,
@@ -121,8 +124,11 @@ def default_job_search_ports(
         providers = list(board_stubs)
 
     writer: Any = models.draft_writer()
-    embedder = NotConfiguredEmbedder()
-    packet_stubs: list[_NotConfigured] = [embedder]
+    packet_stubs: list[_NotConfigured] = []
+    embedder: Any = build_embedder()
+    if embedder is None:
+        embedder = NotConfiguredEmbedder()
+        packet_stubs.append(embedder)
     if writer is None:
         writer = NotConfiguredDraftWriter()
         packet_stubs.append(writer)

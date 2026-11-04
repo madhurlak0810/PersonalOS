@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     # --config <file>` before pointing this at it.
     llm_gateway_config: str = ""
 
+    # Embeddings. The embedder resume ingestion stores evidence vectors with
+    # and artifact prep embeds postings with -- one setting, because vectors
+    # from different embedders are not comparable. `hashing` is the local,
+    # deterministic feature-hashing embedder this build ships with
+    # (`personalos.retrieval.embedding`); empty leaves evidence retrieval
+    # unconfigured. Changing it means re-running `ingest-resume`.
+    embedding_provider: str = "hashing"
+
     # MCP Servers
     mcp_files_enabled: bool = True
     mcp_google_enabled: bool = False

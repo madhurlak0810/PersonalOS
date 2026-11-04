@@ -12,9 +12,10 @@ The acceptance criteria this file exists for:
    job board configured the search finds nothing -- and says why.
 3. **A step that needs an unbound port fails recoverably.**
    `test_a_step_that_needs_an_unbound_port_is_a_retryable_failure_not_a_crash`
-   gets a posting onto the shortlist, so the packet step asks the embedder,
-   which is not configured: the worker loop survives, and the step is listed
-   on `/failures` as retryable, naming the port.
+   ingests a resume and gets a posting onto the shortlist, so the packet step
+   retrieves evidence and asks the draft writer, which is not configured: the
+   worker loop survives, and the step is listed on `/failures` as retryable,
+   naming the port.
 """
 
 import asyncio
@@ -33,6 +34,7 @@ from apps.api.routes.workflows import build_workflow_services, get_workflow_serv
 from apps.worker.graphs import build_worker_graphs
 from apps.worker.main import WorkerGraphs, build_worker, load_graph_factory, log_wired_graphs
 from apps.worker.unconfigured import (
+    DRAFT_WRITER_PORT,
     EMBEDDER_PORT,
     JOB_BOARDS_PORT,
     MAILBOX_PORT,
@@ -40,6 +42,7 @@ from apps.worker.unconfigured import (
     NotConfiguredEmbedder,
     NotConfiguredMailbox,
 )
+from personalos import bootstrap
 from personalos.config import Settings
 from personalos.domain.errors import FailureClass, PortNotConfigured
 from personalos.domain.failures import classify, parse_stored_error
@@ -49,6 +52,7 @@ from personalos.persistence.checkpointer import SqlAlchemyCheckpointSaver
 from personalos.persistence.models import Base, CandidateProfileModel, OutboxEventModel
 from personalos.persistence.search_profiles import SqlSearchProfileStore
 from personalos.persistence.workflow_commands import WORKFLOW_COMMAND_EVENT
+from tests.fixtures import evidence_ingestion
 from tests.fixtures import job_search_fakes as fakes
 
 DEFAULT_FACTORY = "apps.worker.graphs:build_worker_graphs"
@@ -132,16 +136,24 @@ def test_the_default_factory_compiles_both_graphs_on_the_durable_checkpointer(fa
 def test_the_default_factory_names_every_port_it_bound_to_a_stand_in(factory):
     graphs = build_worker_graphs(factory)
 
-    assert {JOB_BOARDS_PORT, MAILBOX_PORT, "calendar", EMBEDDER_PORT, "reply_drafter"} <= set(
+    assert {JOB_BOARDS_PORT, MAILBOX_PORT, "calendar", DRAFT_WRITER_PORT, "reply_drafter"} <= set(
         graphs.unbound_ports
     )
+    # The local default embedder is bound unless EMBEDDING_PROVIDER is cleared.
+    assert EMBEDDER_PORT not in graphs.unbound_ports
+
+
+def test_with_no_embedding_provider_the_embedder_is_a_stand_in(factory, monkeypatch):
+    monkeypatch.setattr(bootstrap.settings, "embedding_provider", "")
+
+    assert EMBEDDER_PORT in build_worker_graphs(factory).unbound_ports
 
 
 def test_an_override_drops_the_port_it_replaces_from_the_unbound_list(factory):
     graphs = build_worker_graphs(factory, overrides={"providers": [fakes.FakeProvider()]})
 
     assert JOB_BOARDS_PORT not in graphs.unbound_ports
-    assert EMBEDDER_PORT in graphs.unbound_ports
+    assert MAILBOX_PORT in graphs.unbound_ports
 
 
 def test_the_setting_defaults_to_the_shipped_factory_and_can_be_overridden(monkeypatch):
@@ -168,7 +180,7 @@ def test_startup_logs_the_wired_graphs_and_the_unbound_ports(factory, caplog):
     assert "unbound ports (steps that need them fail with a retryable PortNotConfigured): " in (
         caplog.text
     )
-    assert EMBEDDER_PORT in caplog.text and MAILBOX_PORT in caplog.text
+    assert DRAFT_WRITER_PORT in caplog.text and MAILBOX_PORT in caplog.text
 
 
 # --- Stand-ins --------------------------------------------------------------------
@@ -210,7 +222,9 @@ def test_a_chat_queued_job_search_runs_to_completion_with_only_a_database(factor
     assert "GREENHOUSE_BOARDS" in caplog.text
 
 
-def test_a_step_that_needs_an_unbound_port_is_a_retryable_failure_not_a_crash(factory):
+def test_a_step_that_needs_an_unbound_port_is_a_retryable_failure_not_a_crash(factory, tmp_path):
+    root = evidence_ingestion.allowed_root(tmp_path)
+    asyncio.run(evidence_ingestion.ingestor(root, factory).ingest(fakes.USER_ID, "resume.md"))
     client = _client(factory)
     queued = _chat(client)
     graphs = build_worker_graphs(
@@ -239,7 +253,7 @@ def test_a_step_that_needs_an_unbound_port_is_a_retryable_failure_not_a_crash(fa
     assert failure["failure_class"] == FailureClass.PROVIDER_TRANSIENT.value
     assert failure["retryable"] is True
     assert "retry" in failure["actions"]
-    assert EMBEDDER_PORT in failure["last_error"]
+    assert DRAFT_WRITER_PORT in failure["last_error"]
 
 
 # --- Adapters ---------------------------------------------------------------------
