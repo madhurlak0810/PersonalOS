@@ -46,23 +46,18 @@ uvicorn apps.api.main:app --reload
 
 ### API Endpoints
 ```bash
-# Create a job search
-curl -X POST http://localhost:8000/api/v1/jobs/ \
+# Start a job search (returns 202 with a workflow_id)
+curl -X POST http://localhost:8000/v1/chat \
   -H "Content-Type: application/json" \
-  -d '{
-    "title": "Search Python Developer Jobs",
-    "keywords": ["Python", "FastAPI"],
-    "locations": ["Remote", "NYC"],
-    "salary_min": 80000,
-    "salary_max": 150000,
-    "job_type": "full-time"
-  }'
+  -d '{"message": "find me remote Python backend jobs"}'
 
-# Get job details
-curl http://localhost:8000/api/v1/jobs/{job_id}
+# Read its status, including any pending approval
+curl http://localhost:8000/v1/workflows/{workflow_id}
 
-# List all jobs
-curl http://localhost:8000/api/v1/jobs/
+# Answer a pending approval
+curl -X POST http://localhost:8000/v1/workflows/{workflow_id}/resume \
+  -H "Content-Type: application/json" \
+  -d '{...}'
 ```
 
 ---
@@ -156,16 +151,13 @@ PersonalOS-agent/
 │   ├── api/                   # FastAPI web server
 │   │   ├── main.py            # FastAPI app factory
 │   │   └── routes/
-│   │       ├── jobs.py        # Job search endpoints
+│   │       ├── workflows.py   # v1 workflow lifecycle (chat, status, resume)
 │   │       └── __init__.py
 │   │
 │   └── worker/                # Background job processor
-│       └── job_runner.py      # Runs one job search in its own session
+│       └── workflow_commands.py  # Claims queued workflow commands and runs them
 │
 ├── mcp_servers/               # MCP server implementations
-│   ├── jobs/                  # Job search MCP server
-│   │   ├── server.py          # JobsMCPServer with 4 tools
-│   │   └── __init__.py
 │   ├── files/                 # File access server (TODO)
 │   └── google/                # Google API integration (TODO)
 │
@@ -180,7 +172,6 @@ PersonalOS-agent/
 │   ├── unit/                  # Unit tests
 │   │   ├── test_job_search.py
 │   │   ├── test_mcp_server.py
-│   │   ├── test_executor_mcp_integration.py
 │   │   └── __init__.py
 │   ├── integration/           # Integration tests (TODO)
 │   ├── adversarial/           # Adversarial tests (TODO)
@@ -221,9 +212,9 @@ approved intents, adapters do the I/O.
        ▼
 ┌─────────────────────────────────┐
 │  Routes (apps/api/routes/)      │
-│  - POST /api/v1/jobs/           │
-│  - GET /api/v1/jobs/{id}        │
-│  - GET /api/v1/jobs/            │
+│  - POST /v1/chat                │
+│  - GET /v1/workflows/{id}       │
+│  - POST /v1/workflows/{id}/...  │
 └──────┬──────────────────────────┘
        │
        ▼
@@ -245,8 +236,8 @@ approved intents, adapters do the I/O.
          │
          ▼
 ┌────────────────────────┐
-│  Executor              │
-│  - Job Search Engine   │
+│  Worker + Graphs       │
+│  - Job Search subgraph │
 │  - Emits ToolIntents   │
 └────────┬───────────────┘
          │
@@ -268,8 +259,7 @@ approved intents, adapters do the I/O.
          ▼
 ┌────────────────────────────────┐
 │  MCP Servers                   │
-│  - Jobs MCP (4 tools)          │
-│  - Files MCP (TODO)            │
+│  - Files MCP                   │
 │  - Google MCP (TODO)           │
 └────────┬───────────────────────┘
          │
@@ -356,23 +346,16 @@ approved intents, adapters do the I/O.
 - Transaction handling
 - Async queries ready
 
-### 4. Core Executor (`personalos/executor/job_search.py`)
+### 4. Job Search (workflow path)
 
-**JobSearchExecutor - Main execution engine**
+Job searches run as durable workflows: `POST /v1/chat` queues a command, the
+worker runs the Supervisor and the Job Search subgraph
+(`personalos/graphs/job_search.py`), and every provider call is a
+`ToolIntent` through the policy-enforcing gateway. See the request path in
+[docs/ARCHITECTURE_BOUNDARIES.md](docs/ARCHITECTURE_BOUNDARIES.md).
 
-4-step workflow:
-1. **Prepare** - Validate search parameters
-2. **Search** - Call MCP `search_jobs` tool
-3. **Scrape** - Call MCP `scrape_job_details` for top 20 results (parallel)
-4. **Filter** - Call MCP `filter_jobs` with salary/experience filters
-
-**Features:**
-- Manages job lifecycle (pending → running → completed/failed)
-- MCP tool integration
-- Error handling and recovery
-- Event publishing
-- Results ranking and sorting
-- Returns top 10 matches
+The earlier `JobSearchExecutor` and its `/api/v1/jobs` route were removed: they
+ran beside the workflow path and skipped its approval and audit steps.
 
 ### 5. Event System (`personalos/events/bus.py`)
 
@@ -396,9 +379,9 @@ Features:
 
 **Endpoints:**
 ```
-POST   /api/v1/jobs/              Create job search
-GET    /api/v1/jobs/{job_id}      Get job details with results
-GET    /api/v1/jobs/              List all jobs (with pagination)
+POST   /v1/chat                            Start (or continue) a workflow
+GET    /v1/workflows/{workflow_id}         Workflow status and pending approval
+POST   /v1/workflows/{workflow_id}/resume  Answer a pending approval
 ```
 
 **Features:**
@@ -446,42 +429,11 @@ Commands:
 - Server introspection
 - Tool discovery
 
-### 9. Jobs MCP Server (`mcp_servers/jobs/server.py`)
-
-**Production-ready job search capabilities**
-
-**4 Tools:**
-
-1. **`search_jobs`** - Search job listings
-   - Parameters: keywords, locations, job_type, limit
-   - Caching support
-   - Returns: jobs with relevance scores
-
-2. **`scrape_job_details`** - Extract job information
-   - Parameters: job_id, job_url
-   - Returns: full description, requirements, benefits, skills
-
-3. **`filter_jobs`** - Filter and rank results
-   - Parameters: jobs, salary_min/max, experience_level, remote_only
-   - Returns: ranked and filtered results
-
-4. **`save_favorite_job`** - Save jobs to favorites
-   - Parameters: job_id, notes
-   - Returns: confirmation with timestamp
-
-**Features:**
-- Comprehensive parameter validation
-- Error handling
-- Mock implementation ready for real APIs
-- Caching integration
-- Async/await throughout
-
 ### 10. Testing (`tests/`)
 
 **15 Unit Tests - ALL PASSING ✅**
 
-- **MCP Server Tests (9)** - Tool registration, execution, manager routing
-- **Executor Integration (3)** - Full workflow, search step, filter step
+- **MCP Server Tests** - Tool registration, execution, manager routing
 - **Job Search Models (3)** - Model creation, status transitions, results
 
 **Test Infrastructure:**
@@ -1115,116 +1067,18 @@ from personalos.mcp.manager import get_mcp_manager
 manager = get_mcp_manager()
 
 # Register server
-manager.register_server(JobsMCPServer())
+manager.register_server(build_files_mcp_server())
 
 # Execute tool
 result = await manager.execute_tool(
-    tool_name="search_jobs", server_name="jobs", keywords=["Python"], locations=["Remote"]
+    ToolCallRequest(target=ActionTarget(server="files", tool="read_file"), params={...})
 )
 
 # Get all tools
 tools = manager.get_all_tools()
 
 # Get server info
-server_info = manager.get_server_info("jobs")
-```
-
-### Jobs MCP Server
-
-**Tool 1: `search_jobs`**
-
-```python
-result = await manager.execute_tool(
-    "search_jobs",
-    "jobs",
-    keywords=["Python", "FastAPI"],
-    locations=["Remote", "NYC"],
-    job_type="full-time",
-    limit=50,
-)
-
-# Response format:
-{
-    "success": true,
-    "result": {
-        "total": 50,
-        "jobs": [
-            {
-                "id": "job_123",
-                "title": "Senior Python Developer",
-                "company": "TechCorp",
-                "location": "Remote",
-                "salary": "$120,000 - $160,000",
-                "url": "https://example.com/jobs/job_123",
-                "relevance_score": 0.95,
-            }
-        ],
-    },
-}
-```
-
-**Tool 2: `scrape_job_details`**
-
-```python
-result = await manager.execute_tool(
-    "scrape_job_details", "jobs", job_id="job_123", job_url="https://example.com/jobs/job_123"
-)
-
-# Response format:
-{
-    "success": true,
-    "result": {
-        "id": "job_123",
-        "title": "Senior Python Developer",
-        "description": "Full job description...",
-        "requirements": ["5+ years Python", "FastAPI", "Docker"],
-        "benefits": ["Health insurance", "Remote", "401k"],
-        "skills": ["Python", "FastAPI", "Docker"],
-        "experience_level": "senior",
-        "difficulty_match": 0.92,
-    },
-}
-```
-
-**Tool 3: `filter_jobs`**
-
-```python
-result = await manager.execute_tool(
-    "filter_jobs",
-    "jobs",
-    jobs=[...],  # Job list from search_jobs
-    salary_min=100000,
-    salary_max=150000,
-    experience_level="senior",
-    remote_only=True,
-)
-
-# Response format:
-{
-    "success": true,
-    "result": {"total_filtered": 15, "total_input": 50, "jobs": [...], "filters_applied": {...}},
-}
-```
-
-**Tool 4: `save_favorite_job`**
-
-```python
-result = await manager.execute_tool(
-    "save_favorite_job",
-    "jobs",
-    job_id="job_123",
-    notes="Interesting opportunity with good benefits",
-)
-
-# Response format:
-{
-    "success": true,
-    "result": {
-        "job_id": "job_123",
-        "notes": "Interesting opportunity with good benefits",
-        "saved_at": "2026-08-30T12:00:00Z",
-    },
-}
+server_info = manager.get_server_info("files")
 ```
 
 ### Creating a Custom MCP Server
@@ -1266,42 +1120,6 @@ class CustomMCPServer(MCPServer):
 # Register globally
 manager = get_mcp_manager()
 manager.register_server(CustomMCPServer())
-```
-
-### Integration with Executor
-
-The `JobSearchExecutor` uses MCP servers internally:
-
-```python
-async def run_job_search(self, job: Job):
-    # Step 1: Prepare parameters
-    # ...
-
-    # Step 2: Search via MCP
-    search_result = await self.mcp_manager.execute_tool(
-        "search_jobs", "jobs", keywords=job.keywords, locations=job.locations, job_type=job.job_type
-    )
-
-    # Step 3: Scrape details for top 20 (parallel)
-    scrape_tasks = []
-    for job_item in search_result["result"]["jobs"][:20]:
-        task = self.mcp_manager.execute_tool(
-            "scrape_job_details", "jobs", job_id=job_item["id"], job_url=job_item["url"]
-        )
-        scrape_tasks.append(task)
-
-    detailed_results = await asyncio.gather(*scrape_tasks)
-
-    # Step 4: Filter via MCP
-    filtered = await self.mcp_manager.execute_tool(
-        "filter_jobs",
-        "jobs",
-        jobs=[r["result"] for r in detailed_results],
-        salary_min=job.salary_min,
-        salary_max=job.salary_max,
-    )
-
-    return filtered[:10]
 ```
 
 ### Best Practices
@@ -1378,7 +1196,6 @@ schema = ToolSchema(
 **Status:** ✅ All 15 Tests Passing
 
 ```
-tests/unit/test_executor_mcp_integration.py ... [3 tests]
 tests/unit/test_job_search.py               ... [3 tests]
 tests/unit/test_mcp_server.py              .. [9 tests]
 ```
@@ -1393,20 +1210,9 @@ Execution time: 0.39s
 pytest tests/unit/test_mcp_server.py -v
 ```
 
-- Server initialization and tool registration
-- All 4 tool executions (search, scrape, filter, save)
+- Tool registration, validation and idempotency on the `MCPServer` base
 - Manager routing and introspection
 - Error handling and validation
-
-#### Executor Integration Tests (3 tests)
-
-```python
-pytest tests/unit/test_executor_mcp_integration.py -v
-```
-
-- Full job search workflow with MCP
-- Individual executor steps (search, filter)
-- End-to-end integration
 
 #### Job Search Model Tests (3 tests)
 
@@ -1442,17 +1248,6 @@ pytest tests/unit/ -k "integration" -v
 - Parameter validation enforced
 - Error handling correct
 - Schema documentation complete
-
-✅ **Jobs MCP Server**
-- All 4 tools execute successfully
-- Caching integration working
-- Mock data handling correct
-- Response formats correct
-
-✅ **Executor Integration**
-- MCP tool execution from executor works
-- Chained operations (search → scrape → filter) work
-- Result processing and ranking works
 
 ✅ **Database Models**
 - UUID primary keys correct
@@ -1544,13 +1339,13 @@ pytest tests/unit/ -k "integration" -v
 # 1. Start the API and test manually
 python -m personalos.cli api --reload
 
-# 2. Create a job search
-curl -X POST http://localhost:8000/api/v1/jobs/ \
+# 2. Start a job search workflow
+curl -X POST http://localhost:8000/v1/chat \
   -H "Content-Type: application/json" \
-  -d '{...}'
+  -d '{"message": "find me remote Python backend jobs"}'
 
-# 3. Verify MCP tools execute
-# Check job search results
+# 3. Check its status
+curl http://localhost:8000/v1/workflows/{workflow_id}
 
 # 4. Run full test suite
 pytest tests/unit/ -v

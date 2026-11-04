@@ -13,7 +13,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from personalos.domain.errors import RetryableFailure
-from personalos.executor import JobSearchExecutor
 from personalos.executor.retry import dispatch_with_retry, is_retryable
 from personalos.persistence.models import Base, PolicyDecisionModel
 from personalos.persistence.policy_log import SqlPolicyDecisionLog
@@ -33,7 +32,6 @@ from personalos.policy import (
     default_policy_engine,
 )
 from personalos.tools.gateway import PolicyEnforcingToolGateway, ToolGateway, ToolResult
-from tests.unit.test_executor_policy_boundary import InMemoryJobRepository, make_job
 
 ARGS_HASH = "a" * 64
 SYSTEM = Provenance(origin=IntentOrigin.SYSTEM, requested_by="test")
@@ -346,14 +344,22 @@ def test_policy_verdicts_are_not_retryable_even_if_mislabelled():
     assert is_retryable(RetryableFailure())
 
 
-async def test_executor_does_not_retry_a_denied_step():
-    """End to end: the executor's own dispatch path gives a denial one attempt."""
-    repo = InMemoryJobRepository()
-    # An engine with no rules denies everything.
-    gateway = CountingGateway(PolicyEngine())
-    job = repo.create(make_job())
+def test_a_model_proposed_intent_is_still_subject_to_policy():
+    """Nothing about arriving from a model exempts an intent from the rules.
+
+    An LLM-origin intent carrying an argument outside the declared surface is
+    denied, so raw model output is never what reaches an adapter.
+    """
+    policy = default_policy_engine()
+    smuggled = search_intent(
+        arguments={"keywords": ["python"], "callback": "http://attacker.example"},
+        origin=IntentOrigin.LLM,
+        requested_by="llm:planner",
+    )
 
     with pytest.raises(PolicyDenied):
-        await JobSearchExecutor(repo, gateway).run_job_search(job)
+        policy.authorize(smuggled)
 
-    assert gateway.dispatches == 1
+    # The same tool, within its declared surface, is fine.
+    legitimate = search_intent(origin=IntentOrigin.LLM, requested_by="llm:planner")
+    assert policy.authorize(legitimate).decision.decision == Decision.ALLOW

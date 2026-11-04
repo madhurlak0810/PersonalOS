@@ -33,7 +33,6 @@ from personalos.executor.calendar import (
 from personalos.executor.credentials import CredentialBroker
 from personalos.executor.document_reader import GatewayDocumentReader
 from personalos.executor.job_discovery import GatewayJobProvider
-from personalos.executor.job_search import JobSearchExecutor
 from personalos.executor.tool_executor import ProviderReconciler, ToolExecutor
 from personalos.graphs.job_search import JobSearchSubgraphRunner
 from personalos.mcp.adapter import MCPToolInvoker
@@ -76,7 +75,6 @@ from personalos.persistence.pending_checkpoints import (
 )
 from personalos.persistence.policy_log import SqlPolicyDecisionLog
 from personalos.persistence.recruiter_events import SqlRecruiterEventStore
-from personalos.persistence.repositories import JobRepository
 from personalos.persistence.search_profiles import SqlSearchProfileStore
 from personalos.persistence.workflow_actions import WorkflowActionReader
 from personalos.persistence.workflow_commands import WORKFLOW_COMMAND_EVENT, WorkflowCommandQueue
@@ -141,10 +139,7 @@ def register_mcp_servers(
     ``personalos.mcp`` layer defines how to talk to a server and must not know
     which ones exist.
     """
-    from mcp_servers.jobs.server import JobsMCPServer
-
     manager = manager or get_mcp_manager()
-    manager.register_server(JobsMCPServer(operation_store=operation_store))
     if settings.mcp_files_enabled:
         manager.register_server(build_files_mcp_server(operation_store=operation_store))
     logger.info("Registered MCP servers: %s", manager.list_servers())
@@ -375,15 +370,6 @@ def build_document_overwrite_executor(
     at-most-once and audited against the approval it ran under.
     """
     return DocumentOverwriteExecutor(gateway or build_tool_gateway(policy=policy))
-
-
-def build_job_search_executor(
-    repo: JobRepository,
-    gateway: ToolGateway | None = None,
-    policy: PolicyEngine | None = None,
-) -> JobSearchExecutor:
-    """Build the job search executor with its policy-enforcing gateway."""
-    return JobSearchExecutor(repo, gateway or build_tool_gateway(policy=policy))
 
 
 # --- Credentials --------------------------------------------------------------
@@ -950,7 +936,6 @@ __all__ = [
     "build_embedder",
     "build_resume_ingestor",
     "build_document_overwrite_executor",
-    "build_job_search_executor",
     "GOOGLE_PROVIDER",
     "API_KEY_PROVIDERS",
     "build_secret_store",

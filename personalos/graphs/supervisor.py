@@ -10,8 +10,8 @@ Two things keep this graph honest to that boundary:
 
 - `classifier` and `job_subgraph` are injected ports (`IntentClassifier` and
   `JobSubgraphRunner`), not concrete dependencies this module constructs. The
-  composition root wires a real classifier and an adapter that knows how to
-  run `personalos.executor.job_search.JobSearchExecutor`.
+  composition root wires a real classifier and an adapter that runs the Job
+  Search subgraph (`personalos.graphs.job_search.JobSearchSubgraphRunner`).
 - Graph state is kept JSON-compatible (`dict`, not live `RouteDecision` /
   `TaskDAG` instances) so it round-trips cleanly through any
   `BaseCheckpointSaver`, including the durable, database-backed one in
@@ -69,11 +69,10 @@ CLARIFY = "clarify"
 class JobSubgraphRunner(Protocol):
     """Port the Supervisor uses to hand a planned task DAG to the Job Search subgraph.
 
-    Kept as an injected port rather than a direct call into
-    `personalos.executor.job_search.JobSearchExecutor` so this module never has
-    to import `persistence` or `tools` to build the `Job` and `ToolGateway` an
-    executor needs -- the composition root binds an adapter that already has
-    them, matching how `JobSearchExecutor` itself receives its `ToolGateway`.
+    Kept as an injected port rather than a direct call into the Job Search
+    subgraph so this module never has to import `persistence` or `tools` to
+    build the stores and `ToolGateway` that subgraph needs -- the composition
+    root binds an adapter that already has them.
     """
 
     async def __call__(self, task_dag: dict[str, Any], state: "SupervisorState") -> dict[str, Any]:
@@ -101,9 +100,8 @@ class SupervisorState(TypedDict, total=False):
 def _build_job_search_dag(message: str) -> TaskDAG:
     """The bounded plan for a job-domain request.
 
-    Mirrors the fixed step sequence `JobSearchExecutor.run_job_search` already
-    runs (prepare -> search -> scrape -> filter): a fixed, linear, four-step
-    DAG, not an open-ended loop the model could extend indefinitely.
+    A fixed, linear, four-step DAG (prepare -> search -> scrape -> filter),
+    not an open-ended loop the model could extend indefinitely.
     """
     goal = f"job_search: {message.strip()}" if message.strip() else "job_search"
     return TaskDAG(
@@ -131,8 +129,7 @@ class SupervisorGraph:
     ):
         """Initialize with the ports this graph delegates to.
 
-        `classifier` and `job_subgraph` are required, mirroring
-        `JobSearchExecutor` requiring a `ToolGateway`: a Supervisor with no
+        `classifier` and `job_subgraph` are required: a Supervisor with no
         classifier would have to reach for a global default, which is exactly
         the kind of implicit wiring the composition root exists to own instead.
 

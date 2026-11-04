@@ -110,12 +110,10 @@ def create_app() -> FastAPI:
         events,
         evidence,
         failures,
-        jobs,
         profiles,
         workflows,
     )
 
-    app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"])
     app.include_router(workflows.router, prefix="/v1", tags=["workflows"])
     app.include_router(approvals.router, prefix="/v1", tags=["approvals"])
     app.include_router(applications.router, prefix="/v1", tags=["applications"])

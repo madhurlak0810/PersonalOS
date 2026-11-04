@@ -149,9 +149,8 @@ adapter to it. [`graphs/job_search.py`](../personalos/graphs/job_search.py) is
 the worked example. Nine of its ports are required constructor arguments — a
 profile store, job board providers, a scorer, an evidence checker, a packet
 builder, an approval gate, an action executor, an application store and an
-event emitter — for the same reason `JobSearchExecutor` requires a
-`ToolGateway`: a graph that can fall back to a global default is a graph whose
-reach is not visible at its construction site. Four are genuinely optional:
+event emitter — because a graph that can fall back to a global default is a
+graph whose reach is not visible at its construction site. Four are genuinely optional:
 the posting normalizer (which has a pure, dependency-free default), the
 recruiter inbox plus its classifier, which are what turn the
 recruiter-response branch on and must be supplied together, and the pending
@@ -459,13 +458,8 @@ are constructed. `build_tool_gateway()` defaults to the default-deny engine, so
 a caller who forgets to pass one gets the restrictive engine rather than an open
 door.
 
-The two entry points that use it:
+The entry points that use it:
 
-- [`apps/api/routes/jobs.py`](../apps/api/routes/jobs.py) accepts and reads job
-  searches. It does not run them, and holds no executor.
-- [`apps/worker/job_runner.py`](../apps/worker/job_runner.py) runs them, in a
-  session it opens itself. A request-scoped session is closed once the response
-  is sent, so background work cannot borrow one.
 - [`apps/worker/workflow_runner.py`](../apps/worker/workflow_runner.py) starts
   and resumes durable workflows. It holds a compiled graph rather than building
   one — which ports a graph is wired to is decided where the graph is
@@ -523,24 +517,34 @@ nothing points *up*.
 
 A job search, end to end:
 
-1. `apps/api/routes/jobs.py` persists the `Job` and calls
-   `build_job_search_executor(repo)`.
-2. `bootstrap` builds `PolicyEnforcingToolGateway(default_policy_engine(),
-   MCPToolInvoker(manager))` and hands it to `JobSearchExecutor`.
-3. The executor builds a `ToolIntent` per step — `jobs.search_jobs`,
-   `jobs.scrape_job_details`, `jobs.filter_jobs` — each with provenance
-   (`requested_by`, `job_id`, `agent_id`) and `origin=SYSTEM`.
+1. `POST /v1/chat` ([`apps/api/routes/workflows.py`](../apps/api/routes/workflows.py))
+   queues a `WorkflowCommand` and returns 202 with the `workflow_id`. It runs
+   no graph and calls no tool.
+2. The worker ([`apps/worker/workflow_commands.py`](../apps/worker/workflow_commands.py))
+   claims the command and runs the Supervisor, which routes a job request to
+   the Job Search subgraph.
+3. The subgraph searches through `GatewayJobProvider`
+   ([`executor/job_discovery.py`](../personalos/executor/job_discovery.py)),
+   which builds a `ToolIntent` per call — `job_providers.search`,
+   `job_providers.get_job` — with provenance and the run's context.
 4. `gateway.dispatch(intent)` calls `PolicyEngine.authorize()`. Rules run:
    provenance present, tool allowlisted, no unexpected arguments, mutating tools
-   gated, untrusted origins escalated.
+   gated, untrusted origins escalated. Every verdict is written to
+   `policy_decisions` before the tool runs.
 5. On allow, the engine mints an `ApprovedIntent`. On deny it raises
-   `PolicyDenied`; if a human grant is needed it raises `ApprovalRequired`.
-6. `MCPToolInvoker.invoke(approved)` — re-checking the type, belt and braces —
-   unpacks the approved arguments onto `MCPServerManager.execute_tool`.
-7. For mutating tools, `MCPServer` runs the handler behind `IdempotencyGuard`,
-   which claims the `idempotency_key` before the side effect and records the
-   outcome after.
-8. The executor persists results through `JobRepository`.
+   `PolicyDenied`; if a human grant is needed it raises `ApprovalRequired`, and
+   the graph parks on an approval checkpoint that `POST /v1/workflows/{id}/resume`
+   answers.
+6. The invoker — re-checking the type, belt and braces — unpacks the approved
+   arguments onto the provider (or, for MCP tools, `MCPServerManager.execute_tool`).
+7. Consequential actions go through `ToolExecutor`, which claims the
+   idempotency key before the side effect and records the receipt and the
+   `audit_events` row after.
+8. `GET /v1/workflows/{id}` reads the run's status from the checkpoint tables.
+
+There is no other route into a job search. The pre-workflow
+`/api/v1/jobs` route, its `JobSearchExecutor` and the mock `jobs` MCP server
+were removed so nothing can search outside this path.
 
 Policy is crossed exactly once per tool call, in exactly one place.
 
