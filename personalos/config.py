@@ -34,12 +34,7 @@ class Settings(BaseSettings):
     # API
     api_host: str = "0.0.0.0"
     api_port: int = 8000
-    api_debug: bool = False
     api_workers: int = 4
-
-    # Celery
-    celery_broker_url: str = "redis://localhost:6379/1"
-    celery_result_backend: str = "redis://localhost:6379/2"
 
     # Observability
     log_level: str = "INFO"
@@ -71,8 +66,6 @@ class Settings(BaseSettings):
 
     # MCP Servers
     mcp_files_enabled: bool = True
-    mcp_google_enabled: bool = False
-    mcp_jobs_enabled: bool = True
 
     # File tools. The only directories the files MCP server may read or write,
     # as absolute paths; the first is the one relative paths resolve against.
@@ -102,10 +95,6 @@ class Settings(BaseSettings):
     worker_checkpoint_sweep_seconds: int = 60
     worker_approval_expiry_sweep_seconds: int = 300
     worker_graphs: str = "apps.worker.graphs:build_worker_graphs"
-
-    # Google Integration
-    google_api_key: str = ""
-    google_search_engine_id: str = ""
 
     # Credentials. These name *where* secrets are, never the secrets: refresh
     # tokens, API keys and the OAuth client secret live in the OS keychain

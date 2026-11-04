@@ -82,12 +82,6 @@ LAYERS: tuple[Layer, ...] = (
         responsibility="carries domain events between layers",
     ),
     Layer(
-        name="state",
-        modules=("personalos.state",),
-        allows=("domain", "persistence"),
-        responsibility="tracks in-flight agent state",
-    ),
-    Layer(
         name="observability",
         modules=("personalos.observability",),
         allows=("domain", "config"),
@@ -146,7 +140,6 @@ LAYERS: tuple[Layer, ...] = (
             "persistence",
             "tools",
             "events",
-            "state",
             "config",
             "secrets",
             "observability",
@@ -161,7 +154,6 @@ LAYERS: tuple[Layer, ...] = (
             "policy",
             "executor",
             "events",
-            "state",
             "models",
             "config",
             "observability",

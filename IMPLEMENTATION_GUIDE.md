@@ -20,7 +20,7 @@ Complete documentation for the PersonalOS Agent framework, including architectur
 ### Prerequisites
 - Python 3.10+
 - PostgreSQL
-- Redis (optional, for job queue)
+- Redis (optional, for the MCP response cache)
 
 ### Installation
 ```bash
@@ -72,8 +72,7 @@ PersonalOS is a local-first agentic assistant framework designed for job search 
 - **SQLAlchemy** 2.0+ - PostgreSQL ORM
 - **Pydantic** 2.0+ - Type validation
 - **LangChain/LangGraph** - Agent workflows
-- **Celery** 5.3+ - Background job processing
-- **Redis** - Caching and job queue
+- **Redis** - Caching (background work runs on the Postgres outbox worker)
 - **OpenTelemetry** - Observability
 
 ### Core Principles
@@ -143,7 +142,6 @@ PersonalOS-agent/
 │   │   ├── supervisor.py      # Top-level graph: context, typed routing, delegation
 │   │   └── job_search.py      # The Job Search domain subgraph + its ports
 │   ├── models/                # AI models (TODO)
-│   ├── state/                 # State management (TODO)
 │   ├── retrieval/             # RAG/search (TODO)
 │   └── observability/         # Logging/tracing (TODO)
 │
@@ -305,7 +303,7 @@ approved intents, adapters do the I/O.
 - SQLAlchemy 2.0+, Psycopg2 (PostgreSQL)
 - Pydantic 2.13+
 - LangChain 1.3+, LangGraph 1.2+
-- Celery 5.6+, Redis 8.1+
+- Redis 8.1+
 - OpenTelemetry (tracing/metrics)
 - Pytest 9.1+ (testing)
 
@@ -396,7 +394,7 @@ POST   /v1/workflows/{workflow_id}/resume  Answer a pending approval
 Commands:
 - `api` - Run API server with configurable host/port/workers
 - `db_init` - Initialize database schema
-- `worker` - Run background worker (Celery placeholder)
+- `worker` - Run the outbox worker (queued workflow commands and events)
 
 ### 8. MCP Framework (`personalos/mcp/`)
 
@@ -1267,19 +1265,13 @@ pytest tests/unit/ -k "integration" -v
    - Support additional job boards
    - Replace mock implementations
 
-2. **Background Worker Implementation**
-   - Implement Celery worker
-   - Move job searches to background
-   - Add job queue management
-   - Implement retry logic
-
-3. **Database Migrations**
+2. **Database Migrations**
    - Set up Alembic
    - Generate migration scripts
    - Test migration workflows
    - Document schema changes
 
-4. **Advanced Testing**
+3. **Advanced Testing**
    - Add adversarial tests
    - Implement scenario tests
    - Add golden test datasets
@@ -1287,25 +1279,25 @@ pytest tests/unit/ -k "integration" -v
 
 ### Medium Priority (Phase 2)
 
-5. **Graph-Based Workflows**
+4. **Graph-Based Workflows**
    - Implement LangGraph integration
    - Define workflow nodes
    - Implement edges and transitions
    - Add complex orchestration
 
-6. **Agent Policies**
+5. **Agent Policies**
    - Implement rate limiting
    - Add permission enforcement
    - Implement approval workflows
    - Add audit logging
 
-7. **Retrieval System**
+6. **Retrieval System**
    - Implement vector search
    - Add job description similarity
    - Implement RAG pipeline
    - Add relevance ranking
 
-8. **Observability**
+7. **Observability**
    - Instrument with OpenTelemetry
    - Add distributed tracing
    - Create dashboards
@@ -1313,22 +1305,22 @@ pytest tests/unit/ -k "integration" -v
 
 ### Low Priority (Phase 3)
 
-9. **Google MCP Server**
+8. **Google MCP Server**
    - Gmail integration
    - Google Sheets for results
    - Google Drive for documents
 
-10. **Files MCP Server**
+9. **Files MCP Server**
     - Resume/CV management
     - Job application tracking
     - Document storage
 
-11. **Advanced Filtering**
+10. **Advanced Filtering**
     - ML-based ranking
     - Skill matching
     - Recommendation engine
 
-12. **Web UI**
+11. **Web UI**
     - Frontend dashboard
     - Job search management
     - Results visualization
@@ -1378,8 +1370,6 @@ API_RELOAD=true
 LOG_LEVEL=INFO
 
 # MCP Configuration
-MCP_JOBS_ENABLED=true
-MCP_GOOGLE_ENABLED=false
 MCP_FILES_ENABLED=true
 
 # Agent Configuration
@@ -1399,9 +1389,6 @@ python -m personalos.cli api --host 0.0.0.0 --port 8000 --reload
 
 # Run background worker
 python -m personalos.cli worker
-
-# Run Celery worker
-celery -A personalos.worker worker --loglevel=info
 ```
 
 ---
