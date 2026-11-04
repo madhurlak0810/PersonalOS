@@ -119,7 +119,7 @@ Owns *how* a task runs: step sequence, agent state, result persistence, failure
 handling. Every step is expressed as a `ToolIntent` and submitted to the
 gateway.
 
-- **May import:** `domain`, `policy`, `persistence`, `tools`, `events`, `state`,
+- **May import:** `domain`, `policy`, `persistence`, `tools`, `events`,
   `config`, `secrets`, `observability` (tracing API only).
 - **Must not:** import `personalos.mcp`, `mcp_servers`, or
   `personalos.tools.registry`. Must not construct its own gateway or reach for
@@ -136,7 +136,7 @@ exists to make impossible to write accidentally.
 Orchestration: which step happens next, branching, retries, human-in-the-loop
 pauses.
 
-- **May import:** `domain`, `policy`, `executor`, `events`, `state`, `models`,
+- **May import:** `domain`, `policy`, `executor`, `events`, `models`,
   `config`, `observability` (tracing API only).
 - **Must not:** import `tools`, `mcp`, `mcp_servers`, or `persistence`. A graph
   that can call a tool directly is a graph that can bypass policy; a graph that
@@ -236,7 +236,7 @@ It applies to the **reasoning layers** — `graphs`, `models`, `domain`,
 | Category | Examples | Why |
 | --- | --- | --- |
 | `provider-sdk` | `googleapiclient`, `google.oauth2`, `gcsa`, `caldav`, `msal`, `jobspy`, `linkedin_api`, `mcp` | a provider client performs writes policy never saw |
-| `database` | `sqlalchemy`, `psycopg2`, `sqlite3`, `redis`, `celery`, `langgraph.checkpoint.postgres` | a raw DB/broker write is a transition nothing journals |
+| `database` | `sqlalchemy`, `psycopg2`, `sqlite3`, `redis`, `langgraph.checkpoint.postgres` | a raw DB/broker write is a transition nothing journals |
 | `network` | `httpx`, `requests`, `aiohttp`, `urllib.request`, `smtplib` | a bare HTTP or mail client is a hand-rolled provider SDK |
 | `secret-store` | `keyring`, `secretstorage`, `hvac` | a node that can read the keychain can put a refresh token in state |
 | `process` | `subprocess`, `os.system`, `os.exec*` | anything can happen, none of it as an intent |
@@ -256,8 +256,9 @@ composition), or a
 non-reasoning module that breaks the rules above, through any chain of
 internal imports — except through `executor`, which is the sanctioned door
 because everything it does is dispatched through a `ToolGateway`. That closes
-routes the layer graph allows one hop at a time: `graphs → state` and `state →
-persistence` are each legal, but a graph reaching a DB session that way is not.
+routes the layer graph only sees one hop at a time: a graph reaching a DB session
+through a helper in a non-reasoning layer (`graphs → observability →
+persistence`) is refused even though the graph never imports `persistence`.
 
 `langgraph.checkpoint.base`, `langgraph.checkpoint.memory` and `interrupt()`
 are fine: a checkpointer is a port the composition root binds, and the
@@ -429,7 +430,6 @@ string looks:
 | --- | --- | --- |
 | `config` | settings from the environment | nothing internal |
 | `events` | domain events between layers; the in-memory event transport | `domain` |
-| `state` | in-flight agent state | `domain`, `persistence` |
 | `observability` | logging, metrics, tracing | `domain`, `config` |
 | `retrieval` | retrieval and ranking | `domain`, `persistence`, `config` |
 | `models` | model clients, prompt plumbing | `domain`, `config`, `observability` |
@@ -804,6 +804,6 @@ From [test_intent_boundary.py](../tests/architecture/test_intent_boundary.py):
   none reaches an effect layer except through `executor`.
 - Deliberately non-compliant graph nodes are planted, one per category
   (Gmail/Calendar/job-board SDKs, `sqlalchemy`, `httpx`, `open(p, "w")`,
-  `Path.write_text`, `os.remove`, a two-hop `graphs → state → persistence`
+  `Path.write_text`, `os.remove`, a two-hop `graphs → observability → persistence`
   reach, …), and each is caught. A node with the documented shape, one that
   reads files, and the executor itself are not flagged.

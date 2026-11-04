@@ -119,7 +119,6 @@ def test_compliant_node_is_not_flagged(facts: dict[str, ModuleFacts]):
         ("import psycopg2", "database"),
         ("import sqlite3", "database"),
         ("from langgraph.checkpoint.postgres import PostgresSaver", "database"),
-        ("from celery import Celery", "database"),
         # Hand-rolled provider calls.
         ("import httpx", "network"),
         ("import requests", "network"),
@@ -218,18 +217,18 @@ def test_read_only_calls_are_not_flagged(facts: dict[str, ModuleFacts], call: st
 def test_node_reaching_persistence_through_another_layer_is_caught(
     facts: dict[str, ModuleFacts],
 ):
-    """A two-hop route the layer graph allows one hop at a time is still refused.
+    """A two-hop route through a non-reasoning layer is still refused.
 
-    ``graphs`` may import ``state`` and ``state`` may import ``persistence``, so
-    a graph could reach a DB session through a state helper without any single
-    import crossing a layer the wrong way.
+    ``graphs`` may import ``observability``, so a graph could reach a DB session
+    through a helper there without the graph itself importing ``persistence``.
+    The reach check follows the chain rather than trusting each hop.
     """
     planted = dict(facts)
-    helper = "personalos.state.planted_helper"
+    helper = "personalos.observability.planted_helper"
     planted[helper] = analyse_source(
         "from personalos.persistence.repositories import JobRepository\n",
         helper,
-        REPO_ROOT / "personalos/state/planted_helper.py",
+        REPO_ROOT / "personalos/observability/planted_helper.py",
     )
     node = "personalos.graphs.planted_node"
     planted[node] = analyse_source(
@@ -245,11 +244,11 @@ def test_node_reaching_persistence_through_another_layer_is_caught(
 def test_node_reaching_a_helper_that_calls_an_sdk_is_caught(facts: dict[str, ModuleFacts]):
     """A non-reasoning helper that imports an SDK is charged to the node that reaches it."""
     planted = dict(facts)
-    helper = "personalos.state.planted_gmail"
+    helper = "personalos.observability.planted_gmail"
     planted[helper] = analyse_source(
         "import googleapiclient.discovery\n",
         helper,
-        REPO_ROOT / "personalos/state/planted_gmail.py",
+        REPO_ROOT / "personalos/observability/planted_gmail.py",
     )
     node = "personalos.graphs.planted_node"
     planted[node] = analyse_source(

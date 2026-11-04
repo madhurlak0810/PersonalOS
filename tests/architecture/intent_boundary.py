@@ -23,8 +23,8 @@ and checks every file in those layers by AST:
    (``persistence``, ``tools``, ``mcp``, ``mcp_servers``, ``providers``, ``secrets``,
    composition) or a
    module that breaks rules 1-2, except through the executor layer, which is
-   the sanctioned door. This closes routes the layer graph permits one hop at
-   a time -- ``graphs -> state -> persistence``, for instance.
+   the sanctioned door. This closes routes the layer graph would see only one
+   hop at a time -- ``graphs -> observability -> persistence``, for instance.
 
 Like ``boundaries.py`` it imports nothing it checks, so it runs with nothing
 installed (``scripts/check_boundaries.py``). The prose version is the
@@ -132,7 +132,6 @@ SIDE_EFFECT_RULES: tuple[SideEffectRule, ...] = (
             "redis",
             "pymongo",
             "motor",
-            "celery",
             # LangGraph's own savers are fine as a port (``langgraph.checkpoint.base``);
             # the concrete database-backed ones are a raw DB write path.
             "langgraph.checkpoint.postgres",

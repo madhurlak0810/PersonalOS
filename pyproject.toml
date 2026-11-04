@@ -33,8 +33,7 @@ dependencies = [
     "uvicorn>=0.24",
     "httpx>=0.25",
     
-    # Job processing
-    "celery>=5.3",
+    # Cache (personalos.mcp.cache)
     "redis>=5.0",
     
     # Graph/workflow
