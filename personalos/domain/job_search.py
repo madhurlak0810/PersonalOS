@@ -170,6 +170,14 @@ class EmploymentType(str, Enum):
     TEMPORARY = "temporary"
 
 
+class WorkMode(str, Enum):
+    """Where the candidate is willing to do the work."""
+
+    REMOTE = "remote"
+    HYBRID = "hybrid"
+    ONSITE = "onsite"
+
+
 class SearchProfile(_Value):
     """What the candidate is looking for, as `load_search_profile` resolved it.
 
@@ -190,9 +198,16 @@ class SearchProfile(_Value):
     #: preference was stated, which is not the same as accepting none.
     seniority_levels: tuple[SeniorityLevel, ...] = ()
     employment_types: tuple[EmploymentType, ...] = ()
+    work_modes: tuple[WorkMode, ...] = ()
     salary_min: int | None = None
     salary_max: int | None = None
+    #: Set when `work_modes` is remote and nothing else; it is what
+    #: `hard_filter` reads.
     remote_only: bool = False
+    requires_visa_sponsorship: bool = False
+    #: Free-text constraints the candidate stated ("no relocation"), for the
+    #: scorer to weigh. No hard filter reads them.
+    constraints: tuple[str, ...] = ()
     min_score: float = Field(default=DEFAULT_MIN_SCORE, ge=0.0, le=1.0)
     max_shortlist: int = Field(default=5, ge=1, le=MAX_SHORTLIST_SIZE)
 
@@ -1553,6 +1568,7 @@ __all__ = [
     "JobSearchContractError",
     "SeniorityLevel",
     "EmploymentType",
+    "WorkMode",
     "SearchProfile",
     "RawPosting",
     "ProviderFailure",

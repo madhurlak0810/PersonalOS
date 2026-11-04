@@ -28,6 +28,12 @@ command and onto the thread's `workflow_runs` row, and the worker puts both into
 the run's config -- the Phase A `ExecutionContext` contract, carried into a
 process that never saw the request. An approval decision's `decided_by` is the
 actor too, never a field the caller fills in.
+
+**The candidate defaults to the actor.** A chat that names no `user_id` searches
+for the actor's own candidate id (`actor_user_id`) -- the one its
+`/v1/profile` is stored under -- so the job search loads that stored profile
+and the request carries no profile at all. Like the profile routes, this is
+unauthenticated until Phase L.
 """
 
 import logging
@@ -44,6 +50,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from personalos.bootstrap import (
     SUPERVISOR_WORKFLOW,
     build_approval_queue,
+    build_search_profile_store,
     build_workflow_action_reader,
     build_workflow_command_queue,
     build_workflow_status_reader,
@@ -60,6 +67,7 @@ from personalos.domain.action_status import (
 from personalos.domain.errors import Conflict, NotFound, ValidationFailed
 from personalos.domain.failures import parse_stored_error, sanitize_error
 from personalos.domain.job_search import ApprovalDecision, ApprovalVerdict
+from personalos.domain.search_profiles import actor_user_id
 from personalos.domain.workflow import (
     SUPERVISOR_THREAD_NAMESPACE,
     WorkflowCommand,
@@ -73,6 +81,7 @@ from personalos.observability.tracing import Attr
 from personalos.persistence.approvals import ApprovalQueue
 from personalos.persistence.checkpointer import WorkflowThreadRegistry
 from personalos.persistence.database import SessionLocal
+from personalos.persistence.search_profiles import SqlSearchProfileStore
 from personalos.persistence.workflow_actions import WorkflowActionReader
 from personalos.persistence.workflow_commands import WorkflowCommandQueue
 from personalos.persistence.workflow_status import WorkflowStatusReader
@@ -101,6 +110,7 @@ class WorkflowServices:
     commands: WorkflowCommandQueue
     approvals: ApprovalQueue
     actions: WorkflowActionReader
+    profiles: SqlSearchProfileStore
 
 
 def build_workflow_services(session_factory: Callable[[], Any]) -> WorkflowServices:
@@ -112,6 +122,7 @@ def build_workflow_services(session_factory: Callable[[], Any]) -> WorkflowServi
         commands=build_workflow_command_queue(session_factory),
         approvals=build_approval_queue(session_factory, registry),
         actions=build_workflow_action_reader(session_factory, registry),
+        profiles=build_search_profile_store(session_factory),
     )
 
 
@@ -137,7 +148,8 @@ class ChatRequest(BaseModel):
     #: The thread a previous `POST /v1/chat` returned. Omitted, a new
     #: conversation -- and a new workflow -- is started.
     thread_id: str | None = None
-    #: The candidate the conversation is about, when the caller knows it.
+    #: The candidate the conversation is about. Omitted, it is the actor's own
+    #: (`actor_user_id`), whose stored profile the job search loads.
     user_id: UUID | None = None
 
 
@@ -368,12 +380,16 @@ async def chat(
     new_workflow = request.thread_id is None
 
     if request.thread_id is None:
+        user_id = request.user_id
+        if user_id is None:
+            user_id = actor_user_id(actor_id)
+            services.profiles.ensure_user(user_id, display_name=actor_id)
         workflow_id = services.registry.create_workflow(SUPERVISOR_WORKFLOW)
         thread = register_supervisor_thread(
             conversation_key=str(uuid4()),
             registry=services.registry,
             workflow_id=workflow_id,
-            user_id=request.user_id,
+            user_id=user_id,
             actor_id=actor_id,
             correlation_id=correlation_id,
         )
