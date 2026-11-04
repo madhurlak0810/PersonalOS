@@ -520,6 +520,26 @@ class CandidateProfileRepository:
             .first()
         )
 
+    def get_version(self, user_id: UUID, profile_version: int) -> CandidateProfileModel | None:
+        """Get one numbered version of a user's profile, if it exists."""
+        return (
+            self.session.query(CandidateProfileModel)
+            .filter(
+                CandidateProfileModel.user_id == user_id,
+                CandidateProfileModel.profile_version == profile_version,
+            )
+            .one_or_none()
+        )
+
+    def list_by_user_id(self, user_id: UUID) -> list[CandidateProfileModel]:
+        """Every version of a user's profile, newest first."""
+        return (
+            self.session.query(CandidateProfileModel)
+            .filter(CandidateProfileModel.user_id == user_id)
+            .order_by(CandidateProfileModel.profile_version.desc())
+            .all()
+        )
+
 
 class ApplicationRepository:
     """Repository for a user's tracked pursuit of a job posting.

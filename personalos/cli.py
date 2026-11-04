@@ -114,5 +114,98 @@ def approvals(as_json: bool):
         click.echo(render_approvals(items))
 
 
+# --- Search profile ---------------------------------------------------------------
+#
+# The same shapes as `/v1/profile`: a create or update reads a
+# `CandidateProfileInput` as JSON, and every read prints the API's response
+# body, so `profile show`'s `profile` can be fed back to `profile update`.
+# Scoped by `--actor` the way the API is scoped by `X-Actor-Id`, and just as
+# unauthenticated until Phase L.
+
+_actor_option = click.option(
+    "--actor",
+    "actor_id",
+    default="api",
+    show_default=True,
+    help="Whose profile: the same actor the API reads from X-Actor-Id.",
+)
+
+
+def _read_profile_input(source):
+    from pydantic import ValidationError
+
+    from personalos.domain.search_profiles import CandidateProfileInput
+
+    try:
+        return CandidateProfileInput.model_validate_json(source.read())
+    except ValidationError as exc:
+        raise click.ClickException(f"invalid profile:\n{exc}") from exc
+
+
+def _profile_call(call):
+    """Run a profile store call, turning its typed refusals into CLI errors."""
+    from personalos.domain.errors import PersonalOSError
+
+    try:
+        return call()
+    except PersonalOSError as exc:
+        raise click.ClickException(exc.message) from exc
+
+
+@cli.group()
+def profile():
+    """Create, show and update your job-search profile. Updates add a version."""
+
+
+@profile.command("create")
+@click.argument("source", type=click.File("r"), default="-")
+@_actor_option
+def profile_create(source, actor_id: str):
+    """Write version 1 of the profile, from a JSON file (or stdin)."""
+    from apps.api.routes.profiles import get_profile_store
+    from personalos.domain.search_profiles import actor_user_id
+
+    body = _read_profile_input(source)
+    created = _profile_call(
+        lambda: get_profile_store().create(actor_user_id(actor_id), body, display_name=actor_id)
+    )
+    click.echo(created.model_dump_json(indent=2))
+
+
+@profile.command("update")
+@click.argument("source", type=click.File("r"), default="-")
+@_actor_option
+def profile_update(source, actor_id: str):
+    """Write the next version of the profile, from a JSON file (or stdin)."""
+    from apps.api.routes.profiles import get_profile_store
+    from personalos.domain.search_profiles import actor_user_id
+
+    body = _read_profile_input(source)
+    updated = _profile_call(lambda: get_profile_store().update(actor_user_id(actor_id), body))
+    click.echo(updated.model_dump_json(indent=2))
+
+
+@profile.command("show")
+@click.option("--version", "profile_version", type=click.IntRange(min=1), default=None)
+@_actor_option
+def profile_show(profile_version: int | None, actor_id: str):
+    """Print the latest profile version, or the one named by --version."""
+    from apps.api.routes.profiles import get_profile_store
+    from personalos.domain.search_profiles import actor_user_id
+
+    shown = _profile_call(lambda: get_profile_store().get(actor_user_id(actor_id), profile_version))
+    click.echo(shown.model_dump_json(indent=2))
+
+
+@profile.command("versions")
+@_actor_option
+def profile_versions(actor_id: str):
+    """Print every version of the profile, newest first."""
+    from apps.api.routes.profiles import get_profile_store
+    from personalos.domain.search_profiles import actor_user_id
+
+    click.echo(get_profile_store().versions(actor_user_id(actor_id)).model_dump_json(indent=2))
+
+
 if __name__ == "__main__":
     cli()

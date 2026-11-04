@@ -110,6 +110,7 @@ def create_app() -> FastAPI:
         events,
         failures,
         jobs,
+        profiles,
         workflows,
     )
 
@@ -120,6 +121,7 @@ def create_app() -> FastAPI:
     app.include_router(audit.router, prefix="/v1", tags=["audit"])
     app.include_router(failures.router, prefix="/v1", tags=["failures"])
     app.include_router(events.router, prefix="/v1", tags=["events"])
+    app.include_router(profiles.router, prefix="/v1", tags=["profiles"])
 
     register_error_handlers(app)
 
