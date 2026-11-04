@@ -922,10 +922,9 @@ class JobSearchGraph:
     inbox plus its classifier, which together turn the recruiter-response
     branch on, and the event extractor, application directory and recorder,
     which together turn the inbound-mail entry on, and the calendar reader,
-    which turns interview scheduling on. Everything else is required for the same
-    reason `JobSearchExecutor` requires a `ToolGateway` -- a graph that can
-    fall back to a global default is a graph whose reach is not visible at its
-    construction site.
+    which turns interview scheduling on. Everything else is required: a graph
+    that can fall back to a global default is a graph whose reach is not
+    visible at its construction site.
     """
 
     def __init__(

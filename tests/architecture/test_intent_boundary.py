@@ -261,7 +261,7 @@ def test_node_reaching_a_helper_that_calls_an_sdk_is_caught(facts: dict[str, Mod
 
 def test_executor_is_the_sanctioned_door(facts: dict[str, ModuleFacts]):
     """Reaching effects through the executor is the intended route, not a breach."""
-    assert _plant(facts, "from personalos.executor.job_search import JobSearchExecutor\n") == []
+    assert _plant(facts, "from personalos.executor.job_discovery import GatewayJobProvider\n") == []
 
 
 def test_executor_may_hold_side_effects(facts: dict[str, ModuleFacts]):

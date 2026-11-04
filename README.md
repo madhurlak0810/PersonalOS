@@ -64,8 +64,8 @@ For the full architecture diagram and the allowed dependency direction between l
 
 ### API and tools
 
-- FastAPI service with job-search endpoints under `/api/v1/jobs` (create, get, list)
-- MCP servers: jobs (`search_jobs`, `scrape_job_details`, `filter_jobs`, `save_favorite_job`) and files (`read_file`, `write_file`)
+- FastAPI service; job searches start as workflows (`POST /v1/chat`, then `GET /v1/workflows/{id}` and `POST /v1/workflows/{id}/resume`), so every search runs under the policy engine and audit trail
+- MCP servers: files (`read_file`, `write_file`). Job boards are reached through job providers behind the same tool gateway
 
 ### Code layout
 
