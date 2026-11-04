@@ -15,6 +15,7 @@ from uuid import UUID
 
 from personalos.config import settings
 from personalos.domain.credentials import CredentialExchangeFailed, CredentialRef
+from personalos.domain.errors import PortNotConfigured
 from personalos.domain.events import EventEnvelope
 from personalos.domain.workflow import (
     WorkflowThread,
@@ -30,6 +31,7 @@ from personalos.executor.calendar import (
     CalendarReconciler,
 )
 from personalos.executor.credentials import CredentialBroker
+from personalos.executor.document_reader import GatewayDocumentReader
 from personalos.executor.job_discovery import GatewayJobProvider
 from personalos.executor.job_search import JobSearchExecutor
 from personalos.executor.tool_executor import ProviderReconciler, ToolExecutor
@@ -57,7 +59,11 @@ from personalos.persistence.event_correlation import CorrelatedWaitLookup
 from personalos.persistence.event_failures import EventFailureStore
 from personalos.persistence.event_inbox import IdempotentConsumer
 from personalos.persistence.event_outbox import EventOutbox
-from personalos.persistence.evidence import SqlEvidenceIndex, SqlEvidenceSource
+from personalos.persistence.evidence import (
+    SqlEvidenceIndex,
+    SqlEvidenceIngestionStore,
+    SqlEvidenceSource,
+)
 from personalos.persistence.execution_ledger import ExecutionLedger
 from personalos.persistence.idempotency import OperationStore, SqlOperationStore
 from personalos.persistence.integration_health import IntegrationHealthStore
@@ -91,6 +97,8 @@ from personalos.retrieval.artifact_prep import (
     EvidenceSelector,
     TailoredPacketBuilder,
 )
+from personalos.retrieval.embedding import HashingEmbedder
+from personalos.retrieval.evidence_ingestion import ResumeIngestor
 from personalos.retrieval.job_matching import HybridJobMatcher, ScoringConfig, SemanticAssessor
 from personalos.secrets.exchange import (
     ApiKeyExchanger,
@@ -300,6 +308,58 @@ def build_artifact_packet_builder(
             workflow_id=workflow_id,
         ),
         context_terms=tuple(context_terms),
+    )
+
+
+#: `EMBEDDING_PROVIDER` values this build has an embedder for.
+EMBEDDING_PROVIDERS = ("hashing",)
+
+
+def build_embedder(provider: str | None = None) -> Embedder | None:
+    """The embedder `EMBEDDING_PROVIDER` names, or None when it names none.
+
+    Ingestion and artifact prep must share it: retrieval only compares
+    vectors from the model the evidence was ingested with. Raises
+    `ValueError` for a provider this build does not have, so a typo stops
+    startup instead of leaving retrieval silently unconfigured.
+    """
+    provider = settings.embedding_provider if provider is None else provider
+    name = provider.strip().lower()
+    if not name:
+        return None
+    if name == "hashing":
+        return HashingEmbedder()
+    raise ValueError(
+        f"unknown EMBEDDING_PROVIDER {provider!r}; this build has: {', '.join(EMBEDDING_PROVIDERS)}"
+    )
+
+
+def build_resume_ingestor(
+    session_factory=SessionLocal,
+    *,
+    gateway: ToolGateway | None = None,
+    embedder: Embedder | None = None,
+    requested_by: str = "evidence_ingestion",
+) -> ResumeIngestor:
+    """Build what `ingest-resume` and `POST /v1/evidence/documents` run.
+
+    Files are read as `files.read_file` through `gateway` -- by default one
+    over the global MCP manager with the durable policy engine -- so the files
+    server's allowed roots (`FILES_ALLOWED_ROOTS`) bound what can be ingested.
+    The embedder defaults to `build_embedder()`; with none configured this
+    raises `PortNotConfigured` rather than ingest evidence nothing can search.
+    """
+    embedder = embedder or build_embedder()
+    if embedder is None:
+        raise PortNotConfigured(
+            "resume ingestion needs an embedder; set EMBEDDING_PROVIDER (e.g. 'hashing')",
+            port="embedder",
+        )
+    gateway = gateway or build_tool_gateway(policy=build_policy_engine(session_factory))
+    return ResumeIngestor(
+        reader=GatewayDocumentReader(gateway, requested_by=requested_by),
+        embedder=embedder,
+        store=SqlEvidenceIngestionStore(session_factory),
     )
 
 
@@ -886,6 +946,9 @@ __all__ = [
     "build_event_emitter",
     "build_job_matcher",
     "build_artifact_packet_builder",
+    "EMBEDDING_PROVIDERS",
+    "build_embedder",
+    "build_resume_ingestor",
     "build_document_overwrite_executor",
     "build_job_search_executor",
     "GOOGLE_PROVIDER",

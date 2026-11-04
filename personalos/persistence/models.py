@@ -19,6 +19,7 @@ from sqlalchemy import (
     Text,
     TypeDecorator,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase
@@ -1558,18 +1559,65 @@ class ApplicationStatusViewModel(Base):
 # follows that same split.
 
 
+class DocumentModel(Base):
+    """ORM model for one file a candidate's evidence was ingested from.
+
+    One row per (candidate, canonical path). `sha256` is of the content last
+    ingested, and with `embedding_model`/`embedding_version` decides whether a
+    re-ingest has anything to do. `indexed_at` moves only when it did.
+    """
+
+    __tablename__ = "documents"
+
+    id = Column(GUID(), primary_key=True, default=uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
+    path = Column(String(1024), nullable=False)
+    sha256 = Column(String(64), nullable=False)
+    kind = Column(String(20), nullable=False)
+    embedding_model = Column(String(100), nullable=False)
+    embedding_version = Column(String(50), nullable=False)
+    indexed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("user_id", "path", name="uq_documents_user_path"),)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "user_id": str(self.user_id),
+            "path": self.path,
+            "sha256": self.sha256,
+            "kind": self.kind,
+            "embedding_model": self.embedding_model,
+            "embedding_version": self.embedding_version,
+            "indexed_at": self.indexed_at.isoformat(),
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
 class EvidenceChunkModel(Base):
     """ORM model for one retrievable chunk of a candidate's resume or project write-up.
 
     `chunk_index` orders chunks cut from the same `source_ref` back into
-    their original sequence; the uniqueness constraint below stops the same
-    chunk from being embedded twice if ingestion is retried.
+    their original sequence; the unique index below stops the same chunk
+    from being embedded twice if ingestion is retried.
+
+    `document_id` is the `documents` row an ingested chunk was cut from (None
+    for chunks stored directly). `retired_at` is set on a chunk a newer
+    version of its document no longer contains but an `artifact_versions` row
+    still cites: it stays, so the citation resolves, and is no longer
+    evidence. The uniqueness above holds among active chunks only, so a
+    retired chunk never blocks the position it used to have.
     """
 
     __tablename__ = "evidence_chunks"
 
     id = Column(GUID(), primary_key=True, default=uuid4)
     user_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
+    document_id = Column(GUID(), ForeignKey("documents.id"), nullable=True)
     source_type = Column(Enum("resume", "project", name="evidence_source_type"), nullable=False)
     source_ref = Column(String(255), nullable=True)
     chunk_text = Column(Text, nullable=False)
@@ -1577,18 +1625,23 @@ class EvidenceChunkModel(Base):
     embedding = Column(Vector(EMBEDDING_DIMENSION), nullable=False)
     embedding_model = Column(String(100), nullable=False)
     embedding_version = Column(String(50), nullable=False, default="1")
+    retired_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "uq_evidence_chunks_active_source_chunk",
             "user_id",
             "source_type",
             "source_ref",
             "chunk_index",
-            name="uq_evidence_chunks_user_source_chunk",
+            unique=True,
+            postgresql_where=text("retired_at IS NULL"),
+            sqlite_where=text("retired_at IS NULL"),
         ),
         Index("ix_evidence_chunks_user_id", "user_id"),
+        Index("ix_evidence_chunks_document_id", "document_id"),
     )
 
     def to_dict(self) -> dict:
@@ -1596,12 +1649,14 @@ class EvidenceChunkModel(Base):
         return {
             "id": str(self.id),
             "user_id": str(self.user_id),
+            "document_id": str(self.document_id) if self.document_id else None,
             "source_type": self.source_type,
             "source_ref": self.source_ref,
             "chunk_text": self.chunk_text,
             "chunk_index": self.chunk_index,
             "embedding_model": self.embedding_model,
             "embedding_version": self.embedding_version,
+            "retired_at": self.retired_at.isoformat() if self.retired_at else None,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }

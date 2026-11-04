@@ -143,7 +143,7 @@ def _read_profile_input(source):
 
 
 def _profile_call(call):
-    """Run a profile store call, turning its typed refusals into CLI errors."""
+    """Run a store call, turning its typed refusals into CLI errors."""
     from personalos.domain.errors import PersonalOSError
 
     try:
@@ -205,6 +205,40 @@ def profile_versions(actor_id: str):
     from personalos.domain.search_profiles import actor_user_id
 
     click.echo(get_profile_store().versions(actor_user_id(actor_id)).model_dump_json(indent=2))
+
+
+# --- Evidence ---------------------------------------------------------------------
+
+
+@cli.command("ingest-resume")
+@click.argument("path")
+@click.option(
+    "--actor",
+    "actor_id",
+    default="api",
+    show_default=True,
+    help="Whose evidence: the same actor the API reads from X-Actor-Id.",
+)
+def ingest_resume(path: str, actor_id: str):
+    """Load the resume at PATH (PDF, DOCX, Markdown or text) into the evidence index.
+
+    PATH is read through the sandboxed files tool, so it must be inside
+    FILES_ALLOWED_ROOTS; a relative PATH is resolved against the first root,
+    not the current directory. Re-running on an unchanged file changes nothing.
+    Prints the same body as `POST /v1/evidence/documents`.
+    """
+    import asyncio
+
+    from personalos.bootstrap import build_resume_ingestor, initialize_mcp_servers
+    from personalos.domain.search_profiles import actor_user_id
+
+    init_db()
+    initialize_mcp_servers()
+    ingestor = _profile_call(lambda: build_resume_ingestor(requested_by="cli:ingest_resume"))
+    result = _profile_call(
+        lambda: asyncio.run(ingestor.ingest(actor_user_id(actor_id), path, display_name=actor_id))
+    )
+    click.echo(result.model_dump_json(indent=2))
 
 
 if __name__ == "__main__":

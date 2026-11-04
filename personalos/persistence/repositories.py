@@ -1520,7 +1520,9 @@ class EvidenceChunkRepository:
     ) -> list[tuple[EvidenceChunkModel, float]]:
         """Rank chunks for `embedding_model` by cosine similarity to `query_embedding`."""
         query = self.session.query(EvidenceChunkModel).filter(
-            EvidenceChunkModel.embedding_model == embedding_model
+            EvidenceChunkModel.embedding_model == embedding_model,
+            # A retired chunk stays only so old citations resolve; it is not evidence.
+            EvidenceChunkModel.retired_at.is_(None),
         )
         if user_id is not None:
             query = query.filter(EvidenceChunkModel.user_id == user_id)
