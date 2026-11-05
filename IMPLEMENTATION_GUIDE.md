@@ -1,188 +1,343 @@
 # PersonalOS Implementation Guide
 
-Complete documentation for the PersonalOS Agent framework, including architecture, components, setup, and development guide.
+How PersonalOS is put together, how to run it locally, and what is still to be
+built.
 
 ## Table of Contents
 
-1. [Quick Start](#quick-start)
-2. [Project Overview](#project-overview)
-3. [Project Structure](#project-structure)
-4. [Architecture](#architecture)
-5. [Completed Components](#completed-components)
-6. [MCP Framework Guide](#mcp-framework-guide)
-7. [Testing](#testing)
-8. [Next Steps](#next-steps)
+1. [Local Quick Start](#local-quick-start)
+2. [Security Posture (until Phase L1)](#security-posture-until-phase-l1)
+3. [Project Overview](#project-overview)
+4. [Project Structure](#project-structure)
+5. [Architecture](#architecture)
+6. [Built Components](#built-components)
+7. [MCP Framework Guide](#mcp-framework-guide)
+8. [Testing](#testing)
+9. [Next Steps](#next-steps)
+10. [Configuration](#configuration)
 
 ---
 
-## Quick Start
+## Local Quick Start
+
+From a fresh clone to a job search waiting on your approval, with no API keys
+and no network beyond localhost. The job board is a fake one that serves two
+sample postings, and drafts are written by restating your resume verbatim
+instead of by a model, so every step below behaves the same on every machine.
+`scripts/smoke_quickstart.py` runs these same steps in CI.
+
+Run every command from the repository root: the processes read `.env` from the
+current directory.
 
 ### Prerequisites
-- Python 3.10+
-- PostgreSQL
-- Redis (optional, for the MCP response cache)
 
-### Installation
+- Python 3.10 or newer
+- Docker, for PostgreSQL with the `vector` extension. Any PostgreSQL 16 with
+  pgvector works; the `pgvector/pgvector:pg16` image is the one CI uses.
+- `curl` and `jq`, for the API calls below
+
+### 1. Install
+
 ```bash
-# Install dependencies (including dev tools)
-pip install -e ".[dev]"
-
-# Copy and configure environment
-cp .env.example .env
-# Edit .env with your database URL and settings
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,test]"
 ```
 
-### Running the API
+### 2. Start PostgreSQL with pgvector
+
 ```bash
-# Initialize database
-python -m personalos.cli db_init
-
-# Start API server
-python -m personalos.cli api --host 0.0.0.0 --port 8000 --reload
-
-# Or with uvicorn directly
-uvicorn apps.api.main:app --reload
+docker run -d --name personalos-db \
+  -e POSTGRES_USER=personalos -e POSTGRES_PASSWORD=personalos -e POSTGRES_DB=personalos \
+  -p 127.0.0.1:5432:5432 pgvector/pgvector:pg16
 ```
 
-### API Endpoints
+The port is published on `127.0.0.1` only. Wait until
+`docker exec personalos-db pg_isready -U personalos` reports
+`accepting connections`.
+
+### 3. Set the minimum environment
+
 ```bash
-# Start a job search (returns 202 with a workflow_id)
-curl -X POST http://localhost:8000/v1/chat \
+cat > .env <<EOF
+DATABASE_URL=postgresql://personalos:personalos@127.0.0.1:5432/personalos
+FILES_ALLOWED_ROOTS=["$PWD/docs/quickstart"]
+WORKER_GRAPHS=apps.worker.fake_providers:build_worker_graphs
+LOG_FORMAT=text
+EOF
+```
+
+| Variable | Why |
+| --- | --- |
+| `DATABASE_URL` | The database from step 2. |
+| `FILES_ALLOWED_ROOTS` | The only directories the file tools may read. The sample resume lives in `docs/quickstart/`. |
+| `WORKER_GRAPHS` | Runs the worker on the fake job board and the extractive draft writer (`apps/worker/fake_providers.py`). Leave it unset to use the real wiring, which needs `GREENHOUSE_BOARDS` and `LLM_GATEWAY_CONFIG`. |
+| `LOG_FORMAT` | Readable logs in a terminal. The default is JSON. |
+
+Everything else keeps its default. See [Configuration](#configuration) for the
+full list.
+
+### 4. Run the migrations
+
+```bash
+alembic upgrade head
+```
+
+### 5. Ingest a resume
+
+```bash
+python -m personalos.cli ingest-resume resume.md
+```
+
+A relative path resolves against the first allowed root, so this reads
+`docs/quickstart/resume.md`. It splits the resume into evidence chunks and
+embeds them with the local `hashing` embedder. Job matching and drafts can
+cite only these chunks. The output ends with `"added": 7`. Running it again on
+the unchanged file changes nothing.
+
+### 6. Create a search profile
+
+```bash
+python -m personalos.cli profile create docs/quickstart/profile.json
+```
+
+The sample profile looks for remote backend roles using Python and Postgres.
+Both commands act as the actor `api`, the same actor the API assumes when a
+request sends no `X-Actor-Id` header. That is how the search in step 8 finds
+this resume and this profile.
+
+### 7. Start the API and the worker
+
+In two more terminals, each with the virtualenv activated:
+
+```bash
+python -m personalos.cli api        # serves on http://127.0.0.1:8000
+```
+
+```bash
+python -m personalos.cli worker
+```
+
+The worker logs `wired graphs from 'apps.worker.fake_providers:build_worker_graphs'`
+and then a warning listing its unbound ports (`application_store`,
+`application_submitter`, `calendar`, `mailbox`, `reply_drafter`). Those are
+the adapters still to be built (see [Next Steps](#next-steps)). The
+interactive API docs are at http://127.0.0.1:8000/docs.
+
+### 8. Start a job search
+
+```bash
+WORKFLOW_ID=$(curl -s -X POST http://127.0.0.1:8000/v1/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "find me remote Python backend jobs"}'
-
-# Read its status, including any pending approval
-curl http://localhost:8000/v1/workflows/{workflow_id}
-
-# Answer a pending approval
-curl -X POST http://localhost:8000/v1/workflows/{workflow_id}/resume \
-  -H "Content-Type: application/json" \
-  -d '{...}'
+  -d '{"message": "find me remote python backend jobs"}' | jq -r .workflow_id)
+echo $WORKFLOW_ID
 ```
+
+The API answers `202 Accepted` right away. The worker then runs the
+Supervisor and the Job Search subgraph: search the fake board, normalize,
+dedupe, filter out the on-site posting, score, check evidence, shortlist, and
+draft a resume and cover letter for the top match.
+
+### 9. Reach the approval interrupt
+
+Within a few seconds the workflow stops before the only step with an outside
+effect, submitting the application:
+
+```bash
+curl -s http://127.0.0.1:8000/v1/workflows/$WORKFLOW_ID | jq '{status, current_step}'
+```
+
+```json
+{
+  "status": "waiting",
+  "current_step": {
+    "thread_id": "job_search:…",
+    "step": "approval_checkpoint_for_external_submission"
+  }
+}
+```
+
+The approval queue shows what approving would do: the recipient, a diff of
+the documents, and their evidence citations.
+
+```bash
+curl -s http://127.0.0.1:8000/v1/approvals | jq '.approvals[] | {id, action_type, summary, action_hash}'
+python -m personalos.cli approvals    # the same queue, rendered for a terminal
+```
+
+### 10. Approve the pending action
+
+An approval must quote the `action_hash` it was listed with. If the action
+changes after it was listed, the hash no longer matches and the approval is
+refused with a `409`.
+
+```bash
+APPROVAL=$(curl -s http://127.0.0.1:8000/v1/approvals | jq -c '.approvals[0]')
+curl -s -X POST "http://127.0.0.1:8000/v1/approvals/$(jq -r .id <<<"$APPROVAL")/decision" \
+  -H "Content-Type: application/json" \
+  -d "{\"approved\": true, \"action_hash\": $(jq .action_hash <<<"$APPROVAL")}" | jq
+```
+
+The response has `"status": "approved"` and `"resumed": true`. The worker
+resumes the run, and the executor runs the approved submission under the
+recorded decision. This build has no submitter adapter yet, so the step
+fails as a retryable `PortNotConfigured`, the same way it would in a
+deployment that has not configured one:
+
+```bash
+curl -s http://127.0.0.1:8000/v1/workflows/$WORKFLOW_ID/failures \
+  | jq '.failures[] | {step, error_type, last_error}'
+curl -s http://127.0.0.1:8000/v1/workflows/$WORKFLOW_ID/audit | jq   # the decision trail
+```
+
+That is the end of the walkthrough. To start over, drop the database
+(`docker rm -f personalos-db`) and go back to step 2. A second search against
+the same database stops at an `IdempotencyConflict` instead, because the
+submission's idempotency key is derived from the posting.
+
+### The same thing in one command
+
+```bash
+python scripts/smoke_quickstart.py
+```
+
+This runs steps 4–10 against `DATABASE_URL`, which defaults to the database
+from step 2 and must be fresh. It starts the API and the worker as real
+processes, checks each response, and exits non-zero with both processes' logs
+if anything differs from what this guide says. To run it without PostgreSQL,
+set `DATABASE_URL=sqlite:////tmp/smoke.db`. That skips Alembic and the
+pgvector index, so CI runs it on PostgreSQL.
+
+---
+
+## Security Posture (until Phase L1)
+
+**The API has no authentication.** Until Phase L1 adds it, anyone who can
+reach the port can start workflows, read the audit trail, and approve
+pending actions. `X-Actor-Id` decides whose profile and evidence a request
+uses, but nothing checks it. The defaults reflect that:
+
+- **The API binds to `127.0.0.1` by default** (`API_HOST`, and
+  `python -m personalos.cli api --host`). Do not set it to `0.0.0.0` or a LAN
+  address unless something in front of the API authenticates callers.
+- **The quick start's PostgreSQL publishes only on `127.0.0.1`.** Its
+  password is a placeholder, so keep it off the network.
+- **Approvals are the only control on outside effects.** The policy engine
+  still denies anything off its allowlist, and every outward-facing action
+  still waits for an approval that quotes its `action_hash`. An
+  unauthenticated caller can approve one, though, so treat API access as
+  equivalent to the user's own.
+- **Secrets stay out of `.env`.** Refresh tokens, API keys and the OAuth
+  client secret live in the OS keychain (`SECRET_STORE_SERVICE`). The
+  configuration only holds `cred://` references to them.
 
 ---
 
 ## Project Overview
 
-PersonalOS is a local-first agentic assistant framework designed for job search automation. The project uses a **Model Context Protocol (MCP)** architecture to provide AI agents with modular, reusable tool capabilities.
+PersonalOS is a local-first agentic assistant for job search. A model only
+proposes actions, as typed intents. A deterministic policy engine decides
+whether each one may run, and an isolated executor runs the approved ones
+through a single tool gateway. State is checkpointed to PostgreSQL, so a run
+survives restarts and waits durably for human approval.
 
 ### Key Technologies
 
-- **FastAPI** 0.141+ - Async HTTP API
-- **SQLAlchemy** 2.0+ - PostgreSQL ORM
-- **Pydantic** 2.0+ - Type validation
-- **LangChain/LangGraph** - Agent workflows
-- **Redis** - Caching (background work runs on the Postgres outbox worker)
-- **OpenTelemetry** - Observability
+- **FastAPI** - HTTP API (`apps/api`)
+- **LangGraph** - Supervisor and domain subgraphs, checkpointed to PostgreSQL
+- **SQLAlchemy 2 + Alembic** - persistence and versioned migrations
+- **PostgreSQL + pgvector** - relational state, the outbox, and evidence embeddings
+- **Pydantic 2** - typed contracts at every boundary
+- **OpenTelemetry** - one trace per workflow, off by default
+- **MCP** - the files tool server, behind the tool gateway
 
 ### Core Principles
 
-- **Async-First** - All operations are async/await
-- **Type-Safe** - Full type hints and Pydantic validation
-- **Event-Driven** - Pub/sub architecture for decoupling
-- **Modular MCP** - Pluggable tool servers
-- **Repository Pattern** - Clean data access abstraction
+- **The model emits intent only.** It never calls a tool or touches a credential.
+- **Default deny.** No code path reaches a tool without a recorded policy decision.
+- **Approval before outside effects.** Anything that writes outside the system
+  pauses for a human, and the approval is bound to a hash of the exact action.
+- **Exactly once.** Every mutation carries an idempotency key and is journaled
+  with the decision that authorized it.
+- **Durable by default.** Requests return immediately. Work runs in the worker,
+  and everything it needs to resume after a restart is in the database.
+- **Enforced boundaries.** Layer imports are checked in CI
+  (`scripts/check_boundaries.py`, `docs/ARCHITECTURE_BOUNDARIES.md`).
 
 ---
 
 ## Project Structure
 
+Every directory down to two levels is listed. Entries marked `(planned …)`
+exist only as placeholders. `scripts/check_guide_tree.py` runs in CI and fails
+when this tree and the repository drift apart.
+
+<!-- tree:begin -->
 ```
-PersonalOS-agent/
-├── pyproject.toml              # Python project config & dependencies
-├── .env.example                # Environment variables template
-├── README.md                   # Project overview
-├── IMPLEMENTATION_GUIDE.md     # This file
+PersonalOS/
+├── pyproject.toml                 # dependencies and tool config
+├── alembic.ini                    # migrations read DATABASE_URL via migrations/env.py
+├── .env.example                   # every setting, with defaults
+├── README.md
+├── IMPLEMENTATION_GUIDE.md        # this file
 │
-├── personalos/                 # Main application package
-│   ├── __init__.py
-│   ├── config.py              # Pydantic settings (from .env)
-│   ├── cli.py                 # CLI entry points
-│   │
-│   ├── domain/                # Domain models
-│   │   ├── models.py          # Core entities (Job, Agent, Event, etc.)
-│   │   └── __init__.py
-│   │
-│   ├── persistence/           # Data persistence
-│   │   ├── models.py          # SQLAlchemy ORM models
-│   │   ├── database.py        # DB connection/session
-│   │   ├── repositories.py    # Data access layer
-│   │   └── __init__.py
-│   │
-│   ├── executor/              # Agent execution engine
-│   │   ├── job_search.py      # Job search executor with MCP integration
-│   │   └── __init__.py
-│   │
-│   ├── events/                # Event-driven architecture
-│   │   ├── bus.py             # Event bus (pub/sub)
-│   │   └── __init__.py
-│   │
-│   ├── mcp/                   # Model Context Protocol
-│   │   ├── base.py            # MCPServer base class
-│   │   ├── cache.py           # Caching (Redis/in-memory)
-│   │   ├── manager.py         # MCP orchestrator
-│   │   ├── adapter.py         # MCPToolInvoker (ToolInvoker port)
-│   │   └── __init__.py
-│   │
-│   ├── tools/                 # Tool boundary
-│   │   ├── gateway.py         # ToolGateway / ToolInvoker ports
-│   │   ├── registry.py        # Tool registry (adapter)
-│   │   └── __init__.py
-│   │
-│   ├── policy/                # Policy enforcement
-│   │   ├── intents.py         # ToolIntent / ApprovedIntent
-│   │   ├── rules.py           # Allowlists, mutating + origin rules
-│   │   ├── permissions.py     # Permission classes + default outcomes
-│   │   ├── engine.py          # PolicyEngine (default deny)
-│   │   └── errors.py          # PolicyDenied / ApprovalRequired
-│   │
-│   ├── bootstrap.py           # Composition root (wires the layers)
-│   │
-│   ├── graphs/                # Orchestration (LangGraph)
-│   │   ├── supervisor.py      # Top-level graph: context, typed routing, delegation
-│   │   └── job_search.py      # The Job Search domain subgraph + its ports
-│   ├── models/                # AI models (TODO)
-│   ├── retrieval/             # RAG/search (TODO)
-│   └── observability/         # Logging/tracing (TODO)
+├── personalos/                    # the application package
+│   ├── config.py                  # settings from the environment and .env
+│   ├── bootstrap.py               # composition root: wires every layer
+│   ├── cli.py                     # api, worker, db-init, ingest-resume, profile, approvals, ...
+│   ├── domain/                    # entities, typed intents, errors, workflow ids; imports nothing internal
+│   ├── policy/                    # default-deny engine: allow / require_approval / deny
+│   ├── tools/                     # the tool gateway (the only way to a tool) and registry
+│   ├── executor/                  # runs approved intents: idempotency, retries, credential broker
+│   ├── graphs/                    # LangGraph Supervisor and Job Search subgraph, node contracts
+│   ├── persistence/               # ORM, repositories, checkpointer, outbox, audit, leases
+│   ├── events/                    # event bus and the in-memory event transport
+│   ├── mcp/                       # MCP server base, manager, cache, gateway adapter
+│   ├── providers/                 # job board adapters: Greenhouse, and a fake for local runs
+│   ├── retrieval/                 # resume ingestion, embedder, evidence selection, job matching
+│   ├── models/                    # model gateway: rules by default; Anthropic, Ollama, OpenAI-compatible
+│   ├── secrets/                   # OS keychain store and short-lived token exchange
+│   └── observability/             # structured logging, tracing, redaction
 │
-├── apps/                      # Application entry points
-│   ├── api/                   # FastAPI web server
-│   │   ├── main.py            # FastAPI app factory
-│   │   └── routes/
-│   │       ├── workflows.py   # v1 workflow lifecycle (chat, status, resume)
-│   │       └── __init__.py
-│   │
-│   └── worker/                # Background job processor
-│       └── workflow_commands.py  # Claims queued workflow commands and runs them
+├── apps/                          # process entry points (composition layer)
+│   ├── api/                       # FastAPI app
+│   │   └── routes/                # chat/workflows, approvals, applications, audit, failures,
+│   │                              # events (SSE), profile, evidence
+│   └── worker/                    # workflow commands, outbox dispatch, scheduled sweeps
+│       ├── graphs.py              # default graph factory (WORKER_GRAPHS)
+│       ├── fake_providers.py      # quick-start factory: fake board, extractive drafts
+│       └── unconfigured.py        # stand-ins for ports with no adapter yet
 │
-├── mcp_servers/               # MCP server implementations
-│   ├── files/                 # File access server (TODO)
-│   └── google/                # Google API integration (TODO)
+├── mcp_servers/
+│   ├── files/                     # sandboxed read_file / write_file
+│   └── google/                    # (planned: Gmail and Calendar tools, J2)
 │
-├── docs/                      # Design documentation
-│   └── ARCHITECTURE_BOUNDARIES.md  # Layer ownership + enforced import rules
+├── migrations/                    # Alembic environment
+│   └── versions/                  # one file per schema change
+│
+├── evals/                         # evaluation harness: python -m evals.harness
+│   ├── golden/                    # golden dataset: requests, mail, postings, scenarios
+│   └── model_benchmarks/          # model configs, baselines, review ratings
+│
+├── docs/
+│   ├── ARCHITECTURE_BOUNDARIES.md # layer ownership and enforced import rules
+│   ├── EVENT_TRANSPORT.md         # the outbox transport and how to swap it
+│   └── quickstart/                # sample resume and profile for the quick start
 │
 ├── scripts/
-│   └── check_boundaries.py    # Standalone boundary check (runs in CI)
+│   ├── check_boundaries.py        # layer import check (CI)
+│   ├── check_guide_tree.py        # this tree against the repository (CI)
+│   └── smoke_quickstart.py        # the quick start, end to end (CI)
 │
-├── tests/                     # Test suite
-│   ├── architecture/          # Layer boundary enforcement
-│   ├── unit/                  # Unit tests
-│   │   ├── test_job_search.py
-│   │   ├── test_mcp_server.py
-│   │   └── __init__.py
-│   ├── integration/           # Integration tests (TODO)
-│   ├── adversarial/           # Adversarial tests (TODO)
-│   ├── graph_scenarios/       # Workflow tests (TODO)
-│   └── fixtures/              # Test fixtures (TODO)
-│
-├── evals/                     # Evaluation harness (python -m evals.harness)
-│   ├── golden/                # Golden dataset: requests, mail, postings, scenarios
-│   └── model_benchmarks/      # Model configs, baselines, review ratings
-│
-└── migrations/                # Database schema migrations (Alembic)
-    └── README.md
+└── tests/
+    ├── architecture/              # layer boundaries and the intent-only boundary
+    ├── contracts/                 # node contract coverage, event transport, offline guards
+    ├── unit/                      # pure logic, routes, stores, worker wiring
+    ├── graph_scenarios/           # whole-graph runs: approvals, resume, recovery, tracing
+    ├── adversarial/               # prompt injection, permission escalation, hostile payloads
+    ├── migrations/                # alembic upgrade/downgrade against PostgreSQL
+    └── fixtures/                  # fakes, recorded model outputs, sample resumes
 ```
+<!-- tree:end -->
 
 ---
 
@@ -196,259 +351,154 @@ approved intents, adapters do the I/O.
 ### Data Flow
 
 ```
-┌─────────────┐
-│   Client    │
-└──────┬──────┘
-       │
-       ▼
-┌─────────────────────────────────┐
-│  FastAPI (apps/api/main.py)     │
-│  - CORS, Error Handling         │
-│  - Request Validation           │
-└──────┬──────────────────────────┘
-       │
-       ▼
-┌─────────────────────────────────┐
-│  Routes (apps/api/routes/)      │
-│  - POST /v1/chat                │
-│  - GET /v1/workflows/{id}       │
-│  - POST /v1/workflows/{id}/...  │
-└──────┬──────────────────────────┘
-       │
-       ▼
-┌─────────────────────────────────┐
-│  Domain Models                  │
-│  - Job (Pydantic)               │
-│  - Validation                   │
-└──────┬──────────────────────────┘
-       │
-       ├─────────────────────────────────┐
-       │                                 │
-       ▼                                 ▼
-┌────────────────────────┐     ┌──────────────────────┐
-│  Persistence Layer     │     │  Event Bus           │
-│  - JobRepository       │     │  - pub/sub           │
-│  - JobModel (ORM)      │     │  - Async handlers    │
-│  - PostgreSQL          │     │  - Event logging     │
-└────────┬───────────────┘     └──────────────────────┘
-         │
-         ▼
-┌────────────────────────┐
-│  Worker + Graphs       │
-│  - Job Search subgraph │
-│  - Emits ToolIntents   │
-└────────┬───────────────┘
-         │
-         ▼
-┌────────────────────────────────┐
-│  Tool Gateway + Policy Engine  │
-│  - Default deny allowlist      │
-│  - Approval gate on mutations  │
-│  - Mints ApprovedIntent        │
-└────────┬───────────────────────┘
-         │  (approved intents only)
-         ▼
-┌────────────────────────────────┐
-│  MCP Server Manager            │
-│  - Tool Orchestration          │
-│  - Caching                     │
-└────────┬───────────────────────┘
-         │
-         ▼
-┌────────────────────────────────┐
-│  MCP Servers                   │
-│  - Files MCP                   │
-│  - Google MCP (TODO)           │
-└────────┬───────────────────────┘
-         │
-         ├─────────────────────────────────┐
-         │                                 │
-         ▼                                 ▼
-┌──────────────────────┐     ┌──────────────────────┐
-│  Redis Cache         │     │  External APIs       │
-│  - Result Caching    │     │  - Indeed            │
-│  - TTL Management    │     │  - LinkedIn          │
-└──────────────────────┘     │  - Job Boards        │
-                             └──────────────────────┘
+ client ──HTTP──▶ apps/api ──writes a command row, returns 202──▶ PostgreSQL
+                     ▲                                               │
+                     │ status, approvals, audit, SSE progress        │ outbox / command queue
+                     │                                               ▼
+                     └──────────── reads ◀────────────────────  apps/worker
+                                                                     │ claims the command, takes the lease
+                                                                     ▼
+                                                   Supervisor graph ─▶ Job Search subgraph
+                                                                     │ every step checkpointed
+                                                                     ▼
+                                                    ToolIntent / ActionIntent (proposals only)
+                                                                     │
+                                                                     ▼
+                                                   Policy engine: allow │ require_approval │ deny
+                                                                     │        │
+                                                                     │        ▼
+                                                                     │   approval interrupt ◀── POST /v1/approvals/{id}/decision
+                                                                     ▼        │
+                                                   Executor (idempotency ledger, retries, credential broker)
+                                                                     │
+                                                                     ▼
+                                                   Tool gateway ─▶ MCP servers │ job providers │ (planned adapters)
+                                                                     │
+                                                                     ▼
+                                                   receipts, audit events, outbox events ─▶ PostgreSQL
 ```
 
 ### Key Patterns
 
 | Pattern | Location | Purpose |
 |---------|----------|---------|
-| **Repository** | `personalos/persistence/repositories.py` | Abstract data access |
-| **Domain Models** | `personalos/domain/models.py` | Rich, validated entities |
-| **Event-Driven** | `personalos/events/bus.py` | Async event processing |
-| **Pub/Sub** | `personalos/events/bus.py` | Decoupled communication |
-| **MCP Servers** | `personalos/mcp/` | Modular tool capabilities |
-| **Policy Gate** | `personalos/policy/engine.py` | Default-deny authorization of tool intents |
-| **Ports & Adapters** | `personalos/tools/gateway.py` | Executors depend on ports, not adapters |
-| **Composition Root** | `personalos/bootstrap.py` | Single place that wires the layers |
-| **Dependency Injection** | `apps/api/main.py` | FastAPI Depends() |
-| **Caching** | `personalos/mcp/cache.py` | Performance optimization |
+| **Policy Gate** | `personalos/policy/engine.py` | Default-deny authorization of every intent |
+| **Ports & Adapters** | `personalos/tools/gateway.py`, `personalos/graphs/job_search.py` | Graphs and executors depend on ports, not adapters |
+| **Composition Root** | `personalos/bootstrap.py`, `apps/worker/graphs.py` | The only places that wire concrete adapters |
+| **Durable Checkpoints** | `personalos/persistence/checkpointer.py` | Resume any workflow by id after a crash |
+| **Transactional Outbox** | `personalos/persistence/event_outbox.py` | Events and commands committed with the state that caused them |
+| **Idempotency Ledger** | `personalos/persistence/execution_ledger.py` | Each side effect runs once per key |
+| **Repository** | `personalos/persistence/repositories.py` | Data access behind typed methods |
+| **Unconfigured Stand-ins** | `apps/worker/unconfigured.py` | A missing adapter fails loudly and retryably, never silently |
 
 ---
 
-## Completed Components
+## Built Components
 
-### 1. Project Configuration & Dependencies
+### 1. Configuration (`personalos/config.py`)
 
-- `pyproject.toml` - Complete Python project with 40+ dependencies
-- `.env.example` - Environment variables template
-- Python 3.10+ requirement
-- All production and dev dependencies configured
+One `Settings` object read from the environment and `.env`. `.env.example`
+lists every setting with its default; [Configuration](#configuration) covers
+the ones you are likely to change.
 
-**Key Dependencies:**
-- FastAPI 0.141+, Uvicorn 0.52+
-- SQLAlchemy 2.0+, Psycopg2 (PostgreSQL)
-- Pydantic 2.13+
-- LangChain 1.3+, LangGraph 1.2+
-- Redis 8.1+
-- OpenTelemetry (tracing/metrics)
-- Pytest 9.1+ (testing)
+### 2. Domain (`personalos/domain/`)
 
-### 2. Domain Models (`personalos/domain/models.py`)
+Typed values every other layer shares, with no internal imports: intents and
+action kinds, the error taxonomy (`errors.py`, which distinguishes retryable
+from terminal failures), workflow and thread ids, job search values
+(`SearchProfile`, `NormalizedPosting`, `ShortlistEntry`), artifacts and
+evidence, recruiter events, and the application lifecycle state machine.
 
-**Entities:**
-- `Job` - Job search task with keywords, locations, salary range, status
-- `JobStatus` - Enum: pending, running, completed, failed, cancelled
-- `AgentState` - Tracks agent execution progress with history
-- `Event` - Domain events for event-driven architecture
-- `EventType` - Event type enums (job.*, agent.*, result.*)
-- `Tool` - Agent tool definition with parameters
-- `AgentConfig` - Configuration for agents (model, temperature, etc.)
+### 3. Policy (`personalos/policy/`)
 
-**Features:**
-- Full Pydantic validation
-- JSON serialization
-- Type safety with type hints
-- Rich domain logic
+`PolicyEngine` decides `allow`, `require_approval` or `deny` for every intent
+from the tool allowlist, the tool's permission class (`read_local` through
+`destructive`), and the intent's origin. Every decision is recorded in
+`policy_decisions` before anything runs.
 
-### 3. Database Layer (`personalos/persistence/`)
+### 4. Tools and Executor (`personalos/tools/`, `personalos/executor/`)
 
-**ORM Models (SQLAlchemy 2.0):**
-- `JobModel` - Persistent job with UUID PK
-- `EventModel` - Event log with job/agent references
-- `AgentStateModel` - Agent state snapshots
+`ToolGateway` is the only way to reach a tool, and it consults policy first.
+`ToolExecutor` runs approved actions under an idempotency key, journals each
+attempt, retries transient failures with backoff, and brokers short-lived
+credentials so long-lived secrets never leave `personalos/secrets`.
 
-**Features:**
-- PostgreSQL UUID type
-- JSON columns for complex data
-- DateTime tracking (created, updated, started, completed)
-- Connection pooling
-- Session management with context managers
+### 5. Persistence (`personalos/persistence/`, `migrations/`)
 
-**Repository Pattern:**
-- `JobRepository` - CRUD operations for jobs
-- Clean domain model mapping
-- Transaction handling
-- Async queries ready
+PostgreSQL through SQLAlchemy 2, with the schema in Alembic migrations. It
+holds workflows, checkpoints and leases; postings, profiles, applications and
+their lifecycle; policy decisions, tool executions and audit events; the
+outbox with retries and dead letters; and pgvector tables for evidence,
+posting and message embeddings.
 
-### 4. Job Search (workflow path)
+### 6. Retrieval and Models (`personalos/retrieval/`, `personalos/models/`)
 
-Job searches run as durable workflows: `POST /v1/chat` queues a command, the
-worker runs the Supervisor and the Job Search subgraph
-(`personalos/graphs/job_search.py`), and every provider call is a
-`ToolIntent` through the policy-enforcing gateway. See the request path in
-[docs/ARCHITECTURE_BOUNDARIES.md](docs/ARCHITECTURE_BOUNDARIES.md).
+Resume ingestion (`ingest-resume`, `POST /v1/evidence/documents`) chunks
+PDF, DOCX, Markdown or text resumes into evidence. `HybridJobMatcher` scores
+postings and grounds each claim in that evidence. The model gateway
+(`LLM_GATEWAY_CONFIG`) assigns a provider to each role. With no config,
+routing and recruiter-event extraction run on deterministic rules, semantic
+assessment declines, and the draft writer is unbound.
 
-The earlier `JobSearchExecutor` and its `/api/v1/jobs` route were removed: they
-ran beside the workflow path and skipped its approval and audit steps.
+### 7. API (`apps/api/`)
 
-### 5. Event System (`personalos/events/bus.py`)
+Every route answers in milliseconds. Long-running work is queued for the
+worker.
 
-**EventBus - Pub/Sub pattern**
-
-Features:
-- Type-safe event handling
-- Async handler support
-- Global event bus instance
-- Event type tracking
-- Handler registration and unregistration
-
-### 6. API Layer (`apps/api/`)
-
-**FastAPI Application:**
-- Production-ready async API
-- CORS middleware
-- Error handling middleware
-- Automatic MCP initialization on startup
-- Proper shutdown cleanup
-
-**Endpoints:**
 ```
-POST   /v1/chat                            Start (or continue) a workflow
-GET    /v1/workflows/{workflow_id}         Workflow status and pending approval
-POST   /v1/workflows/{workflow_id}/resume  Answer a pending approval
+POST   /v1/chat                                   Start a workflow (202, returns workflow_id)
+GET    /v1/workflows/{id}                         Status, plan, current step, pending approval
+POST   /v1/workflows/{id}/resume                  Answer an interrupt directly
+GET    /v1/workflows/{id}/events                  Progress as server-sent events
+GET    /v1/workflows/{id}/failures                Failed steps, with retry/dismiss actions
+POST   /v1/workflows/{id}/retry | /dismiss        Act on a failed step
+GET    /v1/workflows/{id}/audit, /v1/audit        The decision and execution trail
+GET    /v1/approvals                              Everything waiting for a human
+POST   /v1/approvals/{id}/decision                Approve or reject, quoting action_hash
+GET    /v1/applications[/{id}]                    The application board
+POST   /v1/applications/{id}/transition           Request a lifecycle transition
+POST   /v1/profile, GET/PUT /v1/profile           The search profile (versioned)
+GET    /v1/profile/versions[/{n}]
+POST   /v1/evidence/documents                     Ingest a resume
+GET    /v1/failures/events, POST .../{id}/retry   Parked outbox events
 ```
 
-**Features:**
-- Request/response models with Pydantic
-- Dependency injection (FastAPI Depends)
-- Proper HTTP status codes
-- Error handling
-- Automatic serialization
+All routes are unauthenticated until Phase L1. See
+[Security Posture](#security-posture-until-phase-l1).
 
-### 7. CLI Entry Points (`personalos/cli.py`)
+### 8. Worker (`apps/worker/`)
 
-Commands:
-- `api` - Run API server with configurable host/port/workers
-- `db_init` - Initialize database schema
-- `worker` - Run the outbox worker (queued workflow commands and events)
+One process runs three loops against the database: it claims queued workflow
+commands and runs them under a lease, dispatches outbox events to their
+consumers, and runs scheduled sweeps (due follow-ups, stalled applications,
+expired approvals). It keeps nothing in memory that a restart would lose.
+`WORKER_GRAPHS` names the graph factory: `apps.worker.graphs:build_worker_graphs`
+by default, or `apps.worker.fake_providers:build_worker_graphs` for the quick
+start. Ports without an adapter are bound to `apps/worker/unconfigured.py`
+stand-ins, which the worker lists at startup.
 
-### 8. MCP Framework (`personalos/mcp/`)
+### 9. Events and Observability (`personalos/events/`, `personalos/observability/`)
 
-**Complete Model Context Protocol implementation**
+Producers and consumers depend on the transport interfaces in
+`personalos/domain/event_transport.py`, so the Postgres outbox can be swapped
+out (`docs/EVENT_TRANSPORT.md`). Logs are structured and carry
+`workflow_id`/`correlation_id`. Each workflow is one OpenTelemetry trace, and
+credentials are redacted from logs, traces, checkpoints and audit payloads.
 
-**Base Server (`base.py`):**
-- Abstract `MCPServer` class
-- Tool registration and schema validation
-- Async-first execution
-- Error handling and logging
-- Automatic async detection with `inspect.iscoroutinefunction()`
+### 10. CLI (`personalos/cli.py`)
 
-**Tool Schema:**
-- JSON Schema validation
-- Parameter documentation
-- Domain model conversion
-- Type safety
+```
+python -m personalos.cli api [--host 127.0.0.1] [--port 8000] [--reload]
+python -m personalos.cli worker [--graphs module:callable]
+python -m personalos.cli db-init                  # create tables without Alembic (tests, SQLite)
+python -m personalos.cli ingest-resume PATH [--actor api]
+python -m personalos.cli profile create|update|show|versions [--actor api]
+python -m personalos.cli approvals [--json]
+python -m personalos.cli workflow-status WORKFLOW_ID [--json]
+python -m personalos.cli stall-monitor [--once]
+```
 
-**Caching (`cache.py`):**
-- `RedisCache` - Distributed caching for production
-- `InMemoryCache` - Simple fallback for development
-- Automatic cache key generation
-- TTL-based expiration
-- Performance optimization
-
-**Manager (`manager.py`):**
-- `MCPServerManager` - Central orchestrator
-- Multiple server registration
-- Tool routing and execution
-- Server introspection
-- Tool discovery
-
-### 10. Testing (`tests/`)
-
-**15 Unit Tests - ALL PASSING ✅**
-
-- **MCP Server Tests** - Tool registration, execution, manager routing
-- **Job Search Models (3)** - Model creation, status transitions, results
-
-**Test Infrastructure:**
-- Pytest with async support (pytest-asyncio)
-- Comprehensive mocking
-- Integration test scenarios
-- Fixture templates ready for expansion
-
-### 11. Documentation
-
-- `BUILD.md` - Build summary and completion status
-- `MCP_GUIDE.md` - Detailed MCP server implementation guide
-- `MCP_IMPLEMENTATION.md` - MCP architecture summary
-- `TEST_RESULTS.md` - Full test coverage report
-- `IMPLEMENTATION_GUIDE.md` - This comprehensive guide
-
-### 12. Orchestration Graphs (`personalos/graphs/`)
+### 11. Orchestration Graphs (`personalos/graphs/`)
 
 **`supervisor.py` — the top-level graph.** Loads the actor's long-term facts,
 classifies the request into a typed `RouteDecision`, and either asks for
@@ -539,7 +589,7 @@ approving it in a second and resuming it in a third.
 `ApplicationStore`, a gateway-backed `ActionExecutor`, real job board
 providers) are a follow-up. The graph is complete and exercised against fakes.
 
-### 13. Durable Checkpointing and Resume
+### 12. Durable Checkpointing and Resume
 
 Both graphs default to `InMemorySaver`, which is a test fixture: a restart loses
 every thread it held. The production checkpointer is
@@ -617,7 +667,7 @@ A kill is a real `SIGKILL` from a real child process, not an exception raised in
 a node: an exception unwinds, runs `finally` blocks and flushes buffers, which is
 the graceful path a crash does not take. Testing against it would prove nothing.
 
-### 14. Pending Checkpoints: Durable Conditional Waits
+### 13. Pending Checkpoints: Durable Conditional Waits
 
 The requirement in one sentence: *"seven days after applying, if no recruiter
 response exists, draft a follow-up."* Two things in it are easy to build wrongly.
@@ -693,7 +743,7 @@ comes.
 Time is moved rather than waited for: every decision takes an explicit `now`, so
 a seven-day wait is a seven-day test only in the fiction.
 
-### 15. Recruiter Events: Classification, Commitments and Correlation
+### 14. Recruiter Events: Classification, Commitments and Correlation
 
 Inbound recruiter mail is handled by two nodes of the Job Search graph, not by
 a Communications agent:
@@ -760,7 +810,7 @@ follow-up.
 real database), and the two node contract classes in
 `tests/unit/test_job_search_nodes.py`.
 
-### 16. Conditional Follow-ups and Interview Scheduling
+### 15. Conditional Follow-ups and Interview Scheduling
 
 Calendar and task behaviour lives in the Job Search graph, not in a Calendar
 subgraph: a follow-up, an interview and its prep blocks all exist to move one
@@ -882,7 +932,7 @@ application's schedule is planned.
   `tests/unit/test_job_search_nodes.py`, and the evaluator and `supersede`
   cases in `tests/unit/test_pending_checkpoints.py`.
 
-### 17. Evaluation Harness and the Model Gateway
+### 16. Evaluation Harness and the Model Gateway
 
 Agent quality is measured against a version-controlled golden dataset, not
 demoed. One command runs all of it against one model configuration:
@@ -1189,230 +1239,153 @@ schema = ToolSchema(
 
 ## Testing
 
-### Test Results
-
-**Status:** ✅ All 15 Tests Passing
-
-```
-tests/unit/test_job_search.py               ... [3 tests]
-tests/unit/test_mcp_server.py              .. [9 tests]
-```
-
-Execution time: 0.39s
-
-### Test Coverage
-
-#### MCP Server Tests (9 tests)
-
-```python
-pytest tests/unit/test_mcp_server.py -v
-```
-
-- Tool registration, validation and idempotency on the `MCPServer` base
-- Manager routing and introspection
-- Error handling and validation
-
-#### Job Search Model Tests (3 tests)
-
-```python
-pytest tests/unit/test_job_search.py -v
-```
-
-- Model creation and validation
-- Status transitions (pending → running → completed)
-- Results storage and serialization
-
-### Running Tests
+The suite runs offline: a conftest guard fails any test that opens a
+connection to anything other than localhost, and model-backed tests replay
+recorded outputs. Tests that need PostgreSQL skip when `DATABASE_URL` is unset.
 
 ```bash
-# Run all tests
-pytest tests/unit/ -v
-
-# Run specific test file
-pytest tests/unit/test_mcp_server.py -v
-
-# Run with coverage
-pytest tests/ --cov=personalos --cov=mcp_servers --cov-report=html
-
-# Run with markers
-pytest tests/unit/ -k "integration" -v
+python scripts/check_boundaries.py        # layer imports, no install needed
+python scripts/check_guide_tree.py        # this guide's tree against the repository
+pytest tests                              # everything; Postgres-backed tests need DATABASE_URL
+pytest tests/adversarial                  # the security boundary on its own
+python -m evals.harness                   # golden-set quality gate on the rules config
+python scripts/smoke_quickstart.py        # the quick start, end to end (needs a fresh database)
+ruff check personalos apps mcp_servers tests scripts
 ```
 
-### Key Validations
+| Suite | What it pins down |
+| --- | --- |
+| `tests/architecture` | Layer import rules, and that models emit intents only |
+| `tests/contracts` | Every graph node has a typed contract and a contract test; transport interfaces; the offline guard |
+| `tests/unit` | Pure logic, API routes, stores, worker wiring and reliability |
+| `tests/graph_scenarios` | Whole-graph runs: approval interrupts, durable resume, recovery, idempotent mutations, tracing |
+| `tests/adversarial` | Prompt injection in postings, approval tampering, path traversal, permission escalation, hostile tool payloads |
+| `tests/migrations` | `alembic upgrade head` and downgrade against PostgreSQL |
 
-✅ **MCP Framework**
-- Tool registration and discovery working
-- Async handler execution proper
-- Parameter validation enforced
-- Error handling correct
-- Schema documentation complete
-
-✅ **Database Models**
-- UUID primary keys correct
-- JSON columns working
-- DateTime tracking correct
-- ORM serialization working
+CI (`.github/workflows/ci.yml`) runs on pull requests and on `main`. It runs
+the boundary and guide-tree checks first, then the quick-start smoke test on a
+fresh pgvector database, then the full suite, the evaluation gate and lint on
+another. `offline-tests.yml` runs the contract and pure-logic tests on every
+push, with no database.
 
 ---
 
 ## Next Steps
 
-### High Priority (Phase 1)
+This follows the phased backlog in *PersonalOS — Architecture Gap Analysis &
+Phased Backlog* (Oct 29, 2026). Phases A–H are closed. Phase I makes the
+system run end to end, and this guide is its last issue (I6). After Phase I,
+Phases J and L can run in parallel. When an item lands, update this section,
+and if the quick start changes, update `scripts/smoke_quickstart.py` too.
 
-1. **Integrate Real Job Search APIs**
-   - Connect to Indeed API
-   - Add LinkedIn integration
-   - Support additional job boards
-   - Replace mock implementations
+### Phase I: End-to-end composition (done with this guide)
 
-2. **Database Migrations**
-   - Set up Alembic
-   - Generate migration scripts
-   - Test migration workflows
-   - Document schema changes
+| # | Issue | Where it shows up now |
+| --- | --- | --- |
+| I1 | Default worker graph factory | `apps.worker.graphs:build_worker_graphs`, the default `WORKER_GRAPHS` |
+| I2 | Search profile store | `/v1/profile`, `personalos.cli profile` |
+| I3 | Resume and evidence ingestion | `personalos.cli ingest-resume`, `POST /v1/evidence/documents` |
+| I4 | Retire the legacy jobs path | `/api/v1/jobs` and the mock jobs server are gone; searches run as workflows |
+| I5 | Remove stale scaffolding | No Celery; no empty `personalos/state` |
+| I6 | Refresh the implementation guide | This guide, the quick start, `scripts/smoke_quickstart.py` and `scripts/check_guide_tree.py` |
 
-3. **Advanced Testing**
-   - Add adversarial tests
-   - Implement scenario tests
-   - Add golden test datasets
-   - Test error conditions
+### Phase J: Real integrations
 
-### Medium Priority (Phase 2)
+These fill in the ports the worker reports as unbound at startup.
 
-4. **Graph-Based Workflows**
-   - Implement LangGraph integration
-   - Define workflow nodes
-   - Implement edges and transitions
-   - Add complex orchestration
+| # | Issue | Done when |
+| --- | --- | --- |
+| J1 | Google OAuth onboarding | `cli auth google` runs the consent flow and stores the refresh token in the keychain as `cred://` |
+| J2 | Google MCP server | `mcp_servers/google` registers Gmail and Calendar tools behind the gateway, with permission classes |
+| J3 | Gmail `RecruiterInbox` adapter | Polls or watches labelled mail, feeds classification, and is idempotent per message id |
+| J4 | Google Calendar client and reader | `CalendarClient` and `CalendarReader` implemented; the reconciler finds events by idempotency stamp |
+| J5 | Outbound reply drafting and send | `RecruiterReplyDrafter` implemented; `send_email` is `require_approval` and deduped by key |
+| J6 | Embedder implementations | Local and hosted embedders beyond the `hashing` one I3 shipped, with a backfill command, since changing the embedder means re-embedding |
+| J7 | More job-board providers | Lever and Ashby, with normalisation fixtures in the golden set. Only boards with public APIs, not LinkedIn or Indeed |
+| J8 | Integration health checks | Each adapter reports to `integration_health`, and a degraded adapter shows up on `/failures` |
 
-5. **Agent Policies**
-   - Implement rate limiting
-   - Add permission enforcement
-   - Implement approval workflows
-   - Add audit logging
+### Phase K: Reserved route domains
 
-6. **Retrieval System**
-   - Implement vector search
-   - Add job description similarity
-   - Implement RAG pipeline
-   - Add relevance ranking
+| # | Issue | Done when |
+| --- | --- | --- |
+| K1 | File subgraph and planner | `RouteDomain.FILE` is supported, and reads and writes go through the sandboxed files MCP |
+| K2 | Communications subgraph | Triage, summary and draft-reply flows run over the Gmail adapter, with approval before send |
+| K3 | Calendar subgraph | Availability queries and event create or move, with approval before write |
+| K4 | Cross-domain task DAGs | The Supervisor plans a DAG that spans two domains |
+| K5 | Classifier and evals for new domains | Each domain has routing golden cases, and the quality report covers them |
 
-7. **Observability**
-   - Instrument with OpenTelemetry
-   - Add distributed tracing
-   - Create dashboards
-   - Set up alerting
+### Phase L: API security
 
-### Low Priority (Phase 3)
+| # | Issue | Done when |
+| --- | --- | --- |
+| L1 | Authentication | A local token or OIDC dependency on every route except health, with tests for 401. Until then, see [Security Posture](#security-posture-until-phase-l1) |
+| L2 | Actor-scoped authorization | `actor_id` comes from the authenticated identity, not `X-Actor-Id`, and cross-actor reads are denied |
+| L3 | Rate limiting and request limits | Per-actor limits on workflow starts and approvals, and caps on body size |
+| L4 | CORS and security headers | Origins are restricted by config, and the adversarial tests cover the HTTP layer |
 
-8. **Google MCP Server**
-   - Gmail integration
-   - Google Sheets for results
-   - Google Drive for documents
+### Phase M: Operator UI
 
-9. **Files MCP Server**
-    - Resume/CV management
-    - Job application tracking
-    - Document storage
+| # | Issue | Done when |
+| --- | --- | --- |
+| M1 | Approvals inbox | A web view lists pending approvals with the intent diff, and approve and reject call the API |
+| M2 | Application board and workflow progress | A kanban of applications, with live progress from the SSE stream |
+| M3 | Audit and failure views | An audit trail per workflow, with retry controls for recoverable failures |
 
-10. **Advanced Filtering**
-    - ML-based ranking
-    - Skill matching
-    - Recommendation engine
+### Phase N: Packaging and operations
 
-11. **Web UI**
-    - Frontend dashboard
-    - Job search management
-    - Results visualization
+| # | Issue | Done when |
+| --- | --- | --- |
+| N1 | Container images and compose | `docker compose up` starts the API, the worker, Postgres with pgvector, and a collector |
+| N2 | Dashboards and alerts | Dashboards for latency, error rate and dead letters, and alerts on stalled workflows |
+| N3 | Backup and data retention | A scheduled Postgres backup, and a retention policy for the event log, traces and drafts |
+| N4 | Second event transport (optional) | A NATS JetStream or Redis Streams adapter passes the transport contract tests |
 
-### Immediate Actions (This Week)
+### Not yet in the backlog
 
-```bash
-# 1. Start the API and test manually
-python -m personalos.cli api --reload
+The quick start turned up these gaps, and none of the issues above covers
+them:
 
-# 2. Start a job search workflow
-curl -X POST http://localhost:8000/v1/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "find me remote Python backend jobs"}'
+- **Application submitter and application store** (`application_submitter`,
+  `application_store`). An approved submission has no adapter to run it, so
+  the quick start ends there.
+- **Submission idempotency per candidate.** The `submit_application` key
+  (`submit-<dedupe_key>`) is derived from the posting alone. Two searches
+  against one database, or two candidates applying to the same posting,
+  collide with an `IdempotencyConflict`.
 
-# 3. Check its status
-curl http://localhost:8000/v1/workflows/{workflow_id}
+### Open questions
 
-# 4. Run full test suite
-pytest tests/unit/ -v
-
-# 5. Plan real API integration
-# - Choose job board APIs
-# - Get API keys
-# - Implement adapters
-```
+- Is the web UI (Phase M) in scope, or are the CLI and API the intended
+  interface?
+- Is a second event transport (N4) still wanted, or can it be closed?
 
 ---
 
 ## Configuration
 
-### Environment Variables (.env)
+Settings come from the environment, then `.env` in the working directory.
+`.env.example` lists every one. These are the ones you are likely to set:
 
-```env
-# Database
-DATABASE_URL=postgresql://user:password@localhost/personalos
-
-# Redis (optional)
-REDIS_URL=redis://localhost:6379/0
-
-# API Configuration
-API_HOST=0.0.0.0
-API_PORT=8000
-API_RELOAD=true
-
-# Logging
-LOG_LEVEL=INFO
-
-# MCP Configuration
-MCP_FILES_ENABLED=true
-
-# Agent Configuration
-AGENT_MODEL=gpt-4
-AGENT_TEMPERATURE=0.7
-AGENT_MAX_ITERATIONS=10
-```
-
-### CLI Commands
-
-```bash
-# Initialize database
-python -m personalos.cli db_init
-
-# Run API server
-python -m personalos.cli api --host 0.0.0.0 --port 8000 --reload
-
-# Run background worker
-python -m personalos.cli worker
-```
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `DATABASE_URL` | `postgresql://user:password@localhost:5432/personalos` | A bare `postgresql://` URL is rewritten to name the installed `psycopg2` driver. |
+| `API_HOST` / `API_PORT` / `API_WORKERS` | `127.0.0.1` / `8000` / `4` | Keep the host on loopback until Phase L1. |
+| `FILES_ALLOWED_ROOTS` | `[]` | JSON list of absolute paths. If empty, every file read and write is refused. |
+| `WORKER_GRAPHS` | `apps.worker.graphs:build_worker_graphs` | `module:callable`. Empty runs no graphs. |
+| `GREENHOUSE_BOARDS` | `{}` | JSON, board token to employer name. |
+| `LLM_GATEWAY_CONFIG` | empty (rules) | A `ModelConfig` JSON file, such as those in `evals/model_benchmarks/configs/`. |
+| `EMBEDDING_PROVIDER` | `hashing` | Changing it means re-running `ingest-resume`. |
+| `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | Use `text` in a terminal. |
+| `TRACING_ENABLED` / `OTEL_EXPORTER_OTLP_ENDPOINT` | `false` / empty | An OTLP/HTTP collector, for example Jaeger at `http://localhost:4318`. |
+| `SECRET_STORE_SERVICE` | `personalos` | The OS keychain service that holds secrets. Never put a secret in `.env`. |
+| `REDIS_URL` | `redis://localhost:6379/0` | Optional MCP response cache. |
 
 ---
 
-## Support & Documentation
+## Further Reading
 
-- **Project Repository:** [PersonalOS on GitHub](https://github.com/madhurlak0810/PersonalOS)
-- **Issues:** [GitHub Issues](https://github.com/madhurlak0810/PersonalOS/issues)
-- **Code Structure:** See `IMPLEMENTATION_GUIDE.md` (this file)
-- **Build Status:** See `BUILD.md`
-- **Test Results:** See `TEST_RESULTS.md`
-
----
-
-## Summary
-
-PersonalOS is a fully functional, production-ready agent framework with:
-
-✅ **Complete MCP Framework** - Modular, extensible tool architecture
-✅ **15 Passing Tests** - Comprehensive test coverage
-✅ **Production-Ready API** - FastAPI with proper error handling
-✅ **Database Layer** - SQLAlchemy ORM with PostgreSQL
-✅ **Event System** - Pub/sub for decoupled communication
-✅ **Job Search Executor** - 4-step workflow with MCP integration
-
-**Ready for:** Real API integration, background workers, advanced workflows, and production deployment.
-
+- [README.md](README.md): what PersonalOS is, in one page
+- [docs/ARCHITECTURE_BOUNDARIES.md](docs/ARCHITECTURE_BOUNDARIES.md): layer ownership and the dependency direction
+- [docs/EVENT_TRANSPORT.md](docs/EVENT_TRANSPORT.md): the outbox and how to replace it
+- [evals/README.md](evals/README.md): the evaluation harness and model benchmarks
+- [GitHub Issues](https://github.com/madhurlak0810/PersonalOS/issues)

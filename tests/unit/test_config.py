@@ -31,6 +31,13 @@ def test_a_bare_postgres_url_is_rewritten_to_name_the_driver():
     )
 
 
+def test_the_api_binds_to_loopback_by_default(monkeypatch):
+    # Unauthenticated until Phase L1, so only this machine may reach it.
+    monkeypatch.delenv("API_HOST", raising=False)
+
+    assert Settings(_env_file=None).api_host == "127.0.0.1"
+
+
 def test_the_default_url_already_names_the_driver():
     assert Settings().database_url.startswith(f"postgresql+{POSTGRES_DRIVER}://")
 

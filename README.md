@@ -82,27 +82,15 @@ Layer boundaries are enforced in CI by `scripts/check_boundaries.py`. See `docs/
 
 ## Quick start
 
-Requires Python 3.10+ and PostgreSQL with the `vector` extension (the `pgvector/pgvector:pg16` image works).
+[`IMPLEMENTATION_GUIDE.md#local-quick-start`](IMPLEMENTATION_GUIDE.md#local-quick-start) takes a fresh clone to a job search waiting on your approval, against a fake job board, with no API keys. `python scripts/smoke_quickstart.py` runs the same walkthrough in one command, and CI runs it on every pull request.
 
-```bash
-pip install -e ".[dev,test]"
-cp .env.example .env   # set DATABASE_URL and FILES_ALLOWED_ROOTS
-python -m personalos.cli db_init
-python -m personalos.cli api --reload
-```
-
-`FILES_ALLOWED_ROOTS` is a JSON list of absolute paths; left empty, every file read and write is rejected. Secrets (refresh tokens, API keys, the OAuth client secret) go in the OS keychain, never in `.env`.
-
-Load your resume (PDF, DOCX, Markdown or text) into the evidence index that job matching and tailored drafts cite. The path must be inside `FILES_ALLOWED_ROOTS`; re-running on an unchanged file is a no-op. `POST /v1/evidence/documents` with `{"path": ...}` does the same over HTTP.
-
-```bash
-python -m personalos.cli ingest-resume resume.pdf
-```
+The API is unauthenticated until Phase L1 and binds to `127.0.0.1` by default; see [Security posture](IMPLEMENTATION_GUIDE.md#security-posture-until-phase-l1) before exposing it.
 
 Run the checks CI runs:
 
 ```bash
 python scripts/check_boundaries.py
+python scripts/check_guide_tree.py
 pytest tests
 ruff check personalos apps mcp_servers tests scripts
 ```
@@ -111,12 +99,6 @@ See `IMPLEMENTATION_GUIDE.md` for data flow and API details.
 
 ## Status
 
-Actively in development. The foundation is in place: contracts and boundaries, the data model, the orchestration runtime, and the security boundary, covered by 600+ tests.
+Actively in development. Built: contracts and boundaries, the data model, the orchestration runtime, the security boundary, the API and worker, the outbox, tracing and logging, the evaluation harness and adversarial tests, covered by 2,000+ tests.
 
-Still to come:
-
-- Deeper job-search workflow: application lifecycle state machine, tailored artifacts, recruiter-event classification
-- File, Communications, and Calendar subgraphs (the route domains are reserved) and the Google MCP server
-- API endpoints for workflows, approvals, the application board, and the audit trail, with streaming progress
-- Outbox publisher and a long-running worker process
-- End-to-end tracing, an evaluation harness, and adversarial tests
+Still to come: adapters for the ports the worker reports as unbound (application submission, mailbox, calendar), the File, Communications and Calendar subgraphs, the Google MCP server, and API authentication. See [Next Steps](IMPLEMENTATION_GUIDE.md#next-steps).

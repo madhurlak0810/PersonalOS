@@ -31,9 +31,11 @@ from sqlalchemy.orm import sessionmaker
 from apps.api.main import create_app
 from apps.api.routes.failures import build_failure_services, get_failure_services
 from apps.api.routes.workflows import build_workflow_services, get_workflow_services
+from apps.worker import fake_providers
 from apps.worker.graphs import build_worker_graphs
 from apps.worker.main import WorkerGraphs, build_worker, load_graph_factory, log_wired_graphs
 from apps.worker.unconfigured import (
+    APPLICATION_SUBMITTER_PORT,
     DRAFT_WRITER_PORT,
     EMBEDDER_PORT,
     JOB_BOARDS_PORT,
@@ -44,15 +46,16 @@ from apps.worker.unconfigured import (
 )
 from personalos import bootstrap
 from personalos.config import Settings
+from personalos.domain.artifacts import validate_draft
 from personalos.domain.errors import FailureClass, PortNotConfigured
 from personalos.domain.failures import classify, parse_stored_error
-from personalos.domain.models import OutboxEventStatus
+from personalos.domain.models import ArtifactType, OutboxEventStatus
 from personalos.domain.workflow import JOB_SEARCH_THREAD_NAMESPACE, SUPERVISOR_THREAD_NAMESPACE
 from personalos.persistence.checkpointer import SqlAlchemyCheckpointSaver
 from personalos.persistence.models import Base, CandidateProfileModel, OutboxEventModel
 from personalos.persistence.search_profiles import SqlSearchProfileStore
 from personalos.persistence.workflow_commands import WORKFLOW_COMMAND_EVENT
-from tests.fixtures import evidence_ingestion
+from tests.fixtures import artifact_prep, evidence_ingestion
 from tests.fixtures import job_search_fakes as fakes
 
 DEFAULT_FACTORY = "apps.worker.graphs:build_worker_graphs"
@@ -154,6 +157,31 @@ def test_an_override_drops_the_port_it_replaces_from_the_unbound_list(factory):
 
     assert JOB_BOARDS_PORT not in graphs.unbound_ports
     assert MAILBOX_PORT in graphs.unbound_ports
+
+
+def test_the_fake_provider_factory_binds_the_job_board_and_draft_writer(factory):
+    # What the quick start and its smoke test run: everything else unbound,
+    # so the walkthrough ends where the guide says it does.
+    graphs = fake_providers.build_worker_graphs(factory)
+
+    assert set(graphs.runners) == {SUPERVISOR_THREAD_NAMESPACE, JOB_SEARCH_THREAD_NAMESPACE}
+    assert JOB_BOARDS_PORT not in graphs.unbound_ports
+    assert DRAFT_WRITER_PORT not in graphs.unbound_ports
+    assert APPLICATION_SUBMITTER_PORT in graphs.unbound_ports
+
+
+@pytest.mark.parametrize("artifact_type", [ArtifactType.RESUME, ArtifactType.COVER_LETTER])
+def test_extractive_drafts_restate_their_evidence_and_pass_validation(artifact_type):
+    evidence = artifact_prep.records()
+
+    proposal = asyncio.run(
+        fake_providers.ExtractiveDraftWriter().write(
+            artifact_type, artifact_prep.posting(), fakes.profile(), evidence
+        )
+    )
+
+    assert [segment.text for segment in proposal.segments] == [r.text for r in evidence]
+    assert validate_draft(proposal, evidence).ok
 
 
 def test_the_setting_defaults_to_the_shipped_factory_and_can_be_overridden(monkeypatch):
