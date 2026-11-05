@@ -31,8 +31,10 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
-    # API
-    api_host: str = "0.0.0.0"
+    # API. Loopback only by default: the API is unauthenticated until Phase L1,
+    # so anything that can reach the port can start workflows and decide
+    # approvals. Bind wider only behind something that authenticates callers.
+    api_host: str = "127.0.0.1"
     api_port: int = 8000
     api_workers: int = 4
 

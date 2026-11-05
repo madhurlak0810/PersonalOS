@@ -1,0 +1,8 @@
+{
+  "target_roles": ["Backend Engineer"],
+  "target_locations": ["Remote"],
+  "work_modes": ["remote"],
+  "keywords": ["python", "postgres"],
+  "must_have_skills": ["python"],
+  "salary_min": 120000
+}
