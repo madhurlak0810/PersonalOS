@@ -79,6 +79,26 @@ class Vector(TypeDecorator):
     not by the database, mirroring `GUID`'s dialect split above.
     """
 
+    class Comparator(TypeDecorator.Comparator):
+        """pgvector's distance operators, on the decorated column.
+
+        A `TypeDecorator`'s column compares as the decorator, not as the type
+        `load_dialect_impl` picks, so pgvector's own comparator never reaches
+        the mapped attribute. These are its operators restated; the right-hand
+        side binds as a `Vector`, so it is sent as a pgvector literal. Postgres
+        only: SQLite has no such operators, and ranks in Python instead.
+        """
+
+        def l2_distance(self, other):
+            return self.op("<->", return_type=Float)(other)
+
+        def max_inner_product(self, other):
+            return self.op("<#>", return_type=Float)(other)
+
+        def cosine_distance(self, other):
+            return self.op("<=>", return_type=Float)(other)
+
+    comparator_factory = Comparator
     impl = Text
     cache_ok = True
 

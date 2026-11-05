@@ -14,11 +14,18 @@ import math
 from datetime import datetime
 
 import pytest
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from personalos.persistence.models import Base, UserModel
+from personalos.persistence.models import (
+    Base,
+    EvidenceChunkModel,
+    JobPostingEmbeddingModel,
+    MessageEmbeddingModel,
+    UserModel,
+)
 from personalos.persistence.repositories import (
     ApplicationRepository,
     CommunicationEventRepository,
@@ -334,3 +341,30 @@ def test_message_embedding_similarity_search_above_threshold(tmp_path):
     finally:
         session.close()
         engine.dispose()
+
+
+# ----------------------------------------------------------------------
+# The Postgres branch: ranking is pushed into pgvector's operators.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "model", [EvidenceChunkModel, JobPostingEmbeddingModel, MessageEmbeddingModel]
+)
+@pytest.mark.parametrize(
+    ("comparator", "operator"),
+    [("cosine_distance", "<=>"), ("l2_distance", "<->"), ("max_inner_product", "<#>")],
+)
+def test_the_postgres_branch_compiles_to_pgvector_operators(model, comparator, operator):
+    # The repositories call `cosine_distance` on the mapped column when the
+    # session is on PostgreSQL. `Vector` is a TypeDecorator, so the column
+    # only has that comparator because `Vector.Comparator` provides it; the
+    # SQLite tests above never take this branch, and it went unnoticed until
+    # the quick-start smoke test ran on Postgres.
+    dialect = postgresql.psycopg2.dialect()
+    distance = getattr(model.embedding, comparator)([0.5, 0.25])
+    compiled = select(model.id, distance).order_by(distance).compile(dialect=dialect)
+
+    assert f"{model.__tablename__}.embedding {operator} %(embedding_1)s" in str(compiled)
+    bind = compiled.binds["embedding_1"].type.dialect_impl(dialect).bind_processor(dialect)
+    assert bind([0.5, 0.25]) == "[0.5,0.25]"
