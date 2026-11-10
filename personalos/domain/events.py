@@ -85,6 +85,12 @@ class EventType:
     #: `attempts`, `error` (redacted).
     TOOL_OPERATION_FAILED = "tool.operation.failed"
 
+    #: An interview event this system put on the calendar was moved by someone
+    #: else -- the candidate in the calendar UI, or an updated invite. Its prep
+    #: blocks need re-planning around the new time. Payload: `user_id`, and
+    #: `event` (a dumped `personalos.domain.interview_scheduling.CalendarEvent`).
+    CALENDAR_EVENT_CHANGED = "calendar.event_changed"
+
 
 class EventEnvelope(BaseModel):
     """One event, as every producer stages it and every consumer reads it."""

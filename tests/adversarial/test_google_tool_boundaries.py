@@ -15,7 +15,7 @@ import pytest
 
 from personalos.domain.models import ActionTarget
 from personalos.mcp.stdio import decode_call_result
-from personalos.policy import IntentOrigin, PolicyDenied
+from personalos.policy import ApprovalRequired, IntentOrigin, PolicyDenied
 from personalos.policy.rules import GOOGLE_NODE_TOOL_ALLOWLISTS
 from tests.fixtures.fake_google import VARIANTS, GoogleHarness, approval_for, b64url, gmail_message
 
@@ -49,9 +49,32 @@ def test_the_default_allowlists_keep_send_and_delete_narrow():
     }
     assert senders == {RESPONDER}
     assert "google.gmail_send_message" not in GOOGLE_NODE_TOOL_ALLOWLISTS[DRAFTER]
-    assert not any(
-        "google.calendar_delete_event" in t for t in GOOGLE_NODE_TOOL_ALLOWLISTS.values()
+    # Only interview scheduling may cancel an event -- behind approval, and
+    # only one PersonalOS stamped (`CalendarActionExecutor`).
+    deleters = {
+        n
+        for n, tools in GOOGLE_NODE_TOOL_ALLOWLISTS.items()
+        if "google.calendar_delete_event" in tools
+    }
+    assert deleters == {SCHEDULER}
+
+
+async def test_the_scheduler_cannot_delete_an_event_without_approval(google):
+    google.api.add_event(
+        "primary",
+        {
+            "id": "dentist",
+            "summary": "Dentist",
+            "start": {"dateTime": "2026-10-01T09:00:00+00:00"},
+            "end": {"dateTime": "2026-10-01T10:00:00+00:00"},
+        },
     )
+    intent = google.intent(
+        "calendar_delete_event", {"calendar_id": "primary", "event_id": "dentist"}, node=SCHEDULER
+    )
+    with pytest.raises(ApprovalRequired):
+        await google.gateway.dispatch(intent)
+    assert "dentist" in google.api.events["primary"]
 
 
 @pytest.mark.parametrize("origin", [IntentOrigin.LLM, IntentOrigin.SYSTEM, IntentOrigin.USER])
@@ -97,11 +120,12 @@ async def test_a_node_with_no_entry_reaches_no_google_tool(google, node):
     assert denied.value.decision.rule == "node_tool_allowlist"
 
 
-async def test_no_node_can_delete_an_event_by_default(google):
-    with pytest.raises(PolicyDenied):
-        await google.dispatch(
-            "calendar_delete_event", {"event_id": "e1"}, node=SCHEDULER, approve=True
-        )
+async def test_no_node_but_the_scheduler_can_delete_an_event(google):
+    for node in (DRAFTER, RESPONDER, "graph:job_search#classify_recruiter_events"):
+        with pytest.raises(PolicyDenied):
+            await google.dispatch(
+                "calendar_delete_event", {"event_id": "e1"}, node=node, approve=True
+            )
 
 
 # --- Hostile and malformed mail -----------------------------------------------

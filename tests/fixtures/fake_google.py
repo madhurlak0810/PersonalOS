@@ -150,6 +150,8 @@ class FakeGoogleApi:
     calls: list[Call] = field(default_factory=list)
     #: `(method, url regex) -> payload or callable(call) -> payload`, consulted first.
     overrides: dict[tuple[str, str], Any] = field(default_factory=dict)
+    #: Make the next event insert land, then answer 504 -- the lost response.
+    fail_next_insert_after_commit: bool = False
 
     def __post_init__(self):
         self._ids = itertools.count(1)
@@ -219,36 +221,118 @@ class FakeGoogleApi:
     # Calendar ------------------------------------------------------------
 
     def _calendar(self, method: str, path: str, call: Call):
+        if method == "POST" and path == "/freeBusy":
+            return self._freebusy(call)
         match = re.fullmatch(r"/calendars/([^/]+)/events(?:/([^/]+))?", path)
         if not match:
             raise_for_status(404)
         calendar_id, event_id = match.group(1), match.group(2)
         calendar = self.events.setdefault(calendar_id, {})
         if method == "GET" and event_id is None:
-            items = sorted(calendar.values(), key=lambda e: e["start"].get("dateTime", ""))
-            return {"kind": "calendar#events", "items": items[: int(call.params["maxResults"])]}
+            return self._list(calendar, call)
         if method == "POST" and event_id is None:
-            new_id = f"evt{next(self._ids)}"
-            event = {
-                "id": new_id,
-                "status": "confirmed",
-                "htmlLink": f"https://calendar.google.com/event?eid={new_id}",
-                **call.json,
-            }
-            calendar[new_id] = event
-            return event
+            return self._insert(calendar, call.json)
         if event_id in self.deleted_events:
             raise_for_status(410)
         if event_id not in calendar:
             raise_for_status(404)
+        if method == "GET":
+            return calendar[event_id]
         if method == "PATCH":
-            calendar[event_id] = {**calendar[event_id], **call.json}
+            calendar[event_id] = self._patched(calendar[event_id], call.json)
             return calendar[event_id]
         if method == "DELETE":
             del calendar[event_id]
             self.deleted_events.add(event_id)
             return None
         raise_for_status(404)
+
+    def _list(self, calendar: dict[str, Any], call: Call) -> dict[str, Any]:
+        items = sorted(calendar.values(), key=lambda e: e["start"].get("dateTime", ""))
+        wanted = call.params.get("privateExtendedProperty") or []
+        for pair in [wanted] if isinstance(wanted, str) else wanted:
+            key, _, value = pair.partition("=")
+            items = [e for e in items if _private(e).get(key) == value]
+        time_min, time_max = call.params.get("timeMin"), call.params.get("timeMax")
+        if time_min or time_max:
+            lo = datetime.fromisoformat(time_min) if time_min else None
+            hi = datetime.fromisoformat(time_max) if time_max else None
+            items = [e for e in items if _overlaps(e, lo, hi)]
+        size = int(call.params["maxResults"])
+        offset = int(call.params.get("pageToken") or 0)
+        body: dict[str, Any] = {"kind": "calendar#events", "items": items[offset : offset + size]}
+        if offset + size < len(items):
+            body["nextPageToken"] = str(offset + size)
+        return body
+
+    def _patched(self, current: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+        patch = dict(patch)
+        if "extendedProperties" in patch:
+            # PATCH merges nested objects: named keys change, others stay.
+            private = {**_private(current), **patch.pop("extendedProperties").get("private", {})}
+            patch["extendedProperties"] = {"private": private}
+        return {**current, **patch, "etag": self._etag()}
+
+    def _etag(self) -> str:
+        return f'"{next(self._ids)}"'
+
+    def _insert(self, calendar: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+        lose_response = self.fail_next_insert_after_commit
+        self.fail_next_insert_after_commit = False
+        new_id = f"evt{next(self._ids)}"
+        event = {
+            "id": new_id,
+            "status": "confirmed",
+            "etag": self._etag(),
+            "htmlLink": f"https://calendar.google.com/event?eid={new_id}",
+            **body,
+        }
+        calendar[new_id] = event
+        if lose_response:
+            # The insert landed; the caller sees a gateway timeout.
+            raise_for_status(504)
+        return event
+
+    def _freebusy(self, call: Call) -> dict[str, Any]:
+        lo = datetime.fromisoformat(call.json["timeMin"])
+        hi = datetime.fromisoformat(call.json["timeMax"])
+        calendars: dict[str, Any] = {}
+        for item in call.json["items"]:
+            calendar_id = item["id"]
+            if calendar_id not in self.events:
+                calendars[calendar_id] = {"busy": [], "errors": [{"reason": "notFound"}]}
+                continue
+            busy = []
+            for event in self.events[calendar_id].values():
+                if event.get("transparency") == "transparent" or "dateTime" not in event["start"]:
+                    continue
+                start = datetime.fromisoformat(event["start"]["dateTime"])
+                end = datetime.fromisoformat(event["end"]["dateTime"])
+                if start < hi and end > lo:
+                    busy.append(
+                        {"start": max(start, lo).isoformat(), "end": min(end, hi).isoformat()}
+                    )
+            calendars[calendar_id] = {"busy": sorted(busy, key=lambda b: b["start"])}
+        return {"kind": "calendar#freeBusy", "calendars": calendars}
+
+    def move_event(self, calendar_id: str, event_id: str, start: datetime, end: datetime) -> None:
+        """Move an event the way the candidate would, in the calendar UI."""
+        event = self.events[calendar_id][event_id]
+        event["start"] = {**event["start"], "dateTime": start.isoformat()}
+        event["end"] = {**event["end"], "dateTime": end.isoformat()}
+        event["etag"] = self._etag()
+
+
+def _private(event: dict[str, Any]) -> dict[str, str]:
+    return (event.get("extendedProperties") or {}).get("private", {})
+
+
+def _overlaps(event: dict[str, Any], lo: datetime | None, hi: datetime | None) -> bool:
+    if "dateTime" not in event["start"]:
+        return False
+    start = datetime.fromisoformat(event["start"]["dateTime"])
+    end = datetime.fromisoformat(event["end"]["dateTime"])
+    return (hi is None or start < hi) and (lo is None or end > lo)
 
 
 def decode_raw(raw: str):

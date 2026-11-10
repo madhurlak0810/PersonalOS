@@ -317,7 +317,12 @@ GOOGLE_TOOL_ARGUMENTS = {
         "time_max",
         "query",
         "max_results",
+        "private_properties",
+        "time_zone",
+        "page_token",
     },
+    "google.calendar_get_event": {"calendar_id", "event_id", "time_zone"},
+    "google.calendar_freebusy": {"calendar_ids", "time_min", "time_max", "time_zone"},
     "google.calendar_create_event": {
         "calendar_id",
         "summary",
@@ -327,6 +332,7 @@ GOOGLE_TOOL_ARGUMENTS = {
         "location",
         "attendees",
         "private_properties",
+        "time_zone",
     },
     "google.calendar_update_event": {
         "calendar_id",
@@ -336,6 +342,8 @@ GOOGLE_TOOL_ARGUMENTS = {
         "end",
         "description",
         "location",
+        "private_properties",
+        "time_zone",
     },
     "google.calendar_delete_event": {"calendar_id", "event_id"},
 }
@@ -347,9 +355,11 @@ def _job_search_node(node: str) -> str:
 
 #: Which job-search node may call which Google tool, keyed by the
 #: `requested_by` the node stamps on its intents. Deliberately narrow:
-#: only the recruiter-response node can send mail, only interview scheduling
-#: touches the calendar, and no node may delete an event until one is
-#: listed here on purpose.
+#: only the recruiter-response node can send mail, and only interview
+#: scheduling touches the calendar. That node may delete an event: a
+#: cancellation is DESTRUCTIVE, so it is held for approval like every write,
+#: and `CalendarActionExecutor` refuses to cancel an event this system did not
+#: stamp.
 GOOGLE_NODE_TOOL_ALLOWLISTS: Mapping[str, frozenset[str]] = {
     _job_search_node("classify_recruiter_events"): frozenset(
         {"google.gmail_search", "google.gmail_read_message"}
@@ -368,8 +378,11 @@ GOOGLE_NODE_TOOL_ALLOWLISTS: Mapping[str, frozenset[str]] = {
     _job_search_node("plan_interview_schedule"): frozenset(
         {
             "google.calendar_list_events",
+            "google.calendar_get_event",
+            "google.calendar_freebusy",
             "google.calendar_create_event",
             "google.calendar_update_event",
+            "google.calendar_delete_event",
         }
     ),
 }

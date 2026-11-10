@@ -45,12 +45,18 @@ from mcp_servers.google.api import (
 )
 from mcp_servers.google.schemas import (
     CalendarAttendee,
+    CalendarBusyInterval,
     CalendarCreateIntent,
     CalendarCreateParams,
     CalendarDeleteIntent,
     CalendarDeleteParams,
     CalendarDeleteResult,
     CalendarEventResult,
+    CalendarFreeBusyCalendar,
+    CalendarFreeBusyParams,
+    CalendarFreeBusyResult,
+    CalendarGetParams,
+    CalendarGetResult,
     CalendarListParams,
     CalendarListResult,
     CalendarUpdateIntent,
@@ -69,13 +75,14 @@ from mcp_servers.google.schemas import (
     RawDraft,
     RawEvent,
     RawEventList,
+    RawFreeBusy,
     RawHeader,
     RawMessage,
     RawMessageList,
     RawSentMessage,
 )
 from personalos.domain.credentials import AccessToken, AccessTokenProvider
-from personalos.domain.errors import ValidationFailed
+from personalos.domain.errors import NotFound, ValidationFailed
 from personalos.domain.integrations import (
     CALENDAR_EVENTS_SCOPE,
     CALENDAR_READONLY_SCOPE,
@@ -257,6 +264,7 @@ def _event(raw: RawEvent) -> CalendarEventResult:
     start, all_day = when(raw.start)
     end, _ = when(raw.end)
     private = raw.extendedProperties.private if raw.extendedProperties else {}
+    zone = (raw.start.timeZone if raw.start else None) or None
     return CalendarEventResult(
         event_id=raw.id,
         status=_clean(raw.status, 32) or None,
@@ -266,6 +274,9 @@ def _event(raw: RawEvent) -> CalendarEventResult:
         start=start,
         end=end,
         all_day=all_day,
+        time_zone=_clean(zone, 64) or None,
+        busy=(raw.transparency or "opaque") != "transparent",
+        etag=_clean(raw.etag, 256) or None,
         html_link=raw.htmlLink if raw.htmlLink and raw.htmlLink.startswith("https://") else None,
         attendees=[
             CalendarAttendee(
@@ -281,15 +292,23 @@ def _event(raw: RawEvent) -> CalendarEventResult:
     )
 
 
-def _event_time(value) -> dict[str, str]:
-    return {"dateTime": value.isoformat()}
+def _event_time(value, time_zone: str | None = None) -> dict[str, str]:
+    """A `start`/`end` body: the instant with its offset, and the IANA zone if given.
+
+    The offset alone pins the instant; the zone is what Google stores the event
+    in, so a recurring or later-edited event keeps local time across DST.
+    """
+    body = {"dateTime": value.isoformat()}
+    if time_zone:
+        body["timeZone"] = time_zone
+    return body
 
 
 # --- The tools ----------------------------------------------------------------
 
 
 class GoogleWorkspaceTools:
-    """The eight Gmail and Calendar tools, as async methods.
+    """The ten Gmail and Calendar tools, as async methods.
 
     Each takes the gateway-attached `ToolAuthorization` and its typed params,
     and returns a JSON-ready dict built from an output model.
@@ -463,6 +482,14 @@ class GoogleWorkspaceTools:
             query["timeMax"] = params.time_max.isoformat()
         if params.query:
             query["q"] = params.query
+        if params.private_properties:
+            query["privateExtendedProperty"] = [
+                f"{key}={value}" for key, value in sorted(params.private_properties.items())
+            ]
+        if params.time_zone:
+            query["timeZone"] = params.time_zone
+        if params.page_token:
+            query["pageToken"] = params.page_token
         listing = _parse(
             RawEventList,
             await self._call(token, "GET", self._events_url(params.calendar_id), params=query),
@@ -472,6 +499,75 @@ class GoogleWorkspaceTools:
             calendar_id=params.calendar_id,
             events=[_event(item) for item in listing.items[: params.max_results]],
             next_page_token=listing.nextPageToken,
+            time_zone=_clean(listing.timeZone, 64) or None,
+        ).model_dump(mode="json")
+
+    async def calendar_get_event(
+        self, authorization: ToolAuthorization, params: CalendarGetParams
+    ) -> dict[str, Any]:
+        """Read one event. Missing or deleted is `found: false`, not an error."""
+        token = await self._token(authorization, CALENDAR_READONLY_SCOPE)
+        query: dict[str, Any] = {}
+        if params.time_zone:
+            query["timeZone"] = params.time_zone
+        try:
+            body = await self._call(
+                token,
+                "GET",
+                self._events_url(params.calendar_id, params.event_id),
+                params=query or None,
+            )
+        except NotFound:
+            # GoogleGone is a NotFound too: deleted is as good as absent here.
+            return CalendarGetResult(
+                calendar_id=params.calendar_id, found=False, event=None
+            ).model_dump(mode="json")
+        event = _parse(RawEvent, body, "event")
+        if event.id != params.event_id:
+            raise GoogleResponseInvalid("Google returned a different event than was asked for")
+        if event.status == "cancelled":
+            return CalendarGetResult(
+                calendar_id=params.calendar_id, found=False, event=None
+            ).model_dump(mode="json")
+        return CalendarGetResult(
+            calendar_id=params.calendar_id, found=True, event=_event(event)
+        ).model_dump(mode="json")
+
+    async def calendar_freebusy(
+        self, authorization: ToolAuthorization, params: CalendarFreeBusyParams
+    ) -> dict[str, Any]:
+        """Busy intervals for each calendar in a window. Nothing about what the events are."""
+        token = await self._token(authorization, CALENDAR_READONLY_SCOPE)
+        body: dict[str, Any] = {
+            "timeMin": params.time_min.isoformat(),
+            "timeMax": params.time_max.isoformat(),
+            "items": [{"id": calendar_id} for calendar_id in params.calendar_ids],
+        }
+        if params.time_zone:
+            body["timeZone"] = params.time_zone
+        answer = _parse(
+            RawFreeBusy,
+            await self._call(token, "POST", f"{self.calendar_base}/freeBusy", json=body),
+            "free/busy answer",
+        )
+        calendars: dict[str, CalendarFreeBusyCalendar] = {}
+        for calendar_id in params.calendar_ids:
+            found = answer.calendars.get(calendar_id)
+            if found is None:
+                calendars[calendar_id] = CalendarFreeBusyCalendar(busy=[], errors=["notFound"])
+                continue
+            calendars[calendar_id] = CalendarFreeBusyCalendar(
+                busy=[
+                    CalendarBusyInterval(start=b.start.isoformat(), end=b.end.isoformat())
+                    for b in found.busy
+                    if b.end > b.start
+                ],
+                errors=[_clean(e.reason, 64) or "unknown" for e in found.errors],
+            )
+        return CalendarFreeBusyResult(
+            time_min=params.time_min.isoformat(),
+            time_max=params.time_max.isoformat(),
+            calendars=calendars,
         ).model_dump(mode="json")
 
     async def calendar_create_event(
@@ -481,8 +577,8 @@ class GoogleWorkspaceTools:
         token = await self._token(authorization, CALENDAR_EVENTS_SCOPE)
         body: dict[str, Any] = {
             "summary": params.summary,
-            "start": _event_time(params.start),
-            "end": _event_time(params.end),
+            "start": _event_time(params.start, params.time_zone),
+            "end": _event_time(params.end, params.time_zone),
         }
         if params.description is not None:
             body["description"] = params.description
@@ -516,13 +612,16 @@ class GoogleWorkspaceTools:
         if params.summary is not None:
             body["summary"] = params.summary
         if params.start is not None:
-            body["start"] = _event_time(params.start)
+            body["start"] = _event_time(params.start, params.time_zone)
         if params.end is not None:
-            body["end"] = _event_time(params.end)
+            body["end"] = _event_time(params.end, params.time_zone)
         if params.description is not None:
             body["description"] = params.description
         if params.location is not None:
             body["location"] = params.location
+        if params.private_properties:
+            # PATCH merges nested objects, so keys not named here are kept.
+            body["extendedProperties"] = {"private": dict(params.private_properties)}
         event = _parse(
             RawEvent,
             await self._call(
@@ -642,6 +741,24 @@ GOOGLE_TOOL_SPECS: Sequence[GoogleToolSpec] = (
         CalendarListResult,
         CALENDAR_READONLY_SCOPE,
         "calendar_list_events",
+    ),
+    GoogleToolSpec(
+        "calendar_get_event",
+        "Read one calendar event by id; `found` is false if it does not exist." + _UNTRUSTED,
+        CalendarGetParams,
+        CalendarGetParams,
+        CalendarGetResult,
+        CALENDAR_READONLY_SCOPE,
+        "calendar_get_event",
+    ),
+    GoogleToolSpec(
+        "calendar_freebusy",
+        "Busy intervals for calendars in a time window. Returns no event details.",
+        CalendarFreeBusyParams,
+        CalendarFreeBusyParams,
+        CalendarFreeBusyResult,
+        CALENDAR_READONLY_SCOPE,
+        "calendar_freebusy",
     ),
     GoogleToolSpec(
         "calendar_create_event",

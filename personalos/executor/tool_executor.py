@@ -96,6 +96,7 @@ ACTION_TOOLS: Mapping[ActionKind, str] = MappingProxyType(
         ActionKind.OVERWRITE_DOCUMENT: "files.overwrite_document",
         ActionKind.CREATE_CALENDAR_EVENT: "google.calendar_create_event",
         ActionKind.UPDATE_CALENDAR_EVENT: "google.calendar_update_event",
+        ActionKind.CANCEL_CALENDAR_EVENT: "google.calendar_delete_event",
     }
 )
 

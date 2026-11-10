@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     # Which connected Google account the Google tools act on, by address.
     # Empty means the most recently connected active account.
     google_account: str = ""
+    # The IANA zone (e.g. "America/New_York") calendar events are written in
+    # and all-day events are read in. Required for the calendar to be wired:
+    # times are never interpreted in the server's local zone.
+    calendar_time_zone: str = ""
+    # Which calendar interview events and prep blocks go on.
+    calendar_id: str = "primary"
 
     # File tools. The only directories the files MCP server may read or write,
     # as absolute paths; the first is the one relative paths resolve against.

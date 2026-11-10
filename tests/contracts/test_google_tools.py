@@ -31,6 +31,8 @@ from tests.fixtures.fake_google import (
 GOOGLE_TOOLS = [
     "calendar_create_event",
     "calendar_delete_event",
+    "calendar_freebusy",
+    "calendar_get_event",
     "calendar_list_events",
     "calendar_update_event",
     "gmail_create_draft",
@@ -61,7 +63,7 @@ async def google(request):
 # --- Surface ------------------------------------------------------------------
 
 
-async def test_both_variants_expose_the_same_eight_tools(google):
+async def test_both_variants_expose_the_same_ten_tools(google):
     assert google.tool_names() == GOOGLE_TOOLS
 
 
@@ -71,6 +73,8 @@ async def test_both_variants_expose_the_same_eight_tools(google):
         ("gmail_search", PermissionClass.READ_EXTERNAL),
         ("gmail_read_message", PermissionClass.READ_EXTERNAL),
         ("calendar_list_events", PermissionClass.READ_EXTERNAL),
+        ("calendar_get_event", PermissionClass.READ_EXTERNAL),
+        ("calendar_freebusy", PermissionClass.READ_EXTERNAL),
         ("gmail_create_draft", PermissionClass.WRITE_REVERSIBLE),
         ("gmail_send_message", PermissionClass.WRITE_EXTERNAL),
         ("calendar_create_event", PermissionClass.WRITE_EXTERNAL),

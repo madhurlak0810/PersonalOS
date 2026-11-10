@@ -260,6 +260,18 @@ desktop browser on the same machine, because Google redirects to
    parent spawns `python -m personalos.cli mcp-google` and talks to it over
    stdin/stdout (`bootstrap.connect_google_mcp_stdio`).
 
+8. For interview scheduling on Google Calendar, enable `calendar.write`
+   (step 5) and set `CALENDAR_TIME_ZONE` to an IANA zone such as
+   `America/New_York`. With both that and `MCP_GOOGLE_ENABLED` set, the
+   worker binds `GoogleCalendar` as the calendar reader and the calendar
+   executor's client (`bootstrap.build_google_calendar`). Reads and
+   free/busy need no approval. Creating, moving or cancelling an event is
+   always held for approval, and PersonalOS only changes events it created
+   (the ones that carry its `personalos_idempotency_key` stamp).
+   `bootstrap.build_calendar_change_scanner` finds interviews that were moved
+   in the calendar UI and publishes `calendar.event_changed`, which queues a
+   re-plan of their prep blocks.
+
 The API does the same over HTTP: `POST /v1/integrations/google/connect`
 returns an `authorization_url`, Google redirects to
 `/v1/integrations/google/callback`, and `GET /v1/integrations` reports the
@@ -1471,6 +1483,8 @@ Settings come from the environment, then `.env` in the working directory.
 | `GOOGLE_OAUTH_PUBLISHING_STATUS` | `testing` | `testing` records Google connections as expiring after 7 days, as Google does for unverified apps. |
 | `MCP_GOOGLE_ENABLED` | `false` | Registers the Gmail and Calendar MCP server. Connect an account first. |
 | `GOOGLE_ACCOUNT` | empty | Which connected Google account the tools act on. If empty, the most recently connected active account is used. |
+| `CALENDAR_TIME_ZONE` | empty | The IANA zone calendar events are written in. All-day events are also read in this zone. Interview scheduling on Google Calendar stays unbound until it is set. The server's local zone is never used. |
+| `CALENDAR_ID` | `primary` | The calendar that interview events and prep blocks go on. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Optional MCP response cache. |
 
 ---

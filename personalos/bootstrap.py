@@ -38,6 +38,7 @@ from personalos.executor.calendar import (
 )
 from personalos.executor.credentials import CredentialBroker
 from personalos.executor.document_reader import GatewayDocumentReader
+from personalos.executor.google_calendar import CalendarChangeScanner, GoogleCalendar
 from personalos.executor.google_connect import GoogleConnectionReader, GoogleConnector
 from personalos.executor.job_discovery import GatewayJobProvider
 from personalos.executor.tool_executor import ProviderReconciler, ToolExecutor
@@ -801,12 +802,63 @@ def build_calendar_action_executor(
     or by event id -- before `ToolExecutor` is allowed to send it again.
     """
     return build_tool_executor(
-        CalendarActionExecutor(client, fallback=fallback),
+        CalendarActionExecutor(client, fallback=fallback, workflow_id=workflow_id),
         session_factory,
         workflow_id=workflow_id,
         policy=policy,
         reconciler=CalendarReconciler(client),
     )
+
+
+def build_google_calendar(
+    gateway: ToolGateway | None = None,
+    *,
+    policy: PolicyEngine | None = None,
+    time_zone: str | None = None,
+    calendar_id: str | None = None,
+) -> GoogleCalendar:
+    """Build the calendar the Job Search graph reads and the calendar executor writes.
+
+    One object serves both ports (`calendar_reader=` and the `client` of
+    `build_calendar_action_executor`), so a plan made after a write sees it.
+    Every call goes through `gateway` -- by default the durable-policy gateway
+    over the global MCP manager -- to the `google.calendar_*` tools.
+
+    Raises `PortNotConfigured` until the Google server is enabled and
+    `CALENDAR_TIME_ZONE` names the IANA zone events are written in.
+    """
+    zone = time_zone if time_zone is not None else settings.calendar_time_zone
+    if not zone:
+        raise PortNotConfigured(
+            "CALENDAR_TIME_ZONE is not set; name the IANA zone calendar events are written "
+            "in, e.g. 'America/New_York'",
+            port="calendar",
+        )
+    if gateway is None:
+        if not settings.mcp_google_enabled:
+            raise PortNotConfigured(
+                "MCP_GOOGLE_ENABLED is off; connect Google (`personalos.cli auth google`) "
+                "and enable it",
+                port="calendar",
+            )
+        gateway = build_tool_gateway(policy=policy or build_policy_engine())
+    return GoogleCalendar(
+        gateway,
+        time_zone=zone,
+        calendar_id=calendar_id or settings.calendar_id,
+    )
+
+
+def build_calendar_change_scanner(
+    calendar: GoogleCalendar,
+    session_factory: Callable[[], object] = SessionLocal,
+) -> CalendarChangeScanner:
+    """Build the sweep that publishes `calendar.event_changed` for moved interviews.
+
+    Publishes to the outbox, deduplicated per observed version of the event,
+    where `build_outbox_dispatcher` routes it into a prep-block re-plan.
+    """
+    return CalendarChangeScanner(calendar, build_event_outbox(session_factory).publish)
 
 
 def build_checkpoint_condition_evaluator(
@@ -1077,6 +1129,31 @@ def register_event_handler_thread(
     )
 
 
+def register_calendar_change_thread(
+    envelope: EventEnvelope, user_id: UUID, *, registry: WorkflowThreadRegistry
+) -> WorkflowThread:
+    """Derive and register the job-search thread one calendar change is re-planned on.
+
+    A job-search thread (it runs on the job-search graph) with its own
+    workflow, one per observed move: the id is derived from the event's
+    `dedupe_key`, so a redelivery finds the run its first delivery started,
+    and a later move gets a run of its own rather than stacking onto one
+    parked at an approval.
+    """
+    thread_id = job_search_thread_id(user_id, f"calendar_change:{envelope.dedupe_key}")
+    existing = registry.resolve(thread_id)
+    if existing is not None:
+        return existing
+    return registry.register(
+        thread_id=thread_id,
+        workflow_name=JOB_SEARCH_WORKFLOW,
+        workflow_id=registry.create_workflow(JOB_SEARCH_WORKFLOW),
+        user_id=user_id,
+        actor_id=f"event:{envelope.source}",
+        correlation_id=envelope.correlation_id or envelope.event_id,
+    )
+
+
 def build_job_search_subgraph_runner(
     compiled_subgraph,
     *,
@@ -1147,9 +1224,12 @@ __all__ = [
     "build_workflow_failure_store",
     "build_application_transitioner",
     "register_application_transition_thread",
+    "register_calendar_change_thread",
     "build_recruiter_event_store",
     "build_pending_checkpoint_store",
     "build_calendar_action_executor",
+    "build_google_calendar",
+    "build_calendar_change_scanner",
     "build_checkpoint_condition_evaluator",
     "build_pending_checkpoint_scheduler",
     "register_job_search_thread",

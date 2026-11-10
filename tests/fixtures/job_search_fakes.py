@@ -718,6 +718,9 @@ class FakeCalendar:
         self.events: dict[str, CalendarEvent] = {event.event_id: event for event in events}
         self.created: list[str] = []
         self.updated: list[str] = []
+        self.cancelled: list[str] = []
+        #: The `WriteAuthority` each write was made under, in order.
+        self.authorities: list[Any] = []
         self.lose_next_create_response = False
         self._next_id = 1
 
@@ -749,7 +752,10 @@ class FakeCalendar:
         ends_at: datetime,
         description: str,
         properties: dict[str, str],
+        authority: Any = None,
+        time_zone: str | None = None,
     ) -> CalendarEvent:
+        self.authorities.append(authority)
         event = CalendarEvent(
             event_id=f"evt-{self._next_id}",
             title=title,
@@ -757,6 +763,7 @@ class FakeCalendar:
             ends_at=ends_at,
             properties=dict(properties),
             etag="1",
+            time_zone=time_zone,
         )
         self._next_id += 1
         self.events[event.event_id] = event
@@ -774,7 +781,10 @@ class FakeCalendar:
         starts_at: datetime,
         ends_at: datetime,
         properties: dict[str, str],
+        authority: Any = None,
+        time_zone: str | None = None,
     ) -> CalendarEvent:
+        self.authorities.append(authority)
         current = self.events[event_id]
         event = current.model_copy(
             update={
@@ -787,6 +797,26 @@ class FakeCalendar:
         )
         self.events[event_id] = event
         self.updated.append(event_id)
+        return event
+
+    async def cancel_event(self, event_id: str, *, authority: Any = None) -> bool:
+        self.authorities.append(authority)
+        if self.events.pop(event_id, None) is None:
+            return False
+        self.cancelled.append(event_id)
+        return True
+
+    def move(self, event_id: str, starts_at: datetime, ends_at: datetime) -> CalendarEvent:
+        """Move an event the way the candidate would in the calendar UI."""
+        current = self.events[event_id]
+        event = current.model_copy(
+            update={
+                "starts_at": starts_at,
+                "ends_at": ends_at,
+                "etag": str(int(current.etag or "0") + 1),
+            }
+        )
+        self.events[event_id] = event
         return event
 
     def add(self, title: str, starts_at: datetime, ends_at: datetime) -> CalendarEvent:

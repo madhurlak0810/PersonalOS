@@ -799,6 +799,8 @@ class ActionKind(str, Enum):
     #: Move an event this system created, because the interview it belongs to
     #: moved or something was booked over it.
     UPDATE_CALENDAR_EVENT = "update_calendar_event"
+    #: Remove an event this system created. Never one it did not create.
+    CANCEL_CALENDAR_EVENT = "cancel_calendar_event"
 
 
 class RiskLevel(str, Enum):
@@ -891,6 +893,14 @@ ACTION_RISK_PROFILES: Mapping[ActionKind, ActionRiskProfile] = MappingProxyType(
         ActionKind.UPDATE_CALENDAR_EVENT: ActionRiskProfile(
             kind=ActionKind.UPDATE_CALENDAR_EVENT,
             # Moves something the candidate may already be planning around.
+            risk=RiskLevel.MEDIUM,
+            scopes=("calendar:write",),
+            approval_ttl=timedelta(days=2),
+        ),
+        ActionKind.CANCEL_CALENDAR_EVENT: ActionRiskProfile(
+            kind=ActionKind.CANCEL_CALENDAR_EVENT,
+            # Destructive: the event, and whatever the candidate added to it,
+            # is gone. Only ever an event this system created.
             risk=RiskLevel.MEDIUM,
             scopes=("calendar:write",),
             approval_ttl=timedelta(days=2),

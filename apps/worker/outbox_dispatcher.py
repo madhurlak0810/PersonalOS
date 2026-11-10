@@ -39,6 +39,7 @@ from opentelemetry.trace import SpanKind
 from apps.worker.event_routing import (
     APPLICATION_TRANSITION_CONSUMER,
     ApplicationTransitionHandler,
+    CalendarChangeHandler,
     EventRouter,
 )
 from personalos.bootstrap import (
@@ -47,6 +48,7 @@ from personalos.bootstrap import (
     build_idempotent_consumer,
     build_workflow_command_queue,
     build_workflow_thread_registry,
+    register_calendar_change_thread,
     register_event_handler_thread,
 )
 from personalos.domain.event_transport import EventConsumer
@@ -161,8 +163,9 @@ def build_outbox_dispatcher(
 ) -> OutboxDispatcher:
     """The dispatcher a worker process runs, over one database.
 
-    `application.transition_requested` events are applied directly; every
-    other event goes to `EventRouter`, which resumes the workflow waiting on
+    `application.transition_requested` events are applied directly;
+    `calendar.event_changed` queues a prep-block re-plan on a job-search
+    thread of its own; every other event goes to `EventRouter`, which resumes the workflow waiting on
     it. `start_types` names the event types that start an `event_handler` run
     when nothing is waiting -- empty by default, because such a run needs a
     runner wired for `event_handler` threads in the workflow-command worker,
@@ -178,9 +181,16 @@ def build_outbox_dispatcher(
     transitions = ApplicationTransitionHandler(
         build_idempotent_consumer(APPLICATION_TRANSITION_CONSUMER, session_factory)
     )
+    calendar_changes = CalendarChangeHandler(
+        build_workflow_command_queue(session_factory),
+        partial(register_calendar_change_thread, registry=registry),
+    )
     return OutboxDispatcher(
         build_event_outbox(session_factory),
-        {EventType.APPLICATION_TRANSITION_REQUESTED: transitions},
+        {
+            EventType.APPLICATION_TRANSITION_REQUESTED: transitions,
+            EventType.CALENDAR_EVENT_CHANGED: calendar_changes,
+        },
         default=router,
     )
 
