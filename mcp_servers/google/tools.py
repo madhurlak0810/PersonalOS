@@ -262,6 +262,8 @@ def _raw_message(params: GmailMessageParams) -> str:
     if params.cc:
         message["Cc"] = ", ".join(params.cc)
     message["Subject"] = params.subject
+    if params.message_id:
+        message["Message-ID"] = params.message_id
     if params.in_reply_to:
         message["In-Reply-To"] = params.in_reply_to
         message["References"] = params.in_reply_to

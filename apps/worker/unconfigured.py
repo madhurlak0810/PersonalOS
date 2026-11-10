@@ -130,9 +130,10 @@ class NotConfiguredDraftWriter(_NotConfigured):
 
 
 class NotConfiguredReplyDrafter(_NotConfigured):
-    """`RecruiterReplyDrafter`."""
+    """`RecruiterReplyDrafter`, bound when the model configuration names none (`rules`)."""
 
     port = REPLY_DRAFTER_PORT
+    hint = "point LLM_GATEWAY_CONFIG at a configuration with a reply_drafter model"
 
     async def draft(self, event: Any) -> Any:
         raise self._refuse("draft")

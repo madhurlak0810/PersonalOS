@@ -960,7 +960,7 @@ class ApplicationModel(Base):
 
 
 class ArtifactVersionModel(Base):
-    """ORM model for one generated resume/cover-letter draft for an application.
+    """ORM model for one generated draft for an application: resume, cover letter or reply.
 
     `evidence` must cite the resume section(s) or project(s) the draft was
     generated from (see `personalos.domain.models.validate_evidence_links`):
@@ -972,7 +972,9 @@ class ArtifactVersionModel(Base):
 
     id = Column(GUID(), primary_key=True, default=uuid4)
     application_id = Column(GUID(), ForeignKey("applications.id"), nullable=False)
-    artifact_type = Column(Enum("resume", "cover_letter", name="artifact_type"), nullable=False)
+    artifact_type = Column(
+        Enum("resume", "cover_letter", "recruiter_reply", name="artifact_type"), nullable=False
+    )
     version = Column(Integer, nullable=False, default=1)
     doc_id = Column(String(255), nullable=True)
     content = Column(Text, nullable=True)

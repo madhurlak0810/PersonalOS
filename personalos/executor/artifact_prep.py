@@ -15,6 +15,9 @@ interrupt, and is carried out as `files.overwrite_document` through the tool
 gateway -- where policy is asked again, the files server checks the hash the
 reviewer's diff was computed against, and the old version is backed up first.
 
+**Storing a reply** (`PolicyGatedReplyDraftStore`) is the first case again,
+for a drafted reply to a recruiter: a `recruiter_reply` version, nothing sent.
+
 Sending and submitting have no adapter here on purpose. This module can store
 a draft and, with a human's approval, replace a file; it cannot put a draft in
 front of anyone outside this system.
@@ -32,6 +35,7 @@ from personalos.domain.job_search import (
     ActionReceipt,
     ApprovalDecision,
     ArtifactDraft,
+    EvidenceRef,
     JobSearchContractError,
     NormalizedPosting,
 )
@@ -140,6 +144,79 @@ class PolicyGatedDraftSink:
         )
 
 
+class ReplyDraftStorePort(Protocol):
+    """Writes a reply as an artifact version. Implemented in `personalos.persistence`."""
+
+    async def save(
+        self,
+        *,
+        application_id: UUID,
+        content: str,
+        evidence: Sequence[EvidenceRef],
+        generated_by: str,
+    ) -> UUID: ...
+
+
+class PolicyGatedReplyDraftStore:
+    """Stores a drafted reply under a recorded `WRITE_REVERSIBLE` decision.
+
+    The `artifacts.create_draft` decision `PolicyGatedDraftSink` asks for a
+    resume, asked for a reply: a new `recruiter_reply` version, nothing sent.
+    """
+
+    def __init__(
+        self,
+        store: ReplyDraftStorePort,
+        policy: PolicyEngine,
+        *,
+        workflow_id: UUID | None = None,
+        requested_by: str = "graph:job_search#record_recruiter_events",
+    ):
+        if store is None or policy is None:
+            raise ValueError("PolicyGatedReplyDraftStore requires a store and a PolicyEngine")
+        self.store = store
+        self.policy = policy
+        self.workflow_id = workflow_id
+        self.requested_by = requested_by
+
+    async def save(
+        self,
+        *,
+        application_id: UUID,
+        content: str,
+        evidence: Sequence[EvidenceRef],
+        generated_by: str,
+    ) -> UUID:
+        """Ask policy, then store. Raises `PolicyDenied` or `ApprovalRequired`."""
+        verdict = self.policy.evaluate_action(
+            self.requested_by,
+            self.workflow_id,
+            DRAFT_TOOL,
+            fingerprint_intent(
+                "artifacts",
+                "create_draft",
+                {
+                    "application_id": str(application_id),
+                    "artifact_type": "recruiter_reply",
+                    "sha256": content_sha256(content),
+                    "evidence_ids": [ref.ref for ref in evidence],
+                },
+            ),
+            list(DRAFT_SCOPES),
+            Provenance(origin=IntentOrigin.SYSTEM, requested_by=self.requested_by),
+        )
+        if verdict.decision == Decision.DENY:
+            raise PolicyDenied(verdict)
+        if verdict.decision == Decision.REQUIRE_APPROVAL:
+            raise ApprovalRequired(verdict)
+        return await self.store.save(
+            application_id=application_id,
+            content=content,
+            evidence=evidence,
+            generated_by=generated_by,
+        )
+
+
 class DocumentOverwriteExecutor:
     """Redeems an approved `OVERWRITE_DOCUMENT` action through the files tool.
 
@@ -208,5 +285,7 @@ __all__ = [
     "DRAFT_SCOPES",
     "DraftStore",
     "PolicyGatedDraftSink",
+    "PolicyGatedReplyDraftStore",
+    "ReplyDraftStorePort",
     "DocumentOverwriteExecutor",
 ]

@@ -3,6 +3,7 @@
   "action_kinds": {
     "submit_application": {"consequential": true, "external_write": true},
     "send_recruiter_message": {"consequential": true, "external_write": true},
+    "send_email": {"consequential": true, "external_write": true},
     "create_calendar_event": {"consequential": true, "external_write": true},
     "update_calendar_event": {"consequential": true, "external_write": true},
     "cancel_calendar_event": {"consequential": true, "external_write": true},

@@ -16,12 +16,13 @@ import pytest
 from personalos.domain.models import ActionTarget
 from personalos.mcp.stdio import decode_call_result
 from personalos.policy import ApprovalRequired, IntentOrigin, PolicyDenied
-from personalos.policy.rules import GOOGLE_NODE_TOOL_ALLOWLISTS
+from personalos.policy.rules import GMAIL_SENDER, GOOGLE_NODE_TOOL_ALLOWLISTS
 from tests.fixtures.fake_google import VARIANTS, GoogleHarness, approval_for, b64url, gmail_message
 
 DRAFTER = "graph:job_search#draft_follow_up_for_triggered_checkpoint"
 RESPONDER = "graph:job_search#handle_recruiter_response"
 SCHEDULER = "graph:job_search#plan_interview_schedule"
+REPLY_DRAFTER = "graph:job_search#record_recruiter_events"
 
 MESSAGE = {"to": ["recruiter@acme.example"], "subject": "Hi", "body": "Hello"}
 
@@ -47,8 +48,10 @@ def test_the_default_allowlists_keep_send_and_delete_narrow():
         for n, tools in GOOGLE_NODE_TOOL_ALLOWLISTS.items()
         if "google.gmail_send_message" in tools
     }
-    assert senders == {RESPONDER}
+    # The send executor sends approved actions; no drafting node can send.
+    assert senders == {RESPONDER, GMAIL_SENDER}
     assert "google.gmail_send_message" not in GOOGLE_NODE_TOOL_ALLOWLISTS[DRAFTER]
+    assert "google.gmail_send_message" not in GOOGLE_NODE_TOOL_ALLOWLISTS[REPLY_DRAFTER]
     # Only interview scheduling may cancel an event -- behind approval, and
     # only one PersonalOS stamped (`CalendarActionExecutor`).
     deleters = {

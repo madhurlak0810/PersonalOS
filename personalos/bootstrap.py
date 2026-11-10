@@ -22,8 +22,10 @@ from personalos.domain.credentials import (
 )
 from personalos.domain.errors import PortNotConfigured
 from personalos.domain.events import EventEnvelope
+from personalos.domain.job_search import ActionKind
 from personalos.domain.mailbox import MailboxScope
 from personalos.domain.models import ToolAuthorization
+from personalos.domain.outbound_email import EMAIL_ACTION_KINDS
 from personalos.domain.workflow import (
     WorkflowThread,
     application_transition_thread_id,
@@ -31,8 +33,13 @@ from personalos.domain.workflow import (
     job_search_thread_id,
     supervisor_thread_id,
 )
-from personalos.executor.artifact_prep import DocumentOverwriteExecutor, PolicyGatedDraftSink
+from personalos.executor.artifact_prep import (
+    DocumentOverwriteExecutor,
+    PolicyGatedDraftSink,
+    PolicyGatedReplyDraftStore,
+)
 from personalos.executor.calendar import (
+    CALENDAR_ACTION_KINDS,
     CalendarActionExecutor,
     CalendarClient,
     CalendarReconciler,
@@ -40,10 +47,15 @@ from personalos.executor.calendar import (
 from personalos.executor.credentials import CredentialBroker
 from personalos.executor.document_reader import GatewayDocumentReader
 from personalos.executor.gmail_inbox import GmailRecruiterInbox
+from personalos.executor.gmail_outbound import GmailOutbound, GmailSendExecutor, GmailSentReconciler
 from personalos.executor.google_calendar import CalendarChangeScanner, GoogleCalendar
 from personalos.executor.google_connect import GoogleConnectionReader, GoogleConnector
 from personalos.executor.job_discovery import GatewayJobProvider
-from personalos.executor.tool_executor import ProviderReconciler, ToolExecutor
+from personalos.executor.tool_executor import (
+    KindRoutingReconciler,
+    ProviderReconciler,
+    ToolExecutor,
+)
 from personalos.graphs.job_search import JobSearchSubgraphRunner
 from personalos.mcp.adapter import Authorizer, MCPToolInvoker
 from personalos.mcp.base import MCPServer
@@ -86,6 +98,7 @@ from personalos.persistence.pending_checkpoints import (
 )
 from personalos.persistence.policy_log import SqlPolicyDecisionLog
 from personalos.persistence.recruiter_events import SqlRecruiterEventStore
+from personalos.persistence.reply_drafts import SqlReplyApplicationLookup, SqlReplyDraftStore
 from personalos.persistence.search_profiles import SqlSearchProfileStore
 from personalos.persistence.workflow_actions import WorkflowActionReader
 from personalos.persistence.workflow_commands import WORKFLOW_COMMAND_EVENT, WorkflowCommandQueue
@@ -109,6 +122,11 @@ from personalos.retrieval.artifact_prep import (
 from personalos.retrieval.embedding import HashingEmbedder
 from personalos.retrieval.evidence_ingestion import ResumeIngestor
 from personalos.retrieval.job_matching import HybridJobMatcher, ScoringConfig, SemanticAssessor
+from personalos.retrieval.reply_drafting import (
+    EvidenceReplyGrounding,
+    GroundedReplyDrafter,
+    ReplyWriter,
+)
 from personalos.secrets.exchange import (
     ApiKeyExchanger,
     GoogleOAuthTokenExchanger,
@@ -795,6 +813,7 @@ def build_calendar_action_executor(
     fallback: ActionExecutorPort | None = None,
     workflow_id: UUID | None = None,
     policy: PolicyEngine | None = None,
+    reconcilers: Mapping[ActionKind, ProviderReconciler] | None = None,
 ) -> ToolExecutor:
     """Build the `action_executor` for a graph that schedules interviews.
 
@@ -803,13 +822,89 @@ def build_calendar_action_executor(
     building it here: a calendar write whose outcome was never recorded is
     looked up on the calendar -- by the idempotency key stamped on the event,
     or by event id -- before `ToolExecutor` is allowed to send it again.
+    `reconcilers` adds the same for the kinds `fallback` carries out (the
+    Gmail Sent-folder lookup for sends, `build_gmail_send_reconcilers`).
     """
+    calendar = CalendarReconciler(client)
+    routes: dict[ActionKind, ProviderReconciler] = dict.fromkeys(CALENDAR_ACTION_KINDS, calendar)
+    routes.update(reconcilers or {})
     return build_tool_executor(
         CalendarActionExecutor(client, fallback=fallback, workflow_id=workflow_id),
         session_factory,
         workflow_id=workflow_id,
         policy=policy,
-        reconciler=CalendarReconciler(client),
+        reconciler=KindRoutingReconciler(routes),
+    )
+
+
+def build_gmail_outbound(
+    gateway: ToolGateway | None = None, *, policy: PolicyEngine | None = None
+) -> GmailOutbound:
+    """Build the Gmail drafts-and-sends client, over the `google.gmail_*` tools.
+
+    Raises `PortNotConfigured` while the Google server is off.
+    """
+    if gateway is None:
+        if not settings.mcp_google_enabled:
+            raise PortNotConfigured(
+                "MCP_GOOGLE_ENABLED is off; connect Google (`personalos.cli auth google "
+                "--enable gmail.send --enable gmail.compose`) and enable it",
+                port="mailbox",
+            )
+        gateway = build_tool_gateway(policy=policy or build_policy_engine())
+    return GmailOutbound(gateway)
+
+
+def build_gmail_send_executor(
+    client: GmailOutbound, *, fallback: ActionExecutorPort | None = None
+) -> GmailSendExecutor:
+    """The provider adapter for `SEND_EMAIL` and `SEND_RECRUITER_MESSAGE` actions.
+
+    Wrap it in a `ToolExecutor` with `build_gmail_send_reconcilers(client)`: a
+    send whose outcome was never recorded is then looked up in the Sent folder
+    before anything is sent again.
+    """
+    return GmailSendExecutor(client, fallback=fallback)
+
+
+def build_gmail_send_reconcilers(client: GmailOutbound) -> dict[ActionKind, ProviderReconciler]:
+    """`GmailSentReconciler` for every email action kind."""
+    return dict.fromkeys(EMAIL_ACTION_KINDS, GmailSentReconciler(client))
+
+
+def build_reply_drafter(
+    writer: ReplyWriter,
+    session_factory: Callable[[], object] = SessionLocal,
+    *,
+    embedder: Embedder | None = None,
+    mailbox: GmailOutbound | None = None,
+    policy: PolicyEngine | None = None,
+    workflow_id: UUID | None = None,
+    context_terms: Iterable[str] = (),
+) -> GroundedReplyDrafter:
+    """Build the `reply_drafter` a `JobSearchGraph` takes.
+
+    `writer` is `build_model_gateway().reply_writer()`. Replies are grounded in
+    the candidate's evidence (nearest the message by `embedder`, when given),
+    checked against it, stored as `recruiter_reply` artifact versions under a
+    recorded `WRITE_REVERSIBLE` decision, and -- with a `mailbox` -- saved as
+    Gmail drafts. Nothing it builds can send.
+    """
+    return GroundedReplyDrafter(
+        grounding=EvidenceReplyGrounding(
+            SqlReplyApplicationLookup(session_factory),
+            embedder=embedder,
+            index=SqlEvidenceIndex(session_factory) if embedder is not None else None,
+            evidence_source=SqlEvidenceSource(session_factory),
+        ),
+        writer=writer,
+        store=PolicyGatedReplyDraftStore(
+            SqlReplyDraftStore(session_factory),
+            policy or build_policy_engine(session_factory),
+            workflow_id=workflow_id,
+        ),
+        mailbox=mailbox,
+        context_terms=tuple(context_terms),
     )
 
 

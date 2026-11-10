@@ -17,7 +17,12 @@ Supervisor and the Job Search subgraph on the durable Postgres checkpointer
   client, once `MCP_GOOGLE_ENABLED` and `CALENDAR_TIME_ZONE` are set;
 - the Gmail inbox, as the reader `email.received` runs fetch their message
   through, once `MCP_GOOGLE_ENABLED` and a mailbox scope
-  (`GMAIL_RECRUITER_LABELS` / `GMAIL_RECRUITER_QUERIES`) are set.
+  (`GMAIL_RECRUITER_LABELS` / `GMAIL_RECRUITER_QUERIES`) are set;
+- Gmail sends, as the executor for approved `send_recruiter_message` and
+  `send_email` actions (reconciled against the Sent folder), once
+  `MCP_GOOGLE_ENABLED` is set;
+- the reply drafter, once the model configuration names a model for
+  `reply_drafter` (its default spec does, for any non-`rules` configuration).
 
 The ports with no adapter yet are bound to the `apps.worker.unconfigured`
 stand-ins, which fail the step that reaches them with a retryable
@@ -56,7 +61,10 @@ from personalos.bootstrap import (
     build_durable_checkpointer,
     build_embedder,
     build_event_emitter,
+    build_gmail_outbound,
     build_gmail_recruiter_inbox,
+    build_gmail_send_executor,
+    build_gmail_send_reconcilers,
     build_google_calendar,
     build_integration_health_store,
     build_job_matcher,
@@ -66,6 +74,7 @@ from personalos.bootstrap import (
     build_policy_engine,
     build_posting_catalog,
     build_recruiter_event_store,
+    build_reply_drafter,
     build_search_profile_store,
     build_tool_gateway,
     build_workflow_lease_store,
@@ -158,6 +167,15 @@ def default_job_search_ports(
         logger.info("calendar is not wired: %s", exc)
         calendar = NotConfiguredCalendar()
         calendar_stubs.append(calendar)
+    outbound: Any = None
+    sender: Any = mailbox
+    send_stubs: list[_NotConfigured] = [mailbox]
+    try:
+        outbound = build_gmail_outbound(policy=policy)
+        sender = build_gmail_send_executor(outbound)
+        send_stubs = []
+    except PortNotConfigured as exc:
+        logger.info("Gmail sends are not wired: %s", exc)
     submitter = NotConfiguredApplicationSubmitter()
     action_executor = build_calendar_action_executor(
         calendar,
@@ -166,15 +184,30 @@ def default_job_search_ports(
         fallback=ActionKindRouter(
             {
                 ActionKind.SUBMIT_APPLICATION: submitter,
-                ActionKind.SEND_RECRUITER_MESSAGE: mailbox,
+                ActionKind.SEND_RECRUITER_MESSAGE: sender,
+                ActionKind.SEND_EMAIL: sender,
                 ActionKind.OVERWRITE_DOCUMENT: build_document_overwrite_executor(
                     build_tool_gateway(policy=policy)
                 ),
             }
         ),
+        reconcilers=build_gmail_send_reconcilers(outbound) if outbound is not None else None,
     )
     application_store = NotConfiguredApplicationStore()
-    reply_drafter = NotConfiguredReplyDrafter()
+    reply_writer = models.reply_writer()
+    reply_drafter: Any
+    reply_stubs: list[_NotConfigured] = []
+    if reply_writer is None:
+        reply_drafter = NotConfiguredReplyDrafter()
+        reply_stubs.append(reply_drafter)
+    else:
+        reply_drafter = build_reply_drafter(
+            reply_writer,
+            session_factory,
+            embedder=None if isinstance(embedder, _NotConfigured) else embedder,
+            mailbox=outbound,
+            policy=policy,
+        )
 
     ports: dict[str, Any] = {
         "profile_store": build_search_profile_store(session_factory),
@@ -203,10 +236,10 @@ def default_job_search_ports(
     stubs = {
         "providers": board_stubs,
         "packet_builder": packet_stubs,
-        "action_executor": [*calendar_stubs, submitter, mailbox],
+        "action_executor": [*calendar_stubs, submitter, *send_stubs],
         "application_store": [application_store],
         "recruiter_inbox": [mailbox],
-        "reply_drafter": [reply_drafter],
+        "reply_drafter": reply_stubs,
         "calendar_reader": calendar_stubs,
         "inbound_message_reader": inbound_stubs,
     }
