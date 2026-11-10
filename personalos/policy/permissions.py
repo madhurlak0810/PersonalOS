@@ -111,6 +111,7 @@ DEFAULT_TOOL_PERMISSIONS: Mapping[str, ToolPermission] = MappingProxyType(
         "jobs.scrape_job_details": _permission(PermissionClass.READ_EXTERNAL, {"jobs:read"}),
         "job_providers.search": _permission(PermissionClass.READ_EXTERNAL, {"jobs:read"}),
         "job_providers.get_job": _permission(PermissionClass.READ_EXTERNAL, {"jobs:read"}),
+        "google.gmail_search": _permission(PermissionClass.READ_EXTERNAL, {"communications:read"}),
         "google.gmail_read_message": _permission(
             PermissionClass.READ_EXTERNAL, {"communications:read"}
         ),
@@ -149,6 +150,9 @@ DEFAULT_TOOL_PERMISSIONS: Mapping[str, ToolPermission] = MappingProxyType(
         # DESTRUCTIVE
         "files.delete_file": _permission(PermissionClass.DESTRUCTIVE, {"artifacts:delete"}),
         "files.overwrite_document": _permission(PermissionClass.DESTRUCTIVE, {"artifacts:write"}),
+        "google.calendar_delete_event": _permission(
+            PermissionClass.DESTRUCTIVE, {"calendar:write"}
+        ),
         # SENSITIVE
         "google.update_credentials": _permission(PermissionClass.SENSITIVE, {"credentials:write"}),
         "google.change_permissions": _permission(PermissionClass.SENSITIVE, {"permissions:write"}),

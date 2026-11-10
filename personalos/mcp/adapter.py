@@ -7,10 +7,16 @@ that has not been through policy.
 """
 
 import logging
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from personalos.domain.errors import ErrorCode
-from personalos.domain.models import ActionTarget, ToolCallErrorCode, ToolCallRequest
+from personalos.domain.models import (
+    ActionTarget,
+    ToolAuthorization,
+    ToolCallErrorCode,
+    ToolCallRequest,
+)
 from personalos.mcp.manager import MCPServerManager
 from personalos.policy import ApprovedIntent, PolicyViolation
 
@@ -24,17 +30,35 @@ _ERROR_CODE_MAP: dict[ToolCallErrorCode, ErrorCode] = {
     ToolCallErrorCode.TOOL_NOT_FOUND: ErrorCode.NOT_FOUND,
     ToolCallErrorCode.VALIDATION_ERROR: ErrorCode.VALIDATION,
     ToolCallErrorCode.MISSING_OPERATION_STORE: ErrorCode.INTERNAL,
+    ToolCallErrorCode.MISSING_AUTHORIZATION: ErrorCode.INTERNAL,
     ToolCallErrorCode.IDEMPOTENCY_CONFLICT: ErrorCode.IDEMPOTENCY_CONFLICT,
     ToolCallErrorCode.EXECUTION_ERROR: ErrorCode.TOOL_FAILURE,
 }
 
 
+#: Builds the authorization context for an approved intent, or returns
+#: `None` when the call acts on no account. Supplied per server by the
+#: composition root -- it is configuration, never something an intent says.
+Authorizer = Callable[[ApprovedIntent], ToolAuthorization | None]
+
+
 class MCPToolInvoker:
     """Executes approved intents against registered MCP servers."""
 
-    def __init__(self, manager: MCPServerManager):
-        """Take the manager holding the registered servers."""
+    def __init__(
+        self,
+        manager: MCPServerManager,
+        authorizers: Mapping[str, Authorizer] | None = None,
+    ):
+        """Take the manager holding the registered servers.
+
+        `authorizers` maps a server name to what attaches that server's
+        `ToolAuthorization`. It is attached here, on the gateway side of the
+        boundary and after policy, so it rides beside the call's arguments
+        rather than among them.
+        """
         self.manager = manager
+        self.authorizers = dict(authorizers or {})
 
     async def invoke(self, approved: ApprovedIntent) -> dict[str, Any]:
         """Run the intent on its target server.
@@ -53,10 +77,12 @@ class MCPToolInvoker:
                 f"MCPToolInvoker requires an ApprovedIntent, got {type(approved).__name__}"
             )
 
+        authorizer = self.authorizers.get(approved.server)
         request = ToolCallRequest(
             target=ActionTarget(server=approved.server, tool=approved.tool),
             params=approved.arguments,
             context=approved.context,
+            authorization=authorizer(approved) if authorizer else None,
         )
         result = await self.manager.execute_tool(request)
 
@@ -74,4 +100,4 @@ class MCPToolInvoker:
         }
 
 
-__all__ = ["MCPToolInvoker"]
+__all__ = ["Authorizer", "MCPToolInvoker"]

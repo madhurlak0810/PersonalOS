@@ -253,6 +253,13 @@ desktop browser on the same machine, because Google redirects to
    python -m personalos.cli auth google --revoke
    ```
 
+7. Turn on the Gmail and Calendar tools. `MCP_GOOGLE_ENABLED=true` registers
+   the Google MCP server in the API and worker processes. The tools act on
+   the most recently connected account, or on `GOOGLE_ACCOUNT` if you set it.
+   The server opens no port. To run it as a separate process instead, a
+   parent spawns `python -m personalos.cli mcp-google` and talks to it over
+   stdin/stdout (`bootstrap.connect_google_mcp_stdio`).
+
 The API does the same over HTTP: `POST /v1/integrations/google/connect`
 returns an `authorization_url`, Google redirects to
 `/v1/integrations/google/callback`, and `GET /v1/integrations` reports the
@@ -377,7 +384,7 @@ PersonalOS/
 │
 ├── mcp_servers/
 │   ├── files/                     # sandboxed read_file / write_file
-│   └── google/                    # (planned: Gmail and Calendar tools, J2)
+│   └── google/                    # Gmail and Calendar tools, in-process or over stdio
 │
 ├── migrations/                    # Alembic environment
 │   └── versions/                  # one file per schema change
@@ -484,6 +491,13 @@ from the tool allowlist, the tool's permission class (`read_local` through
 `destructive`), and the intent's origin. Every decision is recorded in
 `policy_decisions` before anything runs.
 
+Google tools are also allowlisted per node. `NodeToolAllowlistRule` checks the
+intent's `requested_by` (for example `graph:job_search#plan_interview_schedule`)
+against `GOOGLE_NODE_TOOL_ALLOWLISTS`. A node that is not listed for a tool is
+denied, even when the intent carries a matching human approval. By default only
+`handle_recruiter_response` may send mail, only `plan_interview_schedule` may
+write to the calendar, and no node may delete an event.
+
 ### 4. Tools and Executor (`personalos/tools/`, `personalos/executor/`)
 
 `ToolGateway` is the only way to reach a tool, and it consults policy first.
@@ -570,6 +584,7 @@ python -m personalos.cli workflow-status WORKFLOW_ID [--json]
 python -m personalos.cli stall-monitor [--once]
 python -m personalos.cli auth google [--enable CAPABILITY] [--status] [--revoke] [--json]
 python -m personalos.cli auth google-client [--from-json PATH]
+python -m personalos.cli mcp-google               # serve the Google MCP server on stdio
 ```
 
 ### 11. Orchestration Graphs (`personalos/graphs/`)
@@ -981,9 +996,9 @@ nothing is sent.
 
 **Wiring.** Pass a `CalendarReader` as `calendar_reader=` to turn scheduling
 on, and `build_calendar_action_executor(client, fallback=...)` as
-`action_executor=`. Nothing in the repository implements `CalendarReader` or
-`CalendarClient` against Google yet, and nothing produces `calendar_changes`:
-both are the Google MCP server's job.
+`action_executor=`. The Google MCP server (`mcp_servers/google`) provides the
+calendar tools. Nothing implements `CalendarReader` or `CalendarClient` over
+those tools yet, and nothing produces `calendar_changes`. That is J4.
 
 **Not handled:** a cancelled interview (its events are left in place), and a
 new booking over an existing prep block is only noticed the next time that
@@ -1454,6 +1469,8 @@ Settings come from the environment, then `.env` in the working directory.
 | `SECRET_STORE_SERVICE` | `personalos` | The OS keychain service that holds secrets. Never put a secret in `.env`. |
 | `GOOGLE_OAUTH_CLIENT_ID` | empty | A Desktop-app OAuth client. Its secret goes in the keychain via `auth google-client`. |
 | `GOOGLE_OAUTH_PUBLISHING_STATUS` | `testing` | `testing` records Google connections as expiring after 7 days, as Google does for unverified apps. |
+| `MCP_GOOGLE_ENABLED` | `false` | Registers the Gmail and Calendar MCP server. Connect an account first. |
+| `GOOGLE_ACCOUNT` | empty | Which connected Google account the tools act on. If empty, the most recently connected active account is used. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Optional MCP response cache. |
 
 ---

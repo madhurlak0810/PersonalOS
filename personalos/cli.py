@@ -249,6 +249,17 @@ def ingest_resume(path: str, actor_id: str):
 # reference.
 
 
+@cli.command("mcp-google")
+def mcp_google():
+    """Serve the Gmail and Calendar MCP server over stdin/stdout.
+
+    For a parent process to spawn; it opens no port.
+    """
+    from personalos.bootstrap import serve_google_mcp_stdio
+
+    serve_google_mcp_stdio()
+
+
 @cli.group()
 def auth():
     """Connect, inspect and disconnect integrations."""

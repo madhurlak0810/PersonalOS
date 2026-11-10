@@ -148,6 +148,46 @@ class MutatingToolRule(PolicyRule):
         )
 
 
+class NodeToolAllowlistRule(PolicyRule):
+    """Each graph node may reach only the tools listed for it.
+
+    `ToolAllowlistRule` says which tools exist; this says which *node* may
+    use which of them. A node is identified by the intent's `requested_by`,
+    which the node's own code sets -- a model can propose a tool call, but it
+    cannot choose which node it is proposing from -- so a model that asks a
+    drafting node to send mail is denied here, before approval is even a
+    question. A denial outranks any approval grant.
+
+    Applies only to tools of `governed_servers`; everything else is left to
+    the rest of the chain. Within those servers it is default-deny: a node
+    with no entry reaches nothing.
+    """
+
+    name = "node_tool_allowlist"
+
+    def __init__(
+        self,
+        allowlists: Mapping[str, Iterable[str]],
+        governed_servers: Iterable[str] = ("google",),
+    ):
+        """Map a node's `requested_by` to the `server.tool` refs it may call."""
+        self.allowlists: dict[str, frozenset[str]] = {
+            node: frozenset(tools) for node, tools in allowlists.items()
+        }
+        self.governed_servers: frozenset[str] = frozenset(governed_servers)
+
+    def evaluate(self, intent: ToolIntent) -> PolicyDecision | None:
+        """Deny a governed tool the requesting node is not listed for; else abstain."""
+        if intent.server not in self.governed_servers:
+            return None
+        if intent.tool_ref not in self.allowlists.get(intent.requested_by, frozenset()):
+            return self.deny(
+                intent,
+                f"node '{intent.requested_by}' is not allowed to call '{intent.tool_ref}'",
+            )
+        return None
+
+
 class UntrustedOriginRule(PolicyRule):
     """Escalate anything a model proposed.
 
@@ -260,21 +300,104 @@ FILE_TOOL_ARGUMENTS = {
 }
 
 
-def default_rules() -> list[PolicyRule]:
+_GMAIL_MESSAGE_ARGUMENTS = {"to", "cc", "subject", "body", "thread_id", "in_reply_to"}
+
+#: Tools exposed by the Google MCP server (`mcp_servers.google`). None of them
+#: takes an account or credential argument: whose mailbox and calendar a call
+#: touches is the gateway-attached `ToolAuthorization`, not something a
+#: caller names. Which node may call which tool is `GOOGLE_NODE_TOOL_ALLOWLISTS`.
+GOOGLE_TOOL_ARGUMENTS = {
+    "google.gmail_search": {"query", "max_results", "page_token"},
+    "google.gmail_read_message": {"message_id"},
+    "google.gmail_create_draft": _GMAIL_MESSAGE_ARGUMENTS,
+    "google.gmail_send_message": _GMAIL_MESSAGE_ARGUMENTS,
+    "google.calendar_list_events": {
+        "calendar_id",
+        "time_min",
+        "time_max",
+        "query",
+        "max_results",
+    },
+    "google.calendar_create_event": {
+        "calendar_id",
+        "summary",
+        "start",
+        "end",
+        "description",
+        "location",
+        "attendees",
+        "private_properties",
+    },
+    "google.calendar_update_event": {
+        "calendar_id",
+        "event_id",
+        "summary",
+        "start",
+        "end",
+        "description",
+        "location",
+    },
+    "google.calendar_delete_event": {"calendar_id", "event_id"},
+}
+
+
+def _job_search_node(node: str) -> str:
+    return f"graph:job_search#{node}"
+
+
+#: Which job-search node may call which Google tool, keyed by the
+#: `requested_by` the node stamps on its intents. Deliberately narrow:
+#: only the recruiter-response node can send mail, only interview scheduling
+#: touches the calendar, and no node may delete an event until one is
+#: listed here on purpose.
+GOOGLE_NODE_TOOL_ALLOWLISTS: Mapping[str, frozenset[str]] = {
+    _job_search_node("classify_recruiter_events"): frozenset(
+        {"google.gmail_search", "google.gmail_read_message"}
+    ),
+    _job_search_node("handle_recruiter_response"): frozenset(
+        {
+            "google.gmail_search",
+            "google.gmail_read_message",
+            "google.gmail_create_draft",
+            "google.gmail_send_message",
+        }
+    ),
+    _job_search_node("draft_follow_up_for_triggered_checkpoint"): frozenset(
+        {"google.gmail_search", "google.gmail_read_message", "google.gmail_create_draft"}
+    ),
+    _job_search_node("plan_interview_schedule"): frozenset(
+        {
+            "google.calendar_list_events",
+            "google.calendar_create_event",
+            "google.calendar_update_event",
+        }
+    ),
+}
+
+
+def default_rules(
+    node_tool_allowlists: Mapping[str, Iterable[str]] | None = None,
+) -> list[PolicyRule]:
     """The rule chain the application boots with.
 
-    Job search, job provider and file tools are allowlisted; nothing else can
-    run until it is added here deliberately.
+    Job search, job provider, file and Google tools are allowlisted; nothing
+    else can run until it is added here deliberately. Google tools are further
+    confined per node by `node_tool_allowlists` (default
+    `GOOGLE_NODE_TOOL_ALLOWLISTS`).
     """
     tool_arguments = {
         **JOB_SEARCH_TOOL_ARGUMENTS,
         **JOB_PROVIDER_TOOL_ARGUMENTS,
         **FILE_TOOL_ARGUMENTS,
+        **GOOGLE_TOOL_ARGUMENTS,
     }
     return [
         RequireProvenanceRule(),
         ToolAllowlistRule(tool_arguments.keys()),
         ArgumentAllowlistRule(tool_arguments),
+        NodeToolAllowlistRule(
+            GOOGLE_NODE_TOOL_ALLOWLISTS if node_tool_allowlists is None else node_tool_allowlists
+        ),
         MutatingToolRule(),
         DocumentOverwriteRule(),
         UntrustedOriginRule(),
@@ -287,11 +410,14 @@ __all__ = [
     "ToolAllowlistRule",
     "ArgumentAllowlistRule",
     "MutatingToolRule",
+    "NodeToolAllowlistRule",
     "DocumentOverwriteRule",
     "UntrustedOriginRule",
     "JOB_SEARCH_TOOL_ARGUMENTS",
     "JOB_PROVIDER_TOOL_ARGUMENTS",
     "FILE_TOOL_ARGUMENTS",
+    "GOOGLE_TOOL_ARGUMENTS",
+    "GOOGLE_NODE_TOOL_ALLOWLISTS",
     "default_rules",
     "IDEMPOTENCY_KEY_ARG",
 ]
