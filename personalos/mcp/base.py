@@ -1,5 +1,6 @@
 """Base MCP Server implementation."""
 
+import functools
 import inspect
 import logging
 from abc import ABC, abstractmethod
@@ -17,6 +18,7 @@ from personalos.domain.models import (
     InvalidIdempotencyKey,
     MutatingIntent,
     Tool,
+    ToolAuthorization,
     ToolCallErrorCode,
     ToolCallRequest,
     ToolCallResult,
@@ -31,6 +33,11 @@ from personalos.persistence.idempotency import (
 logger = logging.getLogger(__name__)
 
 IDEMPOTENCY_KEY_PARAM = "idempotency_key"
+
+#: Keyword a handler of a `requires_authorization` tool receives the
+#: gateway-attached `ToolAuthorization` under. Never an intent field, so no
+#: caller-supplied parameter can stand in for it.
+AUTHORIZATION_PARAM = "authorization"
 
 
 class ToolSchema:
@@ -51,6 +58,7 @@ class ToolSchema:
         parameters: dict[str, Any] | None = None,
         required: list[str] = None,
         response_schema: dict[str, Any] | None = None,
+        requires_authorization: bool = False,
     ):
         self.name = name
         self.description = description
@@ -59,6 +67,14 @@ class ToolSchema:
         self.parameters = parameters or {}
         self.required = required or []
         self.response_schema = response_schema or {}
+        #: The handler acts on someone's account, so it is passed the
+        #: request's `ToolAuthorization` and the call is refused without one.
+        self.requires_authorization = requires_authorization
+        if requires_authorization and AUTHORIZATION_PARAM in intent_type.model_fields:
+            raise ValueError(
+                f"tool '{name}' takes '{AUTHORIZATION_PARAM}' as an intent field; it must "
+                f"come from the gateway, not from the caller's parameters"
+            )
 
         if self.mutating:
             self._require_idempotency_key()
@@ -160,6 +176,16 @@ class MCPServer(ABC):
                 details={"errors": e.errors()},
             )
 
+        if schema.requires_authorization:
+            if request.authorization is None:
+                return ToolCallResult.failed(
+                    request.target,
+                    ToolCallErrorCode.MISSING_AUTHORIZATION,
+                    f"Tool '{tool_name}' acts on an account and needs an authorization "
+                    f"context attached by the gateway; none was supplied",
+                )
+            handler = _bind_authorization(handler, request.authorization)
+
         if schema.mutating:
             return await self._execute_mutating(
                 request.target, schema, handler, intent, request.context
@@ -251,3 +277,13 @@ class MCPServer(ABC):
     def initialize(self):
         """Initialize the MCP server (register tools, load configs, etc.)."""
         pass
+
+
+def _bind_authorization(handler: Callable, authorization: ToolAuthorization) -> Callable:
+    """Fix the handler's authorization, outside the parameters the guard fingerprints.
+
+    The idempotency guard calls `handler(**params)` with the intent's fields
+    only, so binding here keeps the authorization out of the request
+    fingerprint and out of anything a caller could have supplied.
+    """
+    return functools.partial(handler, **{AUTHORIZATION_PARAM: authorization})

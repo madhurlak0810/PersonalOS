@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from personalos.domain.context import ExecutionContext
+from personalos.domain.credentials import CredentialRef
 from personalos.domain.errors import FailureClass, RetryableFailure, ValidationFailed
 
 # Minimum length for an idempotency key. Keys are supplied by callers and must
@@ -241,6 +242,40 @@ class OperationRecord(BaseModel):
         use_enum_values = False
 
 
+class ToolAuthorization(BaseModel):
+    """Whose account a tool call acts on, attached by the gateway side.
+
+    Travels beside a call's `params`, never inside them: `params` are what a
+    caller (possibly a model) proposed, and nothing proposed there can choose
+    which credential a tool spends. The MCP adapter builds this from the
+    approved intent and the deployment's configuration, and a server that
+    needs one reads it from `ToolCallRequest.authorization` -- over the wire,
+    from the request's `_meta`, not its `arguments`.
+
+    It names a credential; it never holds one. The server exchanges
+    `credential_ref` for a short-lived token at the moment of the call.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    #: `cred://<provider>/<name>` of the credential the call may spend.
+    credential_ref: str
+    #: The node (the intent's `requested_by`) the call was authorized for.
+    principal: str
+    #: The `policy_decisions` row that authorized the call, when one was recorded.
+    policy_decision_id: UUID | None = None
+
+    @field_validator("credential_ref")
+    @classmethod
+    def _check_ref(cls, value: str) -> str:
+        return str(CredentialRef.parse(value))
+
+    @property
+    def credential(self) -> CredentialRef:
+        """The reference, parsed."""
+        return CredentialRef.parse(self.credential_ref)
+
+
 class ToolCallRequest(BaseModel):
     """Typed envelope for invoking a tool.
 
@@ -248,11 +283,14 @@ class ToolCallRequest(BaseModel):
     the server validates them into that tool's registered Intent subclass
     before execution, so this is the one place a dict is still allowed to
     cross the boundary — everything past it is typed.
+
+    `authorization` is not caller-supplied: see `ToolAuthorization`.
     """
 
     target: ActionTarget
     params: dict[str, Any] = Field(default_factory=dict)
     context: ExecutionContext = Field(default_factory=ExecutionContext.new)
+    authorization: ToolAuthorization | None = None
 
 
 class ToolCallErrorCode(str, Enum):
@@ -262,6 +300,7 @@ class ToolCallErrorCode(str, Enum):
     TOOL_NOT_FOUND = "tool_not_found"
     VALIDATION_ERROR = "validation_error"
     MISSING_OPERATION_STORE = "missing_operation_store"
+    MISSING_AUTHORIZATION = "missing_authorization"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
     EXECUTION_ERROR = "execution_error"
 

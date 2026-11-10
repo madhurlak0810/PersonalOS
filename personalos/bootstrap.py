@@ -14,9 +14,15 @@ from datetime import timedelta
 from uuid import UUID
 
 from personalos.config import settings
-from personalos.domain.credentials import CredentialExchangeFailed, CredentialRef, SecretValue
+from personalos.domain.credentials import (
+    CredentialExchangeFailed,
+    CredentialReconnectRequired,
+    CredentialRef,
+    SecretValue,
+)
 from personalos.domain.errors import PortNotConfigured
 from personalos.domain.events import EventEnvelope
+from personalos.domain.models import ToolAuthorization
 from personalos.domain.workflow import (
     WorkflowThread,
     application_transition_thread_id,
@@ -36,7 +42,7 @@ from personalos.executor.google_connect import GoogleConnectionReader, GoogleCon
 from personalos.executor.job_discovery import GatewayJobProvider
 from personalos.executor.tool_executor import ProviderReconciler, ToolExecutor
 from personalos.graphs.job_search import JobSearchSubgraphRunner
-from personalos.mcp.adapter import MCPToolInvoker
+from personalos.mcp.adapter import Authorizer, MCPToolInvoker
 from personalos.mcp.base import MCPServer
 from personalos.mcp.manager import MCPServerManager, get_mcp_manager
 from personalos.models.gateway import ModelConfig, ModelGateway
@@ -82,7 +88,7 @@ from personalos.persistence.workflow_commands import WORKFLOW_COMMAND_EVENT, Wor
 from personalos.persistence.workflow_failures import WorkflowFailureStore
 from personalos.persistence.workflow_progress import WorkflowProgressLog
 from personalos.persistence.workflow_status import WorkflowStatusReader
-from personalos.policy import PolicyEngine, default_policy_engine
+from personalos.policy import ApprovedIntent, PolicyEngine, default_policy_engine
 from personalos.providers import (
     JOB_PROVIDERS_SERVER,
     GreenhouseProvider,
@@ -144,6 +150,8 @@ def register_mcp_servers(
     manager = manager or get_mcp_manager()
     if settings.mcp_files_enabled:
         manager.register_server(build_files_mcp_server(operation_store=operation_store))
+    if settings.mcp_google_enabled:
+        manager.register_server(build_google_mcp_server(operation_store=operation_store))
     logger.info("Registered MCP servers: %s", manager.list_servers())
     return manager
 
@@ -190,7 +198,9 @@ def build_tool_gateway(
     providers, when given, are reachable as `job_providers.*` behind the same
     engine as every MCP tool.
     """
-    invoker: ToolInvoker = MCPToolInvoker(manager or get_mcp_manager())
+    invoker: ToolInvoker = MCPToolInvoker(
+        manager or get_mcp_manager(), authorizers={GOOGLE_PROVIDER: google_authorizer()}
+    )
     providers = list(job_providers)
     if providers:
         invoker = RoutingToolInvoker(
@@ -488,6 +498,117 @@ def build_google_connection_reader(
 ) -> GoogleConnectionReader:
     """Build the reader `auth google --status` and `GET /v1/integrations` use."""
     return GoogleConnectionReader(session_factory, build_integration_health_store(session_factory))
+
+
+# --- Google MCP server --------------------------------------------------------
+
+
+def build_google_mcp_server(
+    broker: CredentialBroker | None = None,
+    http=None,
+    operation_store: OperationStore | None = None,
+) -> MCPServer:
+    """Build the Gmail and Calendar server.
+
+    It holds the credential broker as its `AccessTokenProvider` port and
+    exchanges a reference for a short-lived token on each call; the refresh
+    token stays in the keychain, read only by the broker.
+    """
+    from mcp_servers.google.api import HttpxGoogleHttp
+    from mcp_servers.google.server import GoogleMCPServer
+    from mcp_servers.google.tools import GoogleWorkspaceTools
+
+    tools = GoogleWorkspaceTools(broker or build_credential_broker(), http or HttpxGoogleHttp())
+    return GoogleMCPServer(tools, operation_store=operation_store)
+
+
+def connected_google_credential(
+    session_factory: Callable[[], object] = SessionLocal,
+    account: str | None = None,
+) -> CredentialRef:
+    """The `cred://google/...` reference the Google tools act on.
+
+    `account` (default `GOOGLE_ACCOUNT`) picks one connected account by
+    address; otherwise the most recently connected active one. Raises
+    `CredentialReconnectRequired` when there is none.
+    """
+    account = settings.google_account if account is None else account
+    connections = build_google_connection_reader(session_factory).connections()
+    for connection in connections:
+        if not account or connection.account.lower() == account.lower():
+            return CredentialRef.parse(connection.credential_ref)
+    wanted = f" for {account}" if account else ""
+    raise CredentialReconnectRequired(
+        f"no Google account is connected{wanted}; run `python -m personalos.cli auth google`",
+        provider=GOOGLE_PROVIDER,
+    )
+
+
+def google_authorizer(
+    credential: Callable[[], CredentialRef] | CredentialRef | str | None = None,
+) -> Authorizer:
+    """What `MCPToolInvoker` attaches to every `google.*` call, after policy.
+
+    The credential is deployment configuration -- the connected account --
+    resolved here at call time, never an intent argument. `principal` is the
+    node the call was authorized for, and the decision row is cited.
+    """
+
+    def resolve() -> CredentialRef:
+        if credential is None:
+            return connected_google_credential()
+        if callable(credential):
+            return credential()
+        return CredentialRef.parse(credential)
+
+    def authorize(approved: ApprovedIntent) -> ToolAuthorization:
+        return ToolAuthorization(
+            credential_ref=str(resolve()),
+            principal=approved.intent.requested_by,
+            policy_decision_id=approved.decision.record_id,
+        )
+
+    return authorize
+
+
+def serve_google_mcp_stdio() -> None:
+    """Serve the Google MCP server on stdin/stdout (`personalos.cli mcp-google`).
+
+    Logging goes to stderr first: stdout is the protocol.
+    """
+    import asyncio
+    import sys
+
+    from personalos.mcp.stdio import serve_stdio
+
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if getattr(handler, "stream", None) is sys.stdout:
+            root.removeHandler(handler)
+    if not any(getattr(h, "stream", None) is sys.stderr for h in root.handlers):
+        root.addHandler(logging.StreamHandler(sys.stderr))
+    asyncio.run(serve_stdio(build_google_mcp_server(operation_store=build_operation_store())))
+
+
+async def connect_google_mcp_stdio(
+    manager: MCPServerManager | None = None,
+    command: Iterable[str] | None = None,
+) -> MCPServer:
+    """Spawn the Google server as a child over stdio and register its proxy.
+
+    The alternative to registering it in-process: the same tools, the same
+    gateway and policy, a process boundary between them and the caller.
+    """
+    import sys
+
+    from personalos.mcp.stdio import MCPStdioClient, RemoteMCPServer
+
+    client = await MCPStdioClient.spawn(
+        list(command or (sys.executable, "-m", "personalos.cli", "mcp-google"))
+    )
+    remote = await RemoteMCPServer.connect(GOOGLE_PROVIDER, client)
+    (manager or get_mcp_manager()).register_server(remote)
+    return remote
 
 
 def initialize_mcp_servers() -> MCPServerManager:
@@ -986,6 +1107,11 @@ __all__ = [
     "build_operation_store",
     "register_mcp_servers",
     "build_files_mcp_server",
+    "build_google_mcp_server",
+    "connected_google_credential",
+    "google_authorizer",
+    "serve_google_mcp_stdio",
+    "connect_google_mcp_stdio",
     "build_policy_engine",
     "build_tool_gateway",
     "configured_job_providers",

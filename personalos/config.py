@@ -68,6 +68,14 @@ class Settings(BaseSettings):
 
     # MCP Servers
     mcp_files_enabled: bool = True
+    # The Google (Gmail and Calendar) MCP server. Off until a Google account
+    # is connected (`personalos.cli auth google`); it is registered
+    # in-process, and can also be served over stdio (`personalos.cli
+    # mcp-google`). It never listens on a port.
+    mcp_google_enabled: bool = False
+    # Which connected Google account the Google tools act on, by address.
+    # Empty means the most recently connected active account.
+    google_account: str = ""
 
     # File tools. The only directories the files MCP server may read or write,
     # as absolute paths; the first is the one relative paths resolve against.
