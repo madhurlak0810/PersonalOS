@@ -3,8 +3,9 @@
 Written when a provider refuses in a way retrying cannot change (a
 `ProviderPermanentFailure`: revoked OAuth, a missing scope), read when a
 workflow failure is shown, so the failure can offer a reconnect instead of a
-retry that would only fail again. Marking healthy again is what a reconnect
-does; until one exists, nothing here clears a degraded row on its own.
+retry that would only fail again. A reconnect marks the provider healthy
+again (for Google, `GoogleConnector.complete`), and a user's disconnect marks
+it degraded. Nothing here clears a degraded row on its own.
 
 Stores what it is told; it decides nothing.
 """

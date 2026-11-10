@@ -14,7 +14,7 @@ from datetime import timedelta
 from uuid import UUID
 
 from personalos.config import settings
-from personalos.domain.credentials import CredentialExchangeFailed, CredentialRef
+from personalos.domain.credentials import CredentialExchangeFailed, CredentialRef, SecretValue
 from personalos.domain.errors import PortNotConfigured
 from personalos.domain.events import EventEnvelope
 from personalos.domain.workflow import (
@@ -32,6 +32,7 @@ from personalos.executor.calendar import (
 )
 from personalos.executor.credentials import CredentialBroker
 from personalos.executor.document_reader import GatewayDocumentReader
+from personalos.executor.google_connect import GoogleConnectionReader, GoogleConnector
 from personalos.executor.job_discovery import GatewayJobProvider
 from personalos.executor.tool_executor import ProviderReconciler, ToolExecutor
 from personalos.graphs.job_search import JobSearchSubgraphRunner
@@ -103,6 +104,7 @@ from personalos.secrets.exchange import (
     GoogleOAuthTokenExchanger,
     TokenExchanger,
 )
+from personalos.secrets.google_oauth import GoogleOAuthClient
 from personalos.secrets.store import KeyringSecretStore, SecretStore
 from personalos.tools.gateway import (
     PolicyEnforcingToolGateway,
@@ -425,6 +427,67 @@ def build_credential_broker(
             )
         exchangers = wired
     return CredentialBroker(store, exchangers)
+
+
+def google_oauth_client_secret_ref() -> CredentialRef:
+    """Where this deployment's Google OAuth client secret is filed."""
+    return CredentialRef.parse(settings.google_oauth_client_secret_ref)
+
+
+def store_google_oauth_client_secret(
+    secret: SecretValue, store: SecretStore | None = None
+) -> CredentialRef:
+    """File the Google OAuth client secret in the keychain; return its reference."""
+    ref = google_oauth_client_secret_ref()
+    (store or build_secret_store()).put(ref, secret)
+    return ref
+
+
+def build_google_oauth_client(store: SecretStore | None = None) -> GoogleOAuthClient:
+    """Build the client for Google's consent, token and revocation endpoints.
+
+    Raises `PortNotConfigured` until `GOOGLE_OAUTH_CLIENT_ID` is set and the
+    client secret is in the keychain (`personalos.cli auth google-client`).
+    """
+    if not settings.google_oauth_client_id:
+        raise PortNotConfigured(
+            "GOOGLE_OAUTH_CLIENT_ID is not set; create a Desktop OAuth client and run "
+            "`python -m personalos.cli auth google-client`",
+            port="google_oauth_client",
+        )
+    ref = google_oauth_client_secret_ref()
+    client_secret = (store or build_secret_store()).get(ref)
+    if client_secret is None:
+        raise PortNotConfigured(
+            f"no Google OAuth client secret is stored at {ref}; run "
+            "`python -m personalos.cli auth google-client`",
+            port="google_oauth_client",
+        )
+    return GoogleOAuthClient(settings.google_oauth_client_id, client_secret)
+
+
+def build_google_connector(
+    session_factory: Callable[[], object] = SessionLocal,
+    *,
+    store: SecretStore | None = None,
+    oauth: GoogleOAuthClient | None = None,
+) -> GoogleConnector:
+    """Build what `auth google` and `/v1/integrations/google/*` run the consent flow with."""
+    store = store or build_secret_store()
+    return GoogleConnector(
+        oauth or build_google_oauth_client(store),
+        store,
+        session_factory,
+        build_integration_health_store(session_factory),
+        testing_app=settings.google_oauth_publishing_status.lower() != "production",
+    )
+
+
+def build_google_connection_reader(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> GoogleConnectionReader:
+    """Build the reader `auth google --status` and `GET /v1/integrations` use."""
+    return GoogleConnectionReader(session_factory, build_integration_health_store(session_factory))
 
 
 def initialize_mcp_servers() -> MCPServerManager:

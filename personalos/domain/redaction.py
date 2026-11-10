@@ -70,6 +70,7 @@ SENSITIVE_KEYS: frozenset[str] = frozenset(
         "private_key",
         "oauth_code",
         "authorization_code",
+        "code_verifier",
     }
 )
 
@@ -124,13 +125,16 @@ _TEXT_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     # A bearer token with no header name in front of it.
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"), f"Bearer {REDACTED}"),
-    # `refresh_token=...`, `"client_secret": "..."`, `GOOGLE_API_KEY=...`.
+    # `refresh_token=...`, `"client_secret": "..."`, `GOOGLE_API_KEY=...`,
+    # and an OAuth PKCE `code_verifier=...`.
     (
         re.compile(
             r"(?i)(?<![A-Za-z0-9])"
             r"((?:refresh|access|id|auth|session|security|bearer)[_-]?token"
             r"|client[_-]?secret|(?:x[_-])?api[_-]?key|password|passwd"
-            r"|secret[_-]?key|private[_-]?key)" + _NAME_VALUE_SEPARATOR + r"[^\s\"'&,;}\]]+"
+            r"|secret[_-]?key|private[_-]?key|code[_-]?verifier)"
+            + _NAME_VALUE_SEPARATOR
+            + r"[^\s\"'&,;}\]]+"
         ),
         rf"\1\2{REDACTED}",
     ),

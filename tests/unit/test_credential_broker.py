@@ -467,6 +467,7 @@ def test_a_credential_row_stores_the_reference_and_no_token(session):
         "scopes",
         "status",
         "last_exchanged_at",
+        "consent_expires_at",
         "created_at",
         "updated_at",
     }

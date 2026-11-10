@@ -715,6 +715,17 @@ is handed the broker by `bootstrap`; it calls `exchange` (or `async with
 broker.lease(...)`) immediately before the provider call. A token is never an
 intent argument — arguments are fingerprinted, logged and checkpointed.
 
+The refresh token gets there through
+[`GoogleConnector`](../personalos/executor/google_connect.py), the only code
+that writes one (`personalos.cli auth google`, `/v1/integrations/google/*`).
+It runs Authorization Code + PKCE against a loopback redirect, and while the
+flow is in progress it keeps the PKCE verifier in the secret store, not the
+database. When the redirect arrives it writes the token to the keychain and
+the reference to `credentials`. Revoking deletes the keychain entry, and the
+broker then raises `CredentialReconnectRequired`, a
+`ProviderPermanentFailure`, so a failed step offers a reconnect instead of a
+retry.
+
 `SecretValue` and `AccessToken` refuse to be pickled or copied and no
 serializer here can encode them, so one that strays into graph state fails the
 checkpoint write instead of being stored.

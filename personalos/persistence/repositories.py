@@ -1129,6 +1129,48 @@ class CredentialRepository:
         self.session.commit()
         return db_credential
 
+    def record_connected(
+        self,
+        *,
+        ref: CredentialRef,
+        kind: CredentialKind,
+        scopes: list[str],
+        user_id: UUID | None = None,
+        consent_expires_at: datetime | None = None,
+    ) -> CredentialModel:
+        """Record a fresh consent: create the row, or reactivate and update it.
+
+        A reconnect after a revoke reuses the row, so a reference keeps one
+        history. The secret itself is the caller's to write to the store.
+        """
+        if not isinstance(ref, CredentialRef):
+            raise TypeError("CredentialRepository.record_connected requires a CredentialRef")
+        db_credential = self.get_by_ref(ref)
+        if db_credential is None:
+            db_credential = CredentialModel(
+                user_id=user_id,
+                provider=ref.provider,
+                credential_ref=str(ref),
+            )
+            self.session.add(db_credential)
+        now = datetime.utcnow()
+        db_credential.kind = CredentialKind(kind).value
+        db_credential.scopes = list(scopes)
+        db_credential.status = "active"
+        db_credential.consent_expires_at = consent_expires_at
+        db_credential.updated_at = now
+        self.session.commit()
+        return db_credential
+
+    def list_by_provider(self, provider: str, *, active_only: bool = True) -> list[CredentialModel]:
+        """Every credential recorded for a provider, most recently changed first."""
+        query = self.session.query(CredentialModel).filter(CredentialModel.provider == provider)
+        if active_only:
+            query = query.filter(CredentialModel.status == "active")
+        return query.order_by(
+            CredentialModel.updated_at.desc(), CredentialModel.credential_ref
+        ).all()
+
     def get_by_ref(self, ref: CredentialRef) -> CredentialModel | None:
         """Get the row for a reference, if one was recorded."""
         return (

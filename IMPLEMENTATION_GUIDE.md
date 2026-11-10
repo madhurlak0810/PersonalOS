@@ -207,6 +207,74 @@ if anything differs from what this guide says. To run it without PostgreSQL,
 set `DATABASE_URL=sqlite:////tmp/smoke.db`. That skips Alembic and the
 pgvector index, so CI runs it on PostgreSQL.
 
+### Optional: connect a Google account
+
+The walkthrough above needs no Google account. Gmail and Calendar adapters
+(Phase J2 onwards) need one, and this is how to connect it. You need a
+desktop browser on the same machine, because Google redirects to
+`127.0.0.1`.
+
+1. In the [Google Cloud console](https://console.cloud.google.com/), create a
+   project, enable the Gmail API and the Google Calendar API, and configure
+   the OAuth consent screen as **External**, in **Testing** status. Add your
+   own Google account under **Test users**.
+2. Create an OAuth client ID of type **Desktop app** and download its JSON.
+3. Store the client secret in the OS keychain, and put the client ID (which
+   is not secret) in `.env`:
+
+   ```bash
+   python -m personalos.cli auth google-client --from-json ~/Downloads/client_secret_*.json
+   echo 'GOOGLE_OAUTH_CLIENT_ID=<the client id it printed>' >> .env
+   ```
+
+4. Connect. This opens Google's consent page, waits for the redirect on a
+   `127.0.0.1` port, and stores the refresh token in the OS keychain:
+
+   ```bash
+   python -m personalos.cli auth google            # read-only: gmail.readonly, calendar.readonly
+   python -m personalos.cli auth google --status   # account, granted scopes, consent expiry
+   ```
+
+   The database holds only the reference `cred://google/<you>@gmail.com`,
+   never the token.
+
+5. Write access is a separate consent, asked for only once the read-only
+   connection exists, and only for the capabilities you name:
+
+   ```bash
+   python -m personalos.cli auth google --enable gmail.send     # or gmail.compose, calendar.write
+   ```
+
+6. To disconnect, revoke the grant at Google and delete the keychain entry.
+   Any later use of the connection fails with a *reconnect required* error
+   until you connect again:
+
+   ```bash
+   python -m personalos.cli auth google --revoke
+   ```
+
+The API does the same over HTTP: `POST /v1/integrations/google/connect`
+returns an `authorization_url`, Google redirects to
+`/v1/integrations/google/callback`, and `GET /v1/integrations` reports the
+status. No response contains token material.
+
+> **Unverified app limits.** `gmail.readonly`, `gmail.compose` and
+> `gmail.send` are *restricted* scopes. To publish an app that uses them,
+> Google requires verification and an annual security assessment. An
+> unverified app in **Testing** status avoids that, but Google limits it in
+> two ways:
+>
+> - **Only listed test users can consent** (at most 100). That is enough for
+>   local-first, single-user use, but you cannot share the OAuth client with
+>   anyone you have not added. Each person should create their own client.
+> - **Refresh tokens expire after 7 days.** `auth google --status` shows the
+>   expiry. Run `auth google` again before it passes. If you have moved the
+>   app to **In production** status, set `GOOGLE_OAUTH_PUBLISHING_STATUS=production`
+>   and the connection is no longer recorded as expiring.
+>
+> Google also shows an "unverified app" warning on the consent page. That is
+> expected for your own client.
+
 ---
 
 ## Security Posture (until Phase L1)
@@ -460,6 +528,10 @@ POST   /v1/applications/{id}/transition           Request a lifecycle transition
 POST   /v1/profile, GET/PUT /v1/profile           The search profile (versioned)
 GET    /v1/profile/versions[/{n}]
 POST   /v1/evidence/documents                     Ingest a resume
+GET    /v1/integrations                           Connected accounts, scopes, consent expiry
+POST   /v1/integrations/google/connect            Begin Google consent (read-only unless `enable`)
+GET    /v1/integrations/google/callback           Google's redirect; stores the refresh token
+POST   /v1/integrations/google/revoke             Revoke at Google, delete the keychain entry
 GET    /v1/failures/events, POST .../{id}/retry   Parked outbox events
 ```
 
@@ -496,6 +568,8 @@ python -m personalos.cli profile create|update|show|versions [--actor api]
 python -m personalos.cli approvals [--json]
 python -m personalos.cli workflow-status WORKFLOW_ID [--json]
 python -m personalos.cli stall-monitor [--once]
+python -m personalos.cli auth google [--enable CAPABILITY] [--status] [--revoke] [--json]
+python -m personalos.cli auth google-client [--from-json PATH]
 ```
 
 ### 11. Orchestration Graphs (`personalos/graphs/`)
@@ -1378,6 +1452,8 @@ Settings come from the environment, then `.env` in the working directory.
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | Use `text` in a terminal. |
 | `TRACING_ENABLED` / `OTEL_EXPORTER_OTLP_ENDPOINT` | `false` / empty | An OTLP/HTTP collector, for example Jaeger at `http://localhost:4318`. |
 | `SECRET_STORE_SERVICE` | `personalos` | The OS keychain service that holds secrets. Never put a secret in `.env`. |
+| `GOOGLE_OAUTH_CLIENT_ID` | empty | A Desktop-app OAuth client. Its secret goes in the keychain via `auth google-client`. |
+| `GOOGLE_OAUTH_PUBLISHING_STATUS` | `testing` | `testing` records Google connections as expiring after 7 days, as Google does for unverified apps. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Optional MCP response cache. |
 
 ---

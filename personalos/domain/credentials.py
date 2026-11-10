@@ -33,6 +33,7 @@ from typing import Protocol, runtime_checkable
 from personalos.domain.errors import (
     FailureClass,
     NotFound,
+    ProviderPermanentFailure,
     RetryableFailure,
     ValidationFailed,
 )
@@ -86,6 +87,23 @@ class CredentialRevoked(ValidationFailed):
 
     default_message = "credential was revoked or is no longer valid"
     failure_class = FailureClass.PROVIDER_PERMANENT
+
+
+class CredentialReconnectRequired(ProviderPermanentFailure, CredentialNotFound):
+    """The store holds no secret for a reference: it was revoked, or never connected.
+
+    A `ProviderPermanentFailure`, so a step that hits it is offered a
+    reconnect rather than a retry that would only fail the same way, and it
+    carries `provider` into `repr()` so that survives a checkpoint. Still a
+    `CredentialNotFound`, for callers that only care that nothing is there.
+    """
+
+    default_message = "the integration is not connected; reconnect it"
+
+    def __init__(self, message: str | None = None, *, provider: str, **kwargs):
+        super().__init__(
+            message, provider=provider, reason=ProviderPermanentFailure.REVOKED_AUTH, **kwargs
+        )
 
 
 @dataclass(frozen=True)
@@ -219,6 +237,7 @@ __all__ = [
     "CredentialNotFound",
     "CredentialExchangeFailed",
     "CredentialRevoked",
+    "CredentialReconnectRequired",
     "CredentialRef",
     "SecretValue",
     "AccessToken",

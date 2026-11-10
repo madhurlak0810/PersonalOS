@@ -241,5 +241,150 @@ def ingest_resume(path: str, actor_id: str):
     click.echo(result.model_dump_json(indent=2))
 
 
+# --- Integrations -----------------------------------------------------------------
+#
+# `auth google` is the only way a Google refresh token is ever obtained: it
+# runs the consent on a loopback listener and files the token in the OS
+# keychain. The database, the logs and the output hold only its `cred://`
+# reference.
+
+
+@cli.group()
+def auth():
+    """Connect, inspect and disconnect integrations."""
+
+
+@auth.command("google")
+@click.option("--status", "show_status", is_flag=True, help="Show the connection; change nothing.")
+@click.option("--revoke", is_flag=True, help="Revoke at Google and delete the keychain entry.")
+@click.option(
+    "--enable",
+    "enable",
+    multiple=True,
+    metavar="CAPABILITY",
+    help=(
+        "Ask for a write capability on top of the existing read-only connection: "
+        "gmail.compose, gmail.send or calendar.write. Repeatable."
+    ),
+)
+@click.option("--account", default=None, help="With --revoke: disconnect only this account.")
+@click.option("--no-browser", is_flag=True, help="Print the consent URL instead of opening it.")
+@click.option("--port", default=0, type=click.IntRange(0, 65535), help="Loopback port (0: any).")
+@click.option("--timeout", default=300, type=click.IntRange(min=10), help="Seconds to wait.")
+@click.option("--json", "as_json", is_flag=True, help="Print the API response body instead.")
+def auth_google(
+    show_status: bool,
+    revoke: bool,
+    enable: tuple[str, ...],
+    account: str | None,
+    no_browser: bool,
+    port: int,
+    timeout: int,
+    as_json: bool,
+):
+    """Connect a Google account (read-only by default), show it, or disconnect it.
+
+    With no options, opens Google's consent page for Gmail and Calendar
+    read-only access, catches the redirect on 127.0.0.1, and stores the refresh
+    token in the OS keychain. Write access (`--enable gmail.send`, ...) is a
+    separate consent, asked for only once a read-only connection exists.
+    """
+    import asyncio
+    import webbrowser
+
+    from personalos.bootstrap import build_google_connection_reader, build_google_connector
+    from personalos.cli_views import render_integration, render_revocations
+    from personalos.domain.integrations import parse_capabilities
+    from personalos.executor.google_connect import run_loopback_consent
+
+    if sum((show_status, revoke, bool(enable))) > 1:
+        raise click.UsageError("use one of --status, --revoke or --enable at a time")
+    if account and not revoke:
+        raise click.UsageError("--account applies only to --revoke")
+    try:
+        capabilities = parse_capabilities(enable)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--enable") from exc
+
+    if show_status:
+        status = build_google_connection_reader().status()
+        click.echo(status.model_dump_json(indent=2) if as_json else render_integration(status))
+        return
+
+    connector = _profile_call(build_google_connector)
+
+    if revoke:
+        results = _profile_call(lambda: asyncio.run(connector.revoke(account)))
+        if as_json:
+            from apps.api.routes.integrations import GoogleRevokeResponse
+
+            click.echo(GoogleRevokeResponse(results=results).model_dump_json(indent=2))
+        else:
+            click.echo(render_revocations(results))
+        return
+
+    def open_browser(url: str) -> None:
+        click.echo("Grant access in your browser. If it did not open, visit:\n", err=True)
+        click.echo(f"  {url}\n", err=True)
+        if not no_browser:
+            webbrowser.open(url)
+
+    _profile_call(
+        lambda: asyncio.run(
+            run_loopback_consent(
+                connector,
+                enable=capabilities,
+                open_browser=open_browser,
+                timeout=timeout,
+                port=port,
+            )
+        )
+    )
+    status = connector.status()
+    click.echo(status.model_dump_json(indent=2) if as_json else render_integration(status))
+
+
+@auth.command("google-client")
+@click.option(
+    "--from-json",
+    "client_json",
+    type=click.File("r"),
+    default=None,
+    help="The client_secret_*.json downloaded from the Google Cloud console.",
+)
+def auth_google_client(client_json):
+    """Store this deployment's Google OAuth client secret in the OS keychain.
+
+    Create a "Desktop app" OAuth client in the Google Cloud console, then run
+    this with its downloaded JSON (or paste the secret when prompted). The
+    client id is not secret: put it in `.env` as GOOGLE_OAUTH_CLIENT_ID.
+    """
+    import json
+
+    from personalos.bootstrap import store_google_oauth_client_secret
+    from personalos.domain.credentials import SecretValue
+
+    client_id = None
+    if client_json is not None:
+        try:
+            document = json.load(client_json)
+            client = document.get("installed") or document.get("web") or {}
+            client_id, secret = client["client_id"], client["client_secret"]
+        except (ValueError, KeyError, AttributeError) as exc:
+            raise click.ClickException(
+                "not a Google OAuth client JSON (expected installed.client_id and client_secret)"
+            ) from exc
+    else:
+        secret = click.prompt("Client secret", hide_input=True)
+
+    ref = _profile_call(lambda: store_google_oauth_client_secret(SecretValue(secret)))
+    click.echo(f"Stored the OAuth client secret in the OS keychain at {ref}.")
+    configured = settings.google_oauth_client_id
+    if client_id and configured != client_id:
+        click.echo(f"Now set GOOGLE_OAUTH_CLIENT_ID={client_id} in .env.")
+    elif not configured:
+        click.echo("Now set GOOGLE_OAUTH_CLIENT_ID in .env to the client's id.")
+
+
 if __name__ == "__main__":
     cli()
