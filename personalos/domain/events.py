@@ -91,6 +91,13 @@ class EventType:
     #: `event` (a dumped `personalos.domain.interview_scheduling.CalendarEvent`).
     CALENDAR_EVENT_CHANGED = "calendar.event_changed"
 
+    #: A message matching the user's mailbox scope arrived (or was labelled
+    #: into scope). A pointer, not the message: payload `user_id`,
+    #: `provider_message_id`, `thread_id`, `matched_rules`, `history_id`; the
+    #: content is fetched on demand through `raw_ref` (`gmail:<message id>`).
+    #: See `personalos.domain.mailbox`.
+    EMAIL_RECEIVED = "email.received"
+
 
 class EventEnvelope(BaseModel):
     """One event, as every producer stages it and every consumer reads it."""

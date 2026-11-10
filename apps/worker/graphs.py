@@ -14,7 +14,10 @@ Supervisor and the Job Search subgraph on the durable Postgres checkpointer
   stores evidence vectors with;
 - the Greenhouse boards in `GREENHOUSE_BOARDS`, through the gateway;
 - Google Calendar, as both the calendar reader and the calendar executor's
-  client, once `MCP_GOOGLE_ENABLED` and `CALENDAR_TIME_ZONE` are set.
+  client, once `MCP_GOOGLE_ENABLED` and `CALENDAR_TIME_ZONE` are set;
+- the Gmail inbox, as the reader `email.received` runs fetch their message
+  through, once `MCP_GOOGLE_ENABLED` and a mailbox scope
+  (`GMAIL_RECRUITER_LABELS` / `GMAIL_RECRUITER_QUERIES`) are set.
 
 The ports with no adapter yet are bound to the `apps.worker.unconfigured`
 stand-ins, which fail the step that reaches them with a retryable
@@ -53,6 +56,7 @@ from personalos.bootstrap import (
     build_durable_checkpointer,
     build_embedder,
     build_event_emitter,
+    build_gmail_recruiter_inbox,
     build_google_calendar,
     build_integration_health_store,
     build_job_matcher,
@@ -138,6 +142,14 @@ def default_job_search_ports(
         packet_stubs.append(writer)
 
     mailbox = NotConfiguredMailbox()
+    inbound_reader: Any
+    inbound_stubs: list[_NotConfigured] = []
+    try:
+        inbound_reader = build_gmail_recruiter_inbox(session_factory=session_factory, policy=policy)
+    except PortNotConfigured as exc:
+        logger.info("the Gmail inbox is not wired: %s", exc)
+        inbound_reader = mailbox
+        inbound_stubs.append(mailbox)
     calendar: Any
     calendar_stubs: list[_NotConfigured] = []
     try:
@@ -186,6 +198,7 @@ def default_job_search_ports(
         "reply_drafter": reply_drafter,
         "calendar_reader": calendar,
         "application_transitioner": build_application_transitioner(session_factory=session_factory),
+        "inbound_message_reader": inbound_reader,
     }
     stubs = {
         "providers": board_stubs,
@@ -195,6 +208,7 @@ def default_job_search_ports(
         "recruiter_inbox": [mailbox],
         "reply_drafter": [reply_drafter],
         "calendar_reader": calendar_stubs,
+        "inbound_message_reader": inbound_stubs,
     }
     return ports, stubs
 

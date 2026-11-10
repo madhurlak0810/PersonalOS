@@ -22,6 +22,7 @@ from personalos.domain.credentials import (
 )
 from personalos.domain.errors import PortNotConfigured
 from personalos.domain.events import EventEnvelope
+from personalos.domain.mailbox import MailboxScope
 from personalos.domain.models import ToolAuthorization
 from personalos.domain.workflow import (
     WorkflowThread,
@@ -38,6 +39,7 @@ from personalos.executor.calendar import (
 )
 from personalos.executor.credentials import CredentialBroker
 from personalos.executor.document_reader import GatewayDocumentReader
+from personalos.executor.gmail_inbox import GmailRecruiterInbox
 from personalos.executor.google_calendar import CalendarChangeScanner, GoogleCalendar
 from personalos.executor.google_connect import GoogleConnectionReader, GoogleConnector
 from personalos.executor.job_discovery import GatewayJobProvider
@@ -76,6 +78,7 @@ from personalos.persistence.idempotency import OperationStore, SqlOperationStore
 from personalos.persistence.integration_health import IntegrationHealthStore
 from personalos.persistence.job_postings import SqlPostingCatalog
 from personalos.persistence.leases import DEFAULT_LEASE_TTL_SECONDS, WorkflowLeaseStore
+from personalos.persistence.mailbox_cursors import SqlMailboxCursorStore
 from personalos.persistence.outbox_emitter import OutboxEventEmitter
 from personalos.persistence.pending_checkpoints import (
     PendingCheckpointStore,
@@ -861,6 +864,75 @@ def build_calendar_change_scanner(
     return CalendarChangeScanner(calendar, build_event_outbox(session_factory).publish)
 
 
+def build_mailbox_scope(
+    labels: Iterable[str] | None = None, queries: Iterable[str] | None = None
+) -> MailboxScope:
+    """The mailbox scope: `GMAIL_RECRUITER_LABELS` and `GMAIL_RECRUITER_QUERIES` by default."""
+    return MailboxScope(
+        labels=tuple(settings.gmail_recruiter_labels if labels is None else labels),
+        queries=tuple(settings.gmail_recruiter_queries if queries is None else queries),
+    )
+
+
+def build_mailbox_cursor_store(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> SqlMailboxCursorStore:
+    """The store the inbox poller's cursor -- and the events it moves with -- are written to."""
+    return SqlMailboxCursorStore(session_factory)
+
+
+def build_gmail_recruiter_inbox(
+    gateway: ToolGateway | None = None,
+    *,
+    session_factory: Callable[[], object] = SessionLocal,
+    policy: PolicyEngine | None = None,
+    scope: MailboxScope | None = None,
+    user_id: UUID | None = None,
+    account: str | None = None,
+) -> GmailRecruiterInbox:
+    """Build the Gmail inbox: the poller the worker sweeps, and the classifier's reader.
+
+    Every call goes through `gateway` -- by default the durable-policy gateway
+    over the global MCP manager -- to the `google.gmail_*` tools. Mail is
+    matched against `user_id`'s applications (default: `GMAIL_INBOX_ACTOR`'s).
+
+    Raises `PortNotConfigured` while the scope is empty (nothing is in view),
+    the Google server is off, or no Google account is connected.
+    """
+    scope = scope if scope is not None else build_mailbox_scope()
+    if scope.is_empty:
+        raise PortNotConfigured(
+            "GMAIL_RECRUITER_LABELS and GMAIL_RECRUITER_QUERIES are both empty; name the "
+            "labels or Gmail searches recruiter mail is found by",
+            port="mailbox",
+        )
+    if gateway is None:
+        if not settings.mcp_google_enabled:
+            raise PortNotConfigured(
+                "MCP_GOOGLE_ENABLED is off; connect Google (`personalos.cli auth google`) "
+                "and enable it",
+                port="mailbox",
+            )
+        gateway = build_tool_gateway(policy=policy or build_policy_engine())
+    if account is None:
+        try:
+            account = connected_google_credential(session_factory).name
+        except CredentialReconnectRequired as exc:
+            raise PortNotConfigured(str(exc), port="mailbox") from exc
+    if user_id is None:
+        from personalos.domain.search_profiles import actor_user_id
+
+        user_id = actor_user_id(settings.gmail_inbox_actor)
+    return GmailRecruiterInbox(
+        gateway,
+        build_mailbox_cursor_store(session_factory),
+        scope=scope,
+        user_id=user_id,
+        account=account,
+        backfill_days=settings.gmail_backfill_days,
+    )
+
+
 def build_checkpoint_condition_evaluator(
     session_factory: Callable[[], object] = SessionLocal,
 ) -> SqlCheckpointConditionEvaluator:
@@ -1140,7 +1212,26 @@ def register_calendar_change_thread(
     and a later move gets a run of its own rather than stacking onto one
     parked at an approval.
     """
-    thread_id = job_search_thread_id(user_id, f"calendar_change:{envelope.dedupe_key}")
+    return _register_event_job_search_thread(envelope, user_id, "calendar_change", registry)
+
+
+def register_inbound_email_thread(
+    envelope: EventEnvelope, user_id: UUID, *, registry: WorkflowThreadRegistry
+) -> WorkflowThread:
+    """Derive and register the job-search thread one inbound email is classified on.
+
+    One per message, for the reason a calendar change gets one: the id comes
+    from the event's `dedupe_key` (the provider's message id), so a redelivery
+    finds the first delivery's run, and a reply parked at approval on one
+    message does not hold up the next.
+    """
+    return _register_event_job_search_thread(envelope, user_id, "email", registry)
+
+
+def _register_event_job_search_thread(
+    envelope: EventEnvelope, user_id: UUID, kind: str, registry: WorkflowThreadRegistry
+) -> WorkflowThread:
+    thread_id = job_search_thread_id(user_id, f"{kind}:{envelope.dedupe_key}")
     existing = registry.resolve(thread_id)
     if existing is not None:
         return existing
@@ -1225,6 +1316,10 @@ __all__ = [
     "build_application_transitioner",
     "register_application_transition_thread",
     "register_calendar_change_thread",
+    "register_inbound_email_thread",
+    "build_mailbox_scope",
+    "build_mailbox_cursor_store",
+    "build_gmail_recruiter_inbox",
     "build_recruiter_event_store",
     "build_pending_checkpoint_store",
     "build_calendar_action_executor",

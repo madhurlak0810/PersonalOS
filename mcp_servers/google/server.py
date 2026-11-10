@@ -10,6 +10,9 @@ tool                        permission class   Google scope
 ==========================  =================  ==============================
 ``gmail_search``            READ_EXTERNAL      ``gmail.readonly``
 ``gmail_read_message``      READ_EXTERNAL      ``gmail.readonly``
+``gmail_list_history``      READ_EXTERNAL      ``gmail.readonly``
+``gmail_get_profile``       READ_EXTERNAL      ``gmail.readonly``
+``gmail_list_labels``       READ_EXTERNAL      ``gmail.readonly``
 ``gmail_create_draft``      WRITE_REVERSIBLE   ``gmail.compose``
 ``gmail_send_message``      WRITE_EXTERNAL     ``gmail.send``
 ``calendar_list_events``    READ_EXTERNAL      ``calendar.readonly``

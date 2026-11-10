@@ -24,7 +24,10 @@ leaves through the same approval triple as everything else:
     START -> draft_follow_up -> request_approval_for_external_write -> ...
 
 And a third. A run invoked with `inbound_messages` is recruiter mail that has
-not been tied to an application yet. It enters at `classify_recruiter_events`:
+not been tied to an application yet -- or with `inbound_message_refs`, pointers
+to such mail (`gmail:<id>`, from an `email.received` event) that the run reads
+through the `InboundMessageReader` port when it classifies them, and does not
+checkpoint the bodies of. It enters at `classify_recruiter_events`:
 
     START -> classify_recruiter_events -> record_recruiter_events
           -> [a reply is owed] request_approval_for_external_write -> ...
@@ -546,6 +549,20 @@ class RecruiterInbox(Protocol):
         ...
 
 
+class InboundMessageReader(Protocol):
+    """Reads one inbound message, by the pointer its `email.received` event carried.
+
+    Fetch-on-demand (`personalos.domain.mailbox`): the run is handed a
+    reference, not the message, and asks for the message only when it is about
+    to classify it. The implementation is
+    `personalos.executor.gmail_inbox.GmailRecruiterInbox`.
+    """
+
+    async def read(self, ref: str) -> RecruiterMessage | None:
+        """The message `ref` points at, or `None` if the provider no longer has it."""
+        ...
+
+
 class RecruiterMessageClassifier(Protocol):
     """Classifies one recruiter message into a typed response."""
 
@@ -873,6 +890,10 @@ class JobSearchState(TypedDict, total=False):
     #: Messages not yet tied to an application, supplied as *input*. Like
     #: `fired_checkpoints`, their presence decides where the run enters.
     inbound_messages: list[dict[str, Any]]
+    #: Pointers to messages (`gmail:<id>`) supplied as *input* instead of the
+    #: messages themselves; `classify_recruiter_events` reads each through the
+    #: `InboundMessageReader` and keeps its body out of the checkpoint.
+    inbound_message_refs: list[str]
     #: A reviewer's answers to earlier review requests, as *input*:
     #: `provider_message_id -> application_id`.
     confirmed_correlations: dict[str, str]
@@ -952,6 +973,7 @@ class JobSearchGraph:
         reply_drafter: RecruiterReplyDrafter | None = None,
         calendar_reader: CalendarReader | None = None,
         application_transitioner: ApplicationTransitioner | None = None,
+        inbound_message_reader: InboundMessageReader | None = None,
         prep_blocks: Sequence[PrepBlockSpec] = DEFAULT_PREP_BLOCKS,
         working_hours: WorkingHours | None = None,
         correlation_threshold: float = DEFAULT_CORRELATION_THRESHOLD,
@@ -1006,6 +1028,8 @@ class JobSearchGraph:
         self.event_emitter = event_emitter
         self.recruiter_inbox = recruiter_inbox
         self.recruiter_classifier = recruiter_classifier
+        # Optional: only a run handed `inbound_message_refs` needs it.
+        self.inbound_message_reader = inbound_message_reader
         # Optional for the same reason the recruiter inbox is: a deployment
         # with no monitor process sweeping `pending_checkpoints` would schedule
         # waits nothing ever picks up, and a wait nobody will act on is worse
@@ -2167,6 +2191,12 @@ class JobSearchGraph:
             )
         user_id = _require_uuid(state.get("user_id"), "user_id")
         messages = _load(RecruiterMessage, state.get("inbound_messages"))
+        fetched = await self._read_inbound_refs(state.get("inbound_message_refs") or [])
+        messages.extend(fetched)
+        # Read on demand, so not stored: what this node returns is
+        # checkpointed, and a fetched body is left out of it. Nothing after
+        # classification reads the body.
+        unstored = {id(message) for message in fetched}
         confirmed = state.get("confirmed_correlations") or {}
         candidates = list(await self.application_directory.candidates(user_id))
 
@@ -2187,14 +2217,36 @@ class JobSearchGraph:
                     _require_uuid(confirmed_id, "confirmed_correlations") if confirmed_id else None
                 ),
             )
-            events.append(RecruiterEvent.build(message, outcome, correlation))
+            event = RecruiterEvent.build(message, outcome, correlation)
+            if id(message) in unstored:
+                event = event.model_copy(
+                    update={"message": message.model_copy(update={"body": ""})}
+                )
+            events.append(event)
 
         return {
             "recruiter_events": _dump(events),
             # Consumed, so cleared, for the reason `fired_checkpoints` is.
             "inbound_messages": [],
+            "inbound_message_refs": [],
             "confirmed_correlations": {},
         }
+
+    async def _read_inbound_refs(self, refs: Sequence[str]) -> list[RecruiterMessage]:
+        """The messages `refs` point at, read now. A message the provider lost is skipped."""
+        if not refs:
+            return []
+        if self.inbound_message_reader is None:
+            raise JobSearchContractError(
+                "inbound_message_refs were supplied, but this graph has no inbound message "
+                "reader wired"
+            )
+        messages: list[RecruiterMessage] = []
+        for ref in refs:
+            message = await self.inbound_message_reader.read(str(ref))
+            if message is not None:
+                messages.append(message)
+        return messages
 
     async def record_recruiter_events(self, state: JobSearchState) -> dict[str, Any]:
         """Record what was matched, hand the rest to a person, draft owed replies.
@@ -2492,7 +2544,7 @@ class JobSearchGraph:
         """
         if state.get("fired_checkpoints"):
             return DRAFT_FOLLOW_UP
-        if state.get("inbound_messages"):
+        if state.get("inbound_messages") or state.get("inbound_message_refs"):
             return CLASSIFY_RECRUITER_EVENTS
         if state.get("calendar_changes"):
             return PLAN_INTERVIEW_SCHEDULE
@@ -3053,6 +3105,7 @@ __all__ = [
     "ApplicationStore",
     "EventEmitter",
     "RecruiterInbox",
+    "InboundMessageReader",
     "RecruiterMessageClassifier",
     "PendingCheckpointScheduler",
     "CalendarReader",

@@ -116,6 +116,11 @@ def stage_event(session: Session, envelope: EventEnvelope) -> OutboxEventModel:
     return _stage(session, envelope)[0]
 
 
+def stage_new_event(session: Session, envelope: EventEnvelope) -> bool:
+    """`stage_event`, saying whether it staged anything: False when the fact was already there."""
+    return not _stage(session, envelope)[1]
+
+
 def stage_raw_event(
     session: Session,
     *,
@@ -574,5 +579,6 @@ __all__ = [
     "is_poison",
     "is_terminal",
     "stage_event",
+    "stage_new_event",
     "stage_raw_event",
 ]

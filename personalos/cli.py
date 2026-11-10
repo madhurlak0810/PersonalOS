@@ -397,5 +397,64 @@ def auth_google_client(client_json):
         click.echo("Now set GOOGLE_OAUTH_CLIENT_ID in .env to the client's id.")
 
 
+@cli.group()
+def inbox():
+    """The Gmail recruiter inbox: which mail is in view, and polling it."""
+
+
+@inbox.command("status")
+def inbox_status():
+    """Print the mailbox scope rules and how far the poller has read.
+
+    The rules are the whole of what PersonalOS looks at: mail matching none
+    of them is never fetched or stored.
+    """
+    import json
+
+    from personalos.bootstrap import (
+        build_mailbox_cursor_store,
+        build_mailbox_scope,
+        connected_google_credential,
+    )
+    from personalos.domain.mailbox import GMAIL_SOURCE
+
+    scope = _profile_call(build_mailbox_scope)
+    report: dict = {
+        "scope": scope.describe(),
+        "enabled": not scope.is_empty and settings.mcp_google_enabled,
+        "cursor": None,
+    }
+    try:
+        account = connected_google_credential().name
+    except Exception as exc:  # no account connected: say so, do not fail
+        report["account"] = None
+        report["account_error"] = str(exc)
+    else:
+        report["account"] = account
+        cursor = build_mailbox_cursor_store().get(GMAIL_SOURCE, account)
+        if cursor is not None:
+            report["cursor"] = {
+                "history_id": cursor.history_id,
+                "polled_at": cursor.polled_at.isoformat(),
+                "scope_current": cursor.scope_fingerprint == scope.fingerprint(),
+            }
+    click.echo(json.dumps(report, indent=2))
+
+
+@inbox.command("poll")
+def inbox_poll():
+    """Poll Gmail once for in-scope mail and publish what is new."""
+    import asyncio
+    import dataclasses
+    import json
+
+    from personalos.bootstrap import build_gmail_recruiter_inbox, register_mcp_servers
+
+    register_mcp_servers()
+    poller = _profile_call(build_gmail_recruiter_inbox)
+    result = asyncio.run(poller.poll())
+    click.echo(json.dumps(dataclasses.asdict(result), indent=2))
+
+
 if __name__ == "__main__":
     cli()

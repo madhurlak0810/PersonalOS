@@ -124,6 +124,39 @@ class GmailReadParams(Intent):
     """`gmail_read_message`."""
 
     message_id: GoogleId
+    #: Answer `found: false` for a message Gmail no longer has, instead of
+    #: failing: for a caller holding an old pointer, gone is an answer.
+    missing_ok: bool = False
+
+
+#: A Gmail history id: an unsigned 64-bit counter, as a decimal string.
+HistoryId = Annotated[str, StringConstraints(pattern=r"^\d{1,20}$")]
+
+#: The history record kinds `gmail_list_history` can report, in this
+#: server's spelling. Deletions and label removals are not offered: nothing
+#: here acts on a message leaving the mailbox view.
+GmailHistoryType = Literal["message_added", "labels_added"]
+
+MAX_HISTORY_RESULTS = 500
+
+
+class GmailHistoryParams(Intent):
+    """`gmail_list_history`: what changed in the mailbox since `start_history_id`."""
+
+    start_history_id: HistoryId
+    history_types: list[GmailHistoryType] = Field(
+        default_factory=lambda: ["message_added", "labels_added"], min_length=1, max_length=2
+    )
+    max_results: int = Field(100, ge=1, le=MAX_HISTORY_RESULTS)
+    page_token: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{1,512}$")] | None = None
+
+
+class GmailProfileParams(Intent):
+    """`gmail_get_profile`. Takes nothing: the account is the authorization's."""
+
+
+class GmailLabelsParams(Intent):
+    """`gmail_list_labels`. Takes nothing."""
 
 
 class GmailMessageParams(Intent):
@@ -334,6 +367,58 @@ class RawMessage(_Raw):
     payload: dict[str, Any] | None = None
 
 
+class RawHistoryMessage(_Raw):
+    """The message a history record names: ids and labels, never content."""
+
+    id: GoogleId
+    threadId: GoogleId | None = None
+    labelIds: list[Annotated[str, StringConstraints(max_length=256)]] = Field(
+        default_factory=list, max_length=200
+    )
+
+
+class RawHistoryChange(_Raw):
+    """One `messagesAdded` or `labelsAdded` entry."""
+
+    message: RawHistoryMessage
+
+
+class RawHistoryRecord(_Raw):
+    """One `users.history.list` record."""
+
+    id: HistoryId
+    messagesAdded: list[RawHistoryChange] = Field(default_factory=list, max_length=1000)
+    labelsAdded: list[RawHistoryChange] = Field(default_factory=list, max_length=1000)
+
+
+class RawHistoryList(_Raw):
+    """`users.history.list`."""
+
+    history: list[RawHistoryRecord] = Field(default_factory=list, max_length=MAX_HISTORY_RESULTS)
+    nextPageToken: Annotated[str, StringConstraints(max_length=512)] | None = None
+    historyId: HistoryId
+
+
+class RawProfile(_Raw):
+    """`users.getProfile`. Only the history id is read."""
+
+    historyId: HistoryId
+
+
+class RawLabel(_Raw):
+    """One `users.labels.list` entry."""
+
+    id: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{1,256}$")]
+    name: Annotated[str, StringConstraints(max_length=1000)]
+    type: Annotated[str, StringConstraints(max_length=32)] | None = None
+
+
+class RawLabelList(_Raw):
+    """`users.labels.list`."""
+
+    labels: list[RawLabel] = Field(default_factory=list, max_length=10_000)
+
+
 class RawDraft(_Raw):
     """`users.drafts.create`."""
 
@@ -475,6 +560,63 @@ class GmailMessageResult(_Output):
     snippet: str
     body_text: str
     body_truncated: bool
+    #: When Gmail received the message (its `internalDate`), as ISO 8601 UTC.
+    #: Unlike the `date` header, the sender cannot set it.
+    received_at: str | None = None
+    #: False only for a `missing_ok` read of a message Gmail no longer has;
+    #: every other field is then empty.
+    found: bool = True
+
+
+class GmailHistoryChange(BaseModel):
+    """One message a history record says arrived, or gained labels. No content."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    history_id: str
+    change: GmailHistoryType
+    message_id: str
+    thread_id: str | None
+    #: The message's labels as the record reports them (ids, not names).
+    label_ids: list[str]
+
+
+class GmailHistoryResult(_Output):
+    """`gmail_list_history`.
+
+    `cursor_expired` is Google's 404 for a `start_history_id` it no longer
+    keeps (about a week back), reported as an answer rather than an error:
+    the caller's remedy is a full resync, not a retry.
+    """
+
+    changes: list[GmailHistoryChange]
+    #: The mailbox's current history id; the cursor to resume from once every
+    #: page has been read.
+    history_id: str | None
+    next_page_token: str | None
+    cursor_expired: bool = False
+
+
+class GmailProfileResult(_Output):
+    """`gmail_get_profile`: where the mailbox's history currently stands."""
+
+    history_id: str
+
+
+class GmailLabel(BaseModel):
+    """One label: Google's id, and the name a person sees."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label_id: str
+    name: str
+    type: str | None
+
+
+class GmailLabelsResult(_Output):
+    """`gmail_list_labels`."""
+
+    labels: list[GmailLabel]
 
 
 class GmailDraftResult(_Output):
@@ -596,6 +738,12 @@ __all__ = [
     "GmailMessageParams",
     "GmailCreateDraftIntent",
     "GmailSendIntent",
+    "HistoryId",
+    "GmailHistoryType",
+    "MAX_HISTORY_RESULTS",
+    "GmailHistoryParams",
+    "GmailProfileParams",
+    "GmailLabelsParams",
     "CalendarListParams",
     "CalendarCreateParams",
     "CalendarCreateIntent",
@@ -612,6 +760,13 @@ __all__ = [
     "RawMessage",
     "RawDraft",
     "RawSentMessage",
+    "RawHistoryMessage",
+    "RawHistoryChange",
+    "RawHistoryRecord",
+    "RawHistoryList",
+    "RawProfile",
+    "RawLabel",
+    "RawLabelList",
     "RawEventTime",
     "RawEvent",
     "RawEventList",
@@ -621,6 +776,11 @@ __all__ = [
     "GmailMessageResult",
     "GmailDraftResult",
     "GmailSendResult",
+    "GmailHistoryChange",
+    "GmailHistoryResult",
+    "GmailProfileResult",
+    "GmailLabel",
+    "GmailLabelsResult",
     "CalendarAttendee",
     "CalendarEventResult",
     "CalendarListResult",

@@ -36,6 +36,9 @@ GOOGLE_TOOLS = [
     "calendar_list_events",
     "calendar_update_event",
     "gmail_create_draft",
+    "gmail_get_profile",
+    "gmail_list_history",
+    "gmail_list_labels",
     "gmail_read_message",
     "gmail_search",
     "gmail_send_message",
@@ -63,7 +66,7 @@ async def google(request):
 # --- Surface ------------------------------------------------------------------
 
 
-async def test_both_variants_expose_the_same_ten_tools(google):
+async def test_both_variants_expose_the_same_thirteen_tools(google):
     assert google.tool_names() == GOOGLE_TOOLS
 
 
@@ -72,6 +75,9 @@ async def test_both_variants_expose_the_same_ten_tools(google):
     [
         ("gmail_search", PermissionClass.READ_EXTERNAL),
         ("gmail_read_message", PermissionClass.READ_EXTERNAL),
+        ("gmail_list_history", PermissionClass.READ_EXTERNAL),
+        ("gmail_get_profile", PermissionClass.READ_EXTERNAL),
+        ("gmail_list_labels", PermissionClass.READ_EXTERNAL),
         ("calendar_list_events", PermissionClass.READ_EXTERNAL),
         ("calendar_get_event", PermissionClass.READ_EXTERNAL),
         ("calendar_freebusy", PermissionClass.READ_EXTERNAL),
@@ -131,6 +137,55 @@ async def test_gmail_read_of_a_missing_message_fails_cleanly(google):
     result = await google.dispatch("gmail_read_message", {"message_id": "nope"})
     assert result.success is False
     assert "404" in result.error
+
+
+async def test_gmail_read_with_missing_ok_answers_not_found(google):
+    result = (
+        await google.dispatch("gmail_read_message", {"message_id": "gone", "missing_ok": True})
+    ).unwrap()
+    assert (result["found"], result["message_id"], result["body_text"]) == (False, "gone", "")
+
+
+async def test_gmail_history_lists_ids_since_a_cursor_and_reports_one_expired(google):
+    label = google.api.add_label("Recruiting")
+    start = str(google.api.history_id)
+    google.api.add_message(gmail_message("m1", labels=("INBOX",)))
+    google.api.label_message("m1", label)
+
+    result = (await google.dispatch("gmail_list_history", {"start_history_id": start})).unwrap()
+
+    assert [(c["change"], c["message_id"]) for c in result["changes"]] == [
+        ("message_added", "m1"),
+        ("labels_added", "m1"),
+    ]
+    assert result["changes"][1]["label_ids"] == ["INBOX", label]
+    assert result["history_id"] == str(google.api.history_id)
+    assert result["cursor_expired"] is False
+    (call,) = google.api.calls
+    assert call.scopes == (GMAIL_READONLY_SCOPE,)
+    assert call.params["historyTypes"] == ["messageAdded", "labelAdded"]
+
+    google.api.expire_history()
+    expired = (await google.dispatch("gmail_list_history", {"start_history_id": start})).unwrap()
+    assert (expired["cursor_expired"], expired["changes"]) == (True, [])
+
+
+async def test_gmail_profile_and_labels_are_read_only(google):
+    google.api.add_label("Recruiting", "Label_9")
+
+    profile = (await google.dispatch("gmail_get_profile", {})).unwrap()
+    labels = (await google.dispatch("gmail_list_labels", {})).unwrap()
+
+    assert profile == {"content_trust": "untrusted", "history_id": str(google.api.history_id)}
+    assert {"label_id": "Label_9", "name": "Recruiting", "type": "user"} in labels["labels"]
+    assert {call.scopes for call in google.api.calls} == {(GMAIL_READONLY_SCOPE,)}
+
+
+@pytest.mark.parametrize("bad", ["abc", "-1", "1" * 21])
+async def test_gmail_history_refuses_a_cursor_that_is_not_a_history_id(google, bad):
+    result = await google.dispatch("gmail_list_history", {"start_history_id": bad})
+    assert result.success is False
+    assert google.api.calls == []
 
 
 async def test_gmail_create_draft_saves_and_sends_nothing(google):

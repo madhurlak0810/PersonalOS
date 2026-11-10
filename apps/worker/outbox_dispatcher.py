@@ -40,6 +40,7 @@ from apps.worker.event_routing import (
     APPLICATION_TRANSITION_CONSUMER,
     ApplicationTransitionHandler,
     CalendarChangeHandler,
+    EmailReceivedHandler,
     EventRouter,
 )
 from personalos.bootstrap import (
@@ -50,6 +51,7 @@ from personalos.bootstrap import (
     build_workflow_thread_registry,
     register_calendar_change_thread,
     register_event_handler_thread,
+    register_inbound_email_thread,
 )
 from personalos.domain.event_transport import EventConsumer
 from personalos.domain.events import EventEnvelope, EventType
@@ -164,8 +166,8 @@ def build_outbox_dispatcher(
     """The dispatcher a worker process runs, over one database.
 
     `application.transition_requested` events are applied directly;
-    `calendar.event_changed` queues a prep-block re-plan on a job-search
-    thread of its own; every other event goes to `EventRouter`, which resumes the workflow waiting on
+    `calendar.event_changed` queues a prep-block re-plan, and `email.received`
+    a classification of the message, each on a job-search thread of its own; every other event goes to `EventRouter`, which resumes the workflow waiting on
     it. `start_types` names the event types that start an `event_handler` run
     when nothing is waiting -- empty by default, because such a run needs a
     runner wired for `event_handler` threads in the workflow-command worker,
@@ -185,11 +187,16 @@ def build_outbox_dispatcher(
         build_workflow_command_queue(session_factory),
         partial(register_calendar_change_thread, registry=registry),
     )
+    inbound_email = EmailReceivedHandler(
+        build_workflow_command_queue(session_factory),
+        partial(register_inbound_email_thread, registry=registry),
+    )
     return OutboxDispatcher(
         build_event_outbox(session_factory),
         {
             EventType.APPLICATION_TRANSITION_REQUESTED: transitions,
             EventType.CALENDAR_EVENT_CHANGED: calendar_changes,
+            EventType.EMAIL_RECEIVED: inbound_email,
         },
         default=router,
     )

@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from personalos.domain.applications import RequestedTransition, TransitionOutcome
 from personalos.domain.checkpoints import PendingCheckpoint
@@ -409,13 +409,22 @@ class ApplyRequestedTransitionsOutput(NodeOutput):
 
 class ClassifyRecruiterEventsInput(NodeInput):
     user_id: UUID
-    inbound_messages: list[RecruiterMessage] = Field(min_length=1)
+    inbound_messages: list[RecruiterMessage] = []
+    #: Pointers to read on demand (`gmail:<id>`), instead of or as well as messages.
+    inbound_message_refs: list[str] = []
     confirmed_correlations: dict[str, UUID] = {}
+
+    @model_validator(mode="after")
+    def _something_to_classify(self) -> "ClassifyRecruiterEventsInput":
+        if not self.inbound_messages and not self.inbound_message_refs:
+            raise ValueError("inbound_messages or inbound_message_refs must be non-empty")
+        return self
 
 
 class ClassifyRecruiterEventsOutput(NodeOutput):
     recruiter_events: list[RecruiterEvent]
     inbound_messages: Consumed
+    inbound_message_refs: Consumed
     confirmed_correlations: ConsumedMapping
 
 

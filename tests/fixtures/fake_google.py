@@ -152,6 +152,18 @@ class FakeGoogleApi:
     overrides: dict[tuple[str, str], Any] = field(default_factory=dict)
     #: Make the next event insert land, then answer 504 -- the lost response.
     fail_next_insert_after_commit: bool = False
+    #: Label id -> name. System labels are their own names, as at Google.
+    labels: dict[str, str] = field(
+        default_factory=lambda: {name: name for name in ("INBOX", "SENT", "SPAM", "UNREAD")}
+    )
+    #: `users.history.list` records, oldest first.
+    history: list[dict[str, Any]] = field(default_factory=list)
+    history_id: int = 1000
+    #: History ids at or below this are no longer kept: a cursor there gets a 404.
+    history_floor: int = 0
+    #: Evaluate `messages.list` queries (`_matches`) instead of listing every
+    #: message. Off by default, for the tests written before it existed.
+    evaluate_queries: bool = False
 
     def __post_init__(self):
         self._ids = itertools.count(1)
@@ -160,7 +172,64 @@ class FakeGoogleApi:
         self.overrides[(method, url_pattern)] = response
 
     def add_message(self, message: dict[str, Any]) -> None:
+        """Put a message in the mailbox, and in its history as `messagesAdded`."""
         self.messages[message["id"]] = message
+        self._record("messagesAdded", {"message": self._history_ref(message)})
+
+    def add_label(self, name: str, label_id: str | None = None) -> str:
+        """Create a user label; return its id."""
+        label_id = label_id or f"Label_{len(self.labels) + 1}"
+        self.labels[label_id] = name
+        return label_id
+
+    def label_message(self, message_id: str, label_id: str) -> None:
+        """Label an existing message, as a filter or the candidate would."""
+        message = self.messages[message_id]
+        message["labelIds"] = [*message["labelIds"], label_id]
+        self._record("labelsAdded", {"message": self._history_ref(message), "labelIds": [label_id]})
+
+    def expire_history(self) -> None:
+        """Forget all history so far, as Google does after about a week."""
+        self.history_floor = self.history_id
+        self.history = []
+
+    @staticmethod
+    def _history_ref(message: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": message["id"],
+            "threadId": message["threadId"],
+            "labelIds": list(message["labelIds"]),
+        }
+
+    def _record(self, kind: str, entry: dict[str, Any]) -> None:
+        self.history_id += 1
+        self.history.append({"id": str(self.history_id), kind: [entry]})
+
+    def _matches(self, message: dict[str, Any], query: str) -> bool:
+        """A small subset of Gmail search: `label:`, `from:`, `subject:`, bare words.
+
+        Time bounds (`newer_than:`, `after:`) are accepted and ignored, and an
+        `OR` between parenthesised groups is honoured -- enough to evaluate the
+        queries the inbox poller builds.
+        """
+        groups = [g.strip() for g in re.split(r"\)\s+OR\s+\(", query.strip())]
+        return any(self._matches_all(message, g.strip("()")) for g in groups)
+
+    def _matches_all(self, message: dict[str, Any], query: str) -> bool:
+        headers = {h["name"].lower(): h["value"] for h in message["payload"]["headers"]}
+        fields = {
+            "label": " ".join(self.labels.get(i, i).lower() for i in message["labelIds"]),
+            "from": headers.get("from", "").lower(),
+            "subject": headers.get("subject", "").lower(),
+            "": f"{headers.get('subject', '')} {message.get('snippet', '')}".lower(),
+        }
+        for term in re.findall(r'(?:\w+:)?"[^"]*"|\S+', query):
+            key, _, value = term.strip("()").rpartition(":")
+            if key in ("newer_than", "after", "older_than", "before") or not value:
+                continue
+            if value.strip('"').lower() not in fields.get(key, fields[""]):
+                return False
+        return True
 
     def add_event(self, calendar_id: str, event: dict[str, Any]) -> None:
         self.events.setdefault(calendar_id, {})[event["id"]] = event
@@ -186,11 +255,35 @@ class FakeGoogleApi:
 
     def _gmail(self, method: str, path: str, call: Call):
         if method == "GET" and path == "/messages":
-            ids = list(self.messages)[: int(call.params.get("maxResults", 100))]
-            return {
-                "messages": [{"id": i, "threadId": self.messages[i]["threadId"]} for i in ids],
-                "resultSizeEstimate": len(self.messages),
+            query = call.params.get("q")
+            ids = [
+                i
+                for i, m in self.messages.items()
+                if not (query and self.evaluate_queries) or self._matches(m, query)
+            ]
+            size = int(call.params.get("maxResults", 100))
+            offset = int(call.params.get("pageToken") or 0)
+            body: dict[str, Any] = {
+                "messages": [
+                    {"id": i, "threadId": self.messages[i]["threadId"]}
+                    for i in ids[offset : offset + size]
+                ],
+                "resultSizeEstimate": len(ids),
             }
+            if offset + size < len(ids):
+                body["nextPageToken"] = str(offset + size)
+            return body
+        if method == "GET" and path == "/profile":
+            return {"emailAddress": ACCOUNT, "historyId": str(self.history_id)}
+        if method == "GET" and path == "/labels":
+            return {
+                "labels": [
+                    {"id": i, "name": n, "type": "system" if i == n else "user"}
+                    for i, n in self.labels.items()
+                ]
+            }
+        if method == "GET" and path == "/history":
+            return self._history_page(call)
         match = re.fullmatch(r"/messages/([^/]+)", path)
         if method == "GET" and match:
             message = self.messages.get(match.group(1))
@@ -217,6 +310,27 @@ class FakeGoogleApi:
                 "labelIds": ["SENT"],
             }
         raise_for_status(404)
+
+    def _history_page(self, call: Call) -> dict[str, Any]:
+        start = int(call.params["startHistoryId"])
+        if start < self.history_floor:
+            raise_for_status(404)
+        kinds = {"messageAdded": "messagesAdded", "labelAdded": "labelsAdded"}
+        wanted = {kinds[t] for t in call.params.get("historyTypes") or kinds}
+        records = [
+            {"id": r["id"], **{k: v for k, v in r.items() if k in wanted}}
+            for r in self.history
+            if int(r["id"]) > start and any(k in r for k in wanted)
+        ]
+        size = int(call.params.get("maxResults", 100))
+        offset = int(call.params.get("pageToken") or 0)
+        body: dict[str, Any] = {
+            "history": records[offset : offset + size],
+            "historyId": str(self.history_id),
+        }
+        if offset + size < len(records):
+            body["nextPageToken"] = str(offset + size)
+        return body
 
     # Calendar ------------------------------------------------------------
 

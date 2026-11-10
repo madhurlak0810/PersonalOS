@@ -308,7 +308,15 @@ _GMAIL_MESSAGE_ARGUMENTS = {"to", "cc", "subject", "body", "thread_id", "in_repl
 #: caller names. Which node may call which tool is `GOOGLE_NODE_TOOL_ALLOWLISTS`.
 GOOGLE_TOOL_ARGUMENTS = {
     "google.gmail_search": {"query", "max_results", "page_token"},
-    "google.gmail_read_message": {"message_id"},
+    "google.gmail_read_message": {"message_id", "missing_ok"},
+    "google.gmail_list_history": {
+        "start_history_id",
+        "history_types",
+        "max_results",
+        "page_token",
+    },
+    "google.gmail_get_profile": set(),
+    "google.gmail_list_labels": set(),
     "google.gmail_create_draft": _GMAIL_MESSAGE_ARGUMENTS,
     "google.gmail_send_message": _GMAIL_MESSAGE_ARGUMENTS,
     "google.calendar_list_events": {
@@ -349,6 +357,10 @@ GOOGLE_TOOL_ARGUMENTS = {
 }
 
 
+#: The `requested_by` of the Gmail inbox poller's reads.
+GMAIL_INBOX_POLLER = "worker:gmail_inbox_poller"
+
+
 def _job_search_node(node: str) -> str:
     return f"graph:job_search#{node}"
 
@@ -361,6 +373,18 @@ def _job_search_node(node: str) -> str:
 #: and `CalendarActionExecutor` refuses to cancel an event this system did not
 #: stamp.
 GOOGLE_NODE_TOOL_ALLOWLISTS: Mapping[str, frozenset[str]] = {
+    # Not a graph node: the worker sweep that watches the mailbox
+    # (`personalos.executor.gmail_inbox`). It learns which messages arrived
+    # and whether they are in scope -- ids, labels and search hits -- and
+    # cannot read a message's content, let alone write anything.
+    GMAIL_INBOX_POLLER: frozenset(
+        {
+            "google.gmail_list_history",
+            "google.gmail_get_profile",
+            "google.gmail_list_labels",
+            "google.gmail_search",
+        }
+    ),
     _job_search_node("classify_recruiter_events"): frozenset(
         {"google.gmail_search", "google.gmail_read_message"}
     ),
@@ -431,6 +455,7 @@ __all__ = [
     "FILE_TOOL_ARGUMENTS",
     "GOOGLE_TOOL_ARGUMENTS",
     "GOOGLE_NODE_TOOL_ALLOWLISTS",
+    "GMAIL_INBOX_POLLER",
     "default_rules",
     "IDEMPOTENCY_KEY_ARG",
 ]
