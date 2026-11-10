@@ -28,6 +28,9 @@ graph.
 moved on the calendar itself -- into a Job Search run that enters at
 `plan_interview_schedule` with `calendar_changes`, which re-plans the linked
 prep blocks around the new time and proposes the moves for approval.
+`EmailReceivedHandler` does the same for `email.received` -- one in-scope message
+from the Gmail poller -- entering at `classify_recruiter_events` with a pointer
+to the message rather than the message.
 """
 
 import hashlib
@@ -40,7 +43,9 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
 
+from personalos.domain.errors import ValidationFailed
 from personalos.domain.events import EventEnvelope, InvalidEventEnvelope
+from personalos.domain.mailbox import gmail_raw_ref, parse_gmail_raw_ref
 from personalos.domain.models import ApplicationStatus, InvalidApplicationTransition
 from personalos.domain.workflow import WorkflowCommand, WorkflowCommandKind, WorkflowThread
 from personalos.observability import tracing
@@ -228,22 +233,27 @@ def calendar_change_input(envelope: EventEnvelope) -> tuple[UUID, dict[str, Any]
     return user_id, {"user_id": str(user_id), "calendar_changes": [event]}
 
 
-class CalendarChangeHandler:
-    """Queues a re-plan of an interview's prep blocks when the interview moved.
+class _JobSearchRunStarter:
+    """Queues one Job Search run per event fact, with the input the event becomes.
 
-    One run per observed move: the thread is derived from the event's
-    `dedupe_key` (which names the event's version), and the command's dedupe
-    key from the same, so a redelivered event queues nothing new. The run
-    proposes writes and parks at approval; it changes nothing on its own.
+    The thread is derived from the event's `dedupe_key`, and the command's
+    dedupe key from the same, so a redelivered event queues nothing new.
     """
+
+    #: What the log line says the run is for.
+    purpose = "a run"
 
     def __init__(self, commands: WorkflowCommandQueue, starter: CalendarChangeStarter):
         """Take the command queue and the job-search thread registrar."""
         self.commands = commands
         self.starter = starter
 
+    def graph_input(self, envelope: EventEnvelope) -> tuple[UUID, dict[str, Any]]:
+        """The candidate the event is for, and the run's input."""
+        raise NotImplementedError
+
     async def __call__(self, envelope: EventEnvelope) -> RoutedEvent:
-        user_id, graph_input = calendar_change_input(envelope)
+        user_id, graph_input = self.graph_input(envelope)
         thread = self.starter(envelope, user_id)
         command = WorkflowCommand(
             command_id=uuid4(),
@@ -263,13 +273,69 @@ class CalendarChangeHandler:
                 thread_id=thread.thread_id,
             )
         logger.info(
-            "calendar change %s queued a prep re-plan on thread '%s'",
+            "%s %s queued %s on thread '%s'",
+            envelope.type,
             envelope.dedupe_key,
+            self.purpose,
             thread.thread_id,
         )
         return RoutedEvent(
             kind=RouteKind.STARTED, workflow_id=thread.workflow_id, thread_id=thread.thread_id
         )
+
+
+class CalendarChangeHandler(_JobSearchRunStarter):
+    """Queues a re-plan of an interview's prep blocks when the interview moved.
+
+    One run per observed move (the event's `dedupe_key` names the event's
+    version). The run proposes writes and parks at approval; it changes
+    nothing on its own.
+    """
+
+    purpose = "a prep re-plan"
+
+    def graph_input(self, envelope: EventEnvelope) -> tuple[UUID, dict[str, Any]]:
+        return calendar_change_input(envelope)
+
+
+#: Registers (or finds) the job-search thread one inbound email is classified on.
+InboundEmailStarter = CalendarChangeStarter
+
+
+def email_received_input(envelope: EventEnvelope) -> tuple[UUID, dict[str, Any]]:
+    """The candidate an `email.received` is for, and the graph input it becomes.
+
+    The input is the event's pointer, not the message: `inbound_message_refs`
+    is what `JobSearchGraph.route_from_start` reads to enter at
+    `classify_recruiter_events`, which fetches the message then.
+    """
+    try:
+        user_id = UUID(str(envelope.payload["user_id"]))
+        message_id = parse_gmail_raw_ref(envelope.raw_ref)
+    except (KeyError, TypeError, ValueError, ValidationFailed) as exc:
+        raise InvalidEventEnvelope(
+            f"{envelope.type} event {envelope.event_id} needs a user_id and a gmail raw_ref: {exc}"
+        ) from exc
+    return user_id, {
+        "user_id": str(user_id),
+        "inbound_message_refs": [gmail_raw_ref(message_id)],
+    }
+
+
+class EmailReceivedHandler(_JobSearchRunStarter):
+    """Queues classification of one in-scope email on a Job Search thread of its own.
+
+    One run per message (the event's `dedupe_key` is the provider's message
+    id), so a message delivered twice queues one run, and a reply owed on one
+    message parks at approval without holding up the next. The run records at
+    most one `communication_events` row and one transition per message
+    (`SqlRecruiterEventStore`), whatever else is redelivered.
+    """
+
+    purpose = "classification"
+
+    def graph_input(self, envelope: EventEnvelope) -> tuple[UUID, dict[str, Any]]:
+        return email_received_input(envelope)
 
 
 #: `consumed_events.consumer` for `ApplicationTransitionHandler`.
@@ -332,6 +398,9 @@ __all__ = [
     "CalendarChangeHandler",
     "CalendarChangeStarter",
     "calendar_change_input",
+    "EmailReceivedHandler",
+    "InboundEmailStarter",
+    "email_received_input",
     "EventRouter",
     "EventStarter",
     "RouteKind",

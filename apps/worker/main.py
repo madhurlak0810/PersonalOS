@@ -15,7 +15,7 @@ One worker runs three loops side by side, all against the same database:
   deliver each event to its consumer, which may queue a workflow command.
 - **Scheduled sweeps** (`apps.worker.scheduler.Scheduler`): fire follow-up
   checkpoints that came due, stall quiet applications, expire unanswered
-  approvals.
+  approvals, and poll Gmail for in-scope recruiter mail when it is configured.
 
 **This process remembers nothing a restart would lose.** A claimed command is a
 row; a run's progress is its checkpoints; a wait is a `pending_checkpoints` row
@@ -56,6 +56,7 @@ from personalos.bootstrap import (
     build_application_lifecycle_store,
     build_approval_queue,
     build_checkpoint_condition_evaluator,
+    build_gmail_recruiter_inbox,
     build_job_search_subgraph_runner,
     build_pending_checkpoint_store,
     build_worker_command_queue,
@@ -64,7 +65,7 @@ from personalos.bootstrap import (
     register_mcp_servers,
 )
 from personalos.config import settings
-from personalos.domain.errors import ValidationFailed
+from personalos.domain.errors import PortNotConfigured, ValidationFailed
 from personalos.domain.workflow import JOB_SEARCH_THREAD_NAMESPACE
 from personalos.observability.structured_logging import configure_logging_from_settings
 from personalos.observability.tracing_setup import configure_tracing_from_settings
@@ -240,11 +241,12 @@ def build_scheduler(
     *,
     clock: Callable[[], datetime] | None = None,
 ) -> Scheduler:
-    """The sweeps a worker runs: follow-up checkpoints, stalled applications, approval expiry.
+    """The sweeps a worker runs: follow-ups, stalled applications, approval expiry, Gmail.
 
     The follow-up sweep is left out when no job search graph is wired, since a
     checkpoint it fired would have nothing to run on; the checkpoint stays
-    pending, and due, for a worker that has one.
+    pending, and due, for a worker that has one. The Gmail poll is left out
+    until the mailbox is configured (`build_gmail_recruiter_inbox`).
     """
     clock_kwargs = {"clock": clock} if clock is not None else {}
     registry = build_workflow_thread_registry(session_factory)
@@ -266,6 +268,11 @@ def build_scheduler(
             stalls.sweep,
         ),
     ]
+    inbox = _gmail_inbox(session_factory)
+    if inbox is not None:
+        sweeps.append(
+            ScheduledSweep("gmail_inbox", settings.gmail_poll_interval_seconds, inbox.poll)
+        )
     if graphs.follow_ups is not None:
         store = build_pending_checkpoint_store(session_factory)
         if clock is not None:
@@ -284,6 +291,15 @@ def build_scheduler(
             ),
         )
     return Scheduler(sweeps)
+
+
+def _gmail_inbox(session_factory: Callable[[], Any]) -> Any:
+    """The Gmail inbox poller, when a scope, the Google server and an account are all set."""
+    try:
+        return build_gmail_recruiter_inbox(session_factory=session_factory)
+    except PortNotConfigured as exc:
+        logger.info("not polling Gmail: %s", exc)
+        return None
 
 
 def build_worker(

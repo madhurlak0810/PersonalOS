@@ -115,6 +115,15 @@ DEFAULT_TOOL_PERMISSIONS: Mapping[str, ToolPermission] = MappingProxyType(
         "google.gmail_read_message": _permission(
             PermissionClass.READ_EXTERNAL, {"communications:read"}
         ),
+        "google.gmail_list_history": _permission(
+            PermissionClass.READ_EXTERNAL, {"communications:read"}
+        ),
+        "google.gmail_get_profile": _permission(
+            PermissionClass.READ_EXTERNAL, {"communications:read"}
+        ),
+        "google.gmail_list_labels": _permission(
+            PermissionClass.READ_EXTERNAL, {"communications:read"}
+        ),
         "google.calendar_list_events": _permission(
             PermissionClass.READ_EXTERNAL, {"calendar:read"}
         ),

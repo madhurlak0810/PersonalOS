@@ -65,12 +65,16 @@ class NotConfiguredJobBoard(_NotConfigured):
 
 
 class NotConfiguredMailbox(_NotConfigured):
-    """`RecruiterInbox`, and the executor for `send_recruiter_message`."""
+    """`RecruiterInbox`, `InboundMessageReader`, and the executor for `send_recruiter_message`."""
 
     port = MAILBOX_PORT
+    hint = "set GMAIL_RECRUITER_LABELS or GMAIL_RECRUITER_QUERIES and MCP_GOOGLE_ENABLED"
 
     async def fetch(self, application_id: UUID) -> Sequence[Any]:
         raise self._refuse("fetch")
+
+    async def read(self, ref: str) -> Any:
+        raise self._refuse("read")
 
     async def execute(self, intent: Any, decision: Any) -> Any:
         raise self._refuse(f"execute {intent.kind.value}")

@@ -29,6 +29,7 @@ import re
 import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from typing import Any, TypeVar
 from urllib.parse import quote
@@ -64,9 +65,17 @@ from mcp_servers.google.schemas import (
     CalendarWriteResult,
     GmailCreateDraftIntent,
     GmailDraftResult,
+    GmailHistoryChange,
+    GmailHistoryParams,
+    GmailHistoryResult,
+    GmailLabel,
+    GmailLabelsParams,
+    GmailLabelsResult,
     GmailMessageParams,
     GmailMessageResult,
     GmailMessageSummary,
+    GmailProfileParams,
+    GmailProfileResult,
     GmailReadParams,
     GmailSearchParams,
     GmailSearchResult,
@@ -77,8 +86,11 @@ from mcp_servers.google.schemas import (
     RawEventList,
     RawFreeBusy,
     RawHeader,
+    RawHistoryList,
+    RawLabelList,
     RawMessage,
     RawMessageList,
+    RawProfile,
     RawSentMessage,
 )
 from personalos.domain.credentials import AccessToken, AccessTokenProvider
@@ -168,6 +180,20 @@ def _parse(model: type[M], body: Any, what: str) -> M:
 def _segment(value: str) -> str:
     """One URL path segment. Ids are already charset-checked; this is belt and braces."""
     return quote(value, safe="")
+
+
+#: This server's history type names, as Gmail spells them.
+_HISTORY_TYPES = {"message_added": "messageAdded", "labels_added": "labelAdded"}
+
+
+def _internal_date(value: str | None) -> str | None:
+    """Gmail's `internalDate` (epoch milliseconds) as an ISO 8601 UTC instant."""
+    if not value:
+        return None
+    try:
+        return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 # --- Gmail MIME handling ------------------------------------------------------
@@ -308,7 +334,7 @@ def _event_time(value, time_zone: str | None = None) -> dict[str, str]:
 
 
 class GoogleWorkspaceTools:
-    """The ten Gmail and Calendar tools, as async methods.
+    """The thirteen Gmail and Calendar tools, as async methods.
 
     Each takes the gateway-attached `ToolAuthorization` and its typed params,
     and returns a JSON-ready dict built from an output model.
@@ -394,16 +420,32 @@ class GoogleWorkspaceTools:
     ) -> dict[str, Any]:
         """Read one message: headers and its text body."""
         token = await self._token(authorization, GMAIL_READONLY_SCOPE)
-        raw = _parse(
-            RawMessage,
-            await self._call(
+        try:
+            body = await self._call(
                 token,
                 "GET",
                 f"{self.gmail_base}/messages/{_segment(params.message_id)}",
                 params={"format": "full"},
-            ),
-            "message",
-        )
+            )
+        except NotFound:
+            if not params.missing_ok:
+                raise
+            return GmailMessageResult(
+                message_id=params.message_id,
+                thread_id="",
+                sender="",
+                to="",
+                cc="",
+                subject="",
+                date="",
+                rfc822_message_id="",
+                label_ids=[],
+                snippet="",
+                body_text="",
+                body_truncated=False,
+                found=False,
+            ).model_dump(mode="json")
+        raw = _parse(RawMessage, body, "message")
         if raw.id != params.message_id:
             raise GoogleResponseInvalid("Google returned a different message than was asked for")
         headers = _headers(raw.payload)
@@ -421,6 +463,84 @@ class GoogleWorkspaceTools:
             snippet=_clean(raw.snippet, MAX_SNIPPET_CHARS),
             body_text=body,
             body_truncated=truncated,
+            received_at=_internal_date(raw.internalDate),
+        ).model_dump(mode="json")
+
+    async def gmail_list_history(
+        self, authorization: ToolAuthorization, params: GmailHistoryParams
+    ) -> dict[str, Any]:
+        """One page of what arrived, or gained labels, since `start_history_id`.
+
+        Ids and label ids only: a history record carries no message content,
+        and none is fetched here. An expired cursor is an answer, not an error.
+        """
+        token = await self._token(authorization, GMAIL_READONLY_SCOPE)
+        query: dict[str, Any] = {
+            "startHistoryId": params.start_history_id,
+            "maxResults": params.max_results,
+            "historyTypes": [_HISTORY_TYPES[kind] for kind in params.history_types],
+        }
+        if params.page_token:
+            query["pageToken"] = params.page_token
+        try:
+            body = await self._call(token, "GET", f"{self.gmail_base}/history", params=query)
+        except NotFound:
+            return GmailHistoryResult(
+                changes=[], history_id=None, next_page_token=None, cursor_expired=True
+            ).model_dump(mode="json")
+        listing = _parse(RawHistoryList, body, "history list")
+        changes: list[GmailHistoryChange] = []
+        wanted = set(params.history_types)
+        for record in listing.history:
+            for kind, entries in (
+                ("message_added", record.messagesAdded),
+                ("labels_added", record.labelsAdded),
+            ):
+                if kind not in wanted:
+                    continue
+                for entry in entries:
+                    changes.append(
+                        GmailHistoryChange(
+                            history_id=record.id,
+                            change=kind,
+                            message_id=entry.message.id,
+                            thread_id=entry.message.threadId,
+                            label_ids=[_clean(label, 256) for label in entry.message.labelIds],
+                        )
+                    )
+        return GmailHistoryResult(
+            changes=changes,
+            history_id=listing.historyId,
+            next_page_token=listing.nextPageToken,
+        ).model_dump(mode="json")
+
+    async def gmail_get_profile(
+        self, authorization: ToolAuthorization, params: GmailProfileParams
+    ) -> dict[str, Any]:
+        """The mailbox's current history id: where a new cursor starts."""
+        token = await self._token(authorization, GMAIL_READONLY_SCOPE)
+        profile = _parse(
+            RawProfile, await self._call(token, "GET", f"{self.gmail_base}/profile"), "profile"
+        )
+        return GmailProfileResult(history_id=profile.historyId).model_dump(mode="json")
+
+    async def gmail_list_labels(
+        self, authorization: ToolAuthorization, params: GmailLabelsParams
+    ) -> dict[str, Any]:
+        """Every label in the mailbox, id and name."""
+        token = await self._token(authorization, GMAIL_READONLY_SCOPE)
+        listing = _parse(
+            RawLabelList, await self._call(token, "GET", f"{self.gmail_base}/labels"), "label list"
+        )
+        return GmailLabelsResult(
+            labels=[
+                GmailLabel(
+                    label_id=label.id,
+                    name=_clean(label.name, 256),
+                    type=_clean(label.type, 32) or None,
+                )
+                for label in listing.labels
+            ]
         ).model_dump(mode="json")
 
     async def gmail_create_draft(
@@ -714,6 +834,34 @@ GOOGLE_TOOL_SPECS: Sequence[GoogleToolSpec] = (
         GmailMessageResult,
         GMAIL_READONLY_SCOPE,
         "gmail_read_message",
+    ),
+    GoogleToolSpec(
+        "gmail_list_history",
+        "List message ids that arrived in, or gained labels in, the mailbox since a history "
+        "id. Returns ids and label ids only, never content.",
+        GmailHistoryParams,
+        GmailHistoryParams,
+        GmailHistoryResult,
+        GMAIL_READONLY_SCOPE,
+        "gmail_list_history",
+    ),
+    GoogleToolSpec(
+        "gmail_get_profile",
+        "The mailbox's current history id.",
+        GmailProfileParams,
+        GmailProfileParams,
+        GmailProfileResult,
+        GMAIL_READONLY_SCOPE,
+        "gmail_get_profile",
+    ),
+    GoogleToolSpec(
+        "gmail_list_labels",
+        "List the mailbox's labels: id and name." + _UNTRUSTED,
+        GmailLabelsParams,
+        GmailLabelsParams,
+        GmailLabelsResult,
+        GMAIL_READONLY_SCOPE,
+        "gmail_list_labels",
     ),
     GoogleToolSpec(
         "gmail_create_draft",

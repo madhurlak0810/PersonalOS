@@ -1380,6 +1380,39 @@ class IntegrationHealthModel(Base):
         }
 
 
+class MailboxCursorModel(Base):
+    """ORM model for how far the inbox poller has read one mailbox's history.
+
+    One row per provider and account. Holds a position, never content: the
+    history id every change at or below which has been considered, and the
+    fingerprint of the scope rules it was read under. It moves in the same
+    transaction as the `email.received` events the read produced
+    (`personalos.persistence.mailbox_cursors`).
+    """
+
+    __tablename__ = "mailbox_cursors"
+
+    provider = Column(String(63), primary_key=True)
+    account = Column(String(320), primary_key=True)
+    history_id = Column(String(20), nullable=False)
+    scope_fingerprint = Column(String(64), nullable=False)
+    polled_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "provider": self.provider,
+            "account": self.account,
+            "history_id": self.history_id,
+            "scope_fingerprint": self.scope_fingerprint,
+            "polled_at": self.polled_at.isoformat(),
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
 # --- Transactional outbox, event log, and projections ------------------------
 #
 # `outbox_events` backs the transactional-outbox pattern: a row is written in

@@ -83,6 +83,24 @@ class Settings(BaseSettings):
     # Which calendar interview events and prep blocks go on.
     calendar_id: str = "primary"
 
+    # Gmail recruiter inbox (`personalos.executor.gmail_inbox`). The mailbox
+    # scope: only messages carrying one of these labels, or matching one of
+    # these Gmail search queries, are ever looked at; everything else is
+    # ignored and nothing of it is stored. Both empty (the default) leaves the
+    # poller off. Set as JSON lists:
+    #   GMAIL_RECRUITER_LABELS=["Recruiting"]
+    #   GMAIL_RECRUITER_QUERIES=["from:greenhouse.io", "subject:interview"]
+    gmail_recruiter_labels: list[str] = []
+    gmail_recruiter_queries: list[str] = []
+    # How often the worker polls the Gmail history for new in-scope mail.
+    gmail_poll_interval_seconds: float = 300.0
+    # How far back a first poll (or a resync after a scope change or an
+    # expired cursor) searches for in-scope mail. 0 means only new mail.
+    gmail_backfill_days: int = 14
+    # Whose applications inbound mail is matched against: the same actor the
+    # API reads from X-Actor-Id and the CLI takes as --actor.
+    gmail_inbox_actor: str = "api"
+
     # File tools. The only directories the files MCP server may read or write,
     # as absolute paths; the first is the one relative paths resolve against.
     # Empty means the file tools reject every path. Set from the environment

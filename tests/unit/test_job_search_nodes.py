@@ -1655,7 +1655,12 @@ class TestClassifyRecruiterEvents:
 
         update = await subgraph.classify_recruiter_events(_inbound(message))
 
-        assert set(update) == {"recruiter_events", "inbound_messages", "confirmed_correlations"}
+        assert set(update) == {
+            "recruiter_events",
+            "inbound_messages",
+            "inbound_message_refs",
+            "confirmed_correlations",
+        }
         (event,) = [RecruiterEvent.model_validate(raw) for raw in update["recruiter_events"]]
         assert event.classification == CommunicationEventClassification.INTERVIEW_INVITE
         assert event.correlation.outcome == CorrelationOutcome.MATCHED

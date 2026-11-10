@@ -272,6 +272,28 @@ desktop browser on the same machine, because Google redirects to
    in the calendar UI and publishes `calendar.event_changed`, which queues a
    re-plan of their prep blocks.
 
+9. To feed recruiter mail into classification, name the mail PersonalOS may
+   look at. This is the whole of its view of your mailbox: a message that
+   matches none of the rules is never fetched and nothing of it is stored.
+
+   ```bash
+   echo 'GMAIL_RECRUITER_LABELS=["Recruiting"]' >> .env           # Gmail label names
+   echo 'GMAIL_RECRUITER_QUERIES=["from:greenhouse.io"]' >> .env  # Gmail search syntax
+   python -m personalos.cli inbox status   # the rules, the account, and the cursor
+   python -m personalos.cli inbox poll     # one poll, now
+   ```
+
+   With `MCP_GOOGLE_ENABLED` and a rule set, the worker polls every
+   `GMAIL_POLL_INTERVAL_SECONDS` (`gmail_inbox` sweep). Each poll reads the
+   Gmail history since a stored history id (`mailbox_cursors`); a label rule is
+   matched from the label ids the history reports, a query rule by a Gmail
+   search over new mail. Each in-scope message becomes one `email.received`
+   event in the outbox, written in the same transaction as the new cursor, and
+   the worker classifies it on a Job Search thread of its own. The first poll,
+   or one after the rules change or Gmail's history expires (about a week),
+   searches the last `GMAIL_BACKFILL_DAYS` instead. Your own sent mail and
+   drafts are never in scope, even on a labelled thread.
+
 The API does the same over HTTP: `POST /v1/integrations/google/connect`
 returns an `authorization_url`, Google redirects to
 `/v1/integrations/google/callback`, and `GET /v1/integrations` reports the
@@ -901,15 +923,44 @@ pins the rules' score.
 
 **Wiring.** `bootstrap.build_recruiter_event_store()` is both the
 `application_directory` and the `recruiter_event_recorder`; pair it with an
-extractor from `personalos.models.recruiter_events`. Like the rest of
-`JobSearchGraph`, nothing in `bootstrap` constructs the graph itself yet, and
-nothing feeds it mail: a Gmail reader that produces `RecruiterMessage`s is a
-follow-up.
+extractor from `personalos.models.recruiter_events`.
+
+**Where the mail comes from.** Gmail, through
+[`executor/gmail_inbox.py`](personalos/executor/gmail_inbox.py)
+(`GmailRecruiterInbox`, built by `bootstrap.build_gmail_recruiter_inbox`). Its
+`poll` is a worker sweep; its `read` is the graph's `InboundMessageReader`:
+
+```
+gmail history (since mailbox_cursors.history_id)
+  -> in MailboxScope? (labels from the history; queries by Gmail search)
+  -> email.received in the outbox + the new cursor, one transaction
+  -> EmailReceivedHandler -> START on job_search_thread_id(user, "email:<dedupe_key>")
+       with {"inbound_message_refs": ["gmail:<message id>"]}
+  -> classify_recruiter_events reads the message (gmail_read_message), classifies it
+```
+
+| Question | Answer |
+| --- | --- |
+| What is in view? | `MailboxScope`: the labels in `GMAIL_RECRUITER_LABELS` and the searches in `GMAIL_RECRUITER_QUERIES`. Empty means nothing; there is no whole-inbox default. Sent mail, drafts, spam and trash never are. `cli inbox status` prints the rules. |
+| What does the event carry? | A pointer. Type `email.received`, source `gmail`, `dedupe_key` `email.received:gmail:<message id>`, `raw_ref` `gmail:<message id>`, and a payload of `user_id`, `provider_message_id`, `thread_id`, `matched_rules` and `history_id`. No subject, sender or body. |
+| Is a body kept? | No. **Decision (#113): provider ids, and fetch on demand.** The body is read when the classifier needs it and left out of the checkpoint, the outbox and the command; what is kept is the `communication_events` row and its commitments. A message deleted at Gmail before it is classified is skipped. `personalos.domain.mailbox` records the reasoning. |
+| Exactly once? | Per message id, three times over: the poller stages its events and the cursor in one commit, so a crash before the cursor is written leaves neither; the outbox refuses a second `dedupe_key`, so a replayed page or a resync stages nothing new; and the command and the `communication_events` row are keyed from the same id. |
+| What can a hostile email do? | Be classified. The poller's node (`worker:gmail_inbox_poller`) may list history, labels and search hits, and cannot read content or write. The read is made as `classify_recruiter_events`, whose allowlist is `gmail_search` and `gmail_read_message`. Text in a message cannot change either: allowlists are keyed on provenance the code sets. |
+
+The per-application `RecruiterInbox` port (`fetch(application_id)`, the older
+`handle_recruiter_response` branch) is still unbound: mail now arrives by
+event, not by asking per application, and binding both would classify a
+message twice.
 
 **Tests:** `tests/unit/test_recruiter_events.py` (rules, extractors, store),
 `tests/graph_scenarios/test_recruiter_events.py` (the compiled graph against a
 real database), and the two node contract classes in
-`tests/unit/test_job_search_nodes.py`.
+`tests/unit/test_job_search_nodes.py`. The Gmail path:
+`tests/graph_scenarios/test_gmail_recruiter_inbox.py` (mailbox to recorded
+transition, end to end: a message delivered twice, a poller crash before the
+cursor is written, out-of-scope mail, a stored-body scan, and prompt
+injection) and `tests/unit/test_gmail_inbox.py` (scope, backfill, resync,
+paging, the poller's allowlist, the handler).
 
 ### 15. Conditional Follow-ups and Interview Scheduling
 
@@ -1485,6 +1536,10 @@ Settings come from the environment, then `.env` in the working directory.
 | `GOOGLE_ACCOUNT` | empty | Which connected Google account the tools act on. If empty, the most recently connected active account is used. |
 | `CALENDAR_TIME_ZONE` | empty | The IANA zone calendar events are written in. All-day events are also read in this zone. Interview scheduling on Google Calendar stays unbound until it is set. The server's local zone is never used. |
 | `CALENDAR_ID` | `primary` | The calendar that interview events and prep blocks go on. |
+| `GMAIL_RECRUITER_LABELS` / `GMAIL_RECRUITER_QUERIES` | `[]` / `[]` | JSON lists: the Gmail labels and searches recruiter mail is found by. The only mail PersonalOS looks at; both empty leaves the inbox off. |
+| `GMAIL_POLL_INTERVAL_SECONDS` | `300` | How often the worker reads the Gmail history. |
+| `GMAIL_BACKFILL_DAYS` | `14` | How far back a first poll, or a resync, searches. `0` means only new mail. |
+| `GMAIL_INBOX_ACTOR` | `api` | Whose applications inbound mail is matched against, as `--actor` / `X-Actor-Id`. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Optional MCP response cache. |
 
 ---

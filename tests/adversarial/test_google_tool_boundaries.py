@@ -185,6 +185,8 @@ async def test_hostile_message_content_is_inert_data(google):
         "snippet",
         "body_text",
         "body_truncated",
+        "received_at",
+        "found",
     }
     assert result["content_trust"] == "untrusted"
     # The text survives as text, with control and bidi characters removed.
