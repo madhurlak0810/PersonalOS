@@ -12,7 +12,9 @@ Supervisor and the Job Search subgraph on the durable Postgres checkpointer
   events, lifecycle transitions, durable waits and the outbox;
 - the embedder `EMBEDDING_PROVIDER` names, the same one `ingest-resume`
   stores evidence vectors with;
-- the Greenhouse boards in `GREENHOUSE_BOARDS`, through the gateway.
+- the Greenhouse boards in `GREENHOUSE_BOARDS`, through the gateway;
+- Google Calendar, as both the calendar reader and the calendar executor's
+  client, once `MCP_GOOGLE_ENABLED` and `CALENDAR_TIME_ZONE` are set.
 
 The ports with no adapter yet are bound to the `apps.worker.unconfigured`
 stand-ins, which fail the step that reaches them with a retryable
@@ -51,6 +53,7 @@ from personalos.bootstrap import (
     build_durable_checkpointer,
     build_embedder,
     build_event_emitter,
+    build_google_calendar,
     build_integration_health_store,
     build_job_matcher,
     build_job_providers,
@@ -64,6 +67,7 @@ from personalos.bootstrap import (
     build_workflow_lease_store,
     build_workflow_thread_registry,
 )
+from personalos.domain.errors import PortNotConfigured
 from personalos.domain.job_search import (
     ActionIntent,
     ActionKind,
@@ -134,7 +138,14 @@ def default_job_search_ports(
         packet_stubs.append(writer)
 
     mailbox = NotConfiguredMailbox()
-    calendar = NotConfiguredCalendar()
+    calendar: Any
+    calendar_stubs: list[_NotConfigured] = []
+    try:
+        calendar = build_google_calendar(policy=policy)
+    except PortNotConfigured as exc:
+        logger.info("calendar is not wired: %s", exc)
+        calendar = NotConfiguredCalendar()
+        calendar_stubs.append(calendar)
     submitter = NotConfiguredApplicationSubmitter()
     action_executor = build_calendar_action_executor(
         calendar,
@@ -179,11 +190,11 @@ def default_job_search_ports(
     stubs = {
         "providers": board_stubs,
         "packet_builder": packet_stubs,
-        "action_executor": [calendar, submitter, mailbox],
+        "action_executor": [*calendar_stubs, submitter, mailbox],
         "application_store": [application_store],
         "recruiter_inbox": [mailbox],
         "reply_drafter": [reply_drafter],
-        "calendar_reader": [calendar],
+        "calendar_reader": calendar_stubs,
     }
     return ports, stubs
 

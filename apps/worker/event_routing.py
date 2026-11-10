@@ -23,6 +23,11 @@ first run was registered finds that run rather than making another.
 `ApplicationTransitionHandler` is the other kind of consumer: one that applies
 an effect directly, through `IdempotentConsumer`, rather than handing off to a
 graph.
+
+`CalendarChangeHandler` routes `calendar.event_changed` -- an interview event
+moved on the calendar itself -- into a Job Search run that enters at
+`plan_interview_schedule` with `calendar_changes`, which re-plans the linked
+prep blocks around the new time and proposes the moves for approval.
 """
 
 import hashlib
@@ -200,6 +205,73 @@ class EventRouter:
         return RoutedEvent(kind=kind, workflow_id=command.workflow_id, thread_id=command.thread_id)
 
 
+#: Registers (or finds) the job-search thread a calendar change is re-planned on.
+CalendarChangeStarter = Callable[[EventEnvelope, UUID], WorkflowThread]
+
+
+def calendar_change_input(envelope: EventEnvelope) -> tuple[UUID, dict[str, Any]]:
+    """The candidate a `calendar.event_changed` is for, and the graph input it becomes.
+
+    The input key is what `JobSearchGraph.route_from_start` reads to enter at
+    `plan_interview_schedule`, spelled once here as `fire_input` is for
+    checkpoints.
+    """
+    try:
+        user_id = UUID(str(envelope.payload["user_id"]))
+        event = dict(envelope.payload["event"])
+        event["event_id"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise InvalidEventEnvelope(
+            f"{envelope.type} event {envelope.event_id} needs a user_id and the changed event: "
+            f"{exc}"
+        ) from exc
+    return user_id, {"user_id": str(user_id), "calendar_changes": [event]}
+
+
+class CalendarChangeHandler:
+    """Queues a re-plan of an interview's prep blocks when the interview moved.
+
+    One run per observed move: the thread is derived from the event's
+    `dedupe_key` (which names the event's version), and the command's dedupe
+    key from the same, so a redelivered event queues nothing new. The run
+    proposes writes and parks at approval; it changes nothing on its own.
+    """
+
+    def __init__(self, commands: WorkflowCommandQueue, starter: CalendarChangeStarter):
+        """Take the command queue and the job-search thread registrar."""
+        self.commands = commands
+        self.starter = starter
+
+    async def __call__(self, envelope: EventEnvelope) -> RoutedEvent:
+        user_id, graph_input = calendar_change_input(envelope)
+        thread = self.starter(envelope, user_id)
+        command = WorkflowCommand(
+            command_id=uuid4(),
+            kind=WorkflowCommandKind.START,
+            workflow_id=thread.workflow_id,
+            thread_id=thread.thread_id,
+            actor_id=f"event:{envelope.source}",
+            correlation_id=envelope.correlation_id or envelope.event_id,
+            graph_input=graph_input,
+        )
+        try:
+            self.commands.enqueue(command, dedupe=_command_dedupe(envelope))
+        except DuplicateWorkflowCommand:
+            return RoutedEvent(
+                kind=RouteKind.ALREADY_ROUTED,
+                workflow_id=thread.workflow_id,
+                thread_id=thread.thread_id,
+            )
+        logger.info(
+            "calendar change %s queued a prep re-plan on thread '%s'",
+            envelope.dedupe_key,
+            thread.thread_id,
+        )
+        return RoutedEvent(
+            kind=RouteKind.STARTED, workflow_id=thread.workflow_id, thread_id=thread.thread_id
+        )
+
+
 #: `consumed_events.consumer` for `ApplicationTransitionHandler`.
 APPLICATION_TRANSITION_CONSUMER = "application_transitions"
 
@@ -257,6 +329,9 @@ class ApplicationTransitionHandler:
 __all__ = [
     "APPLICATION_TRANSITION_CONSUMER",
     "ApplicationTransitionHandler",
+    "CalendarChangeHandler",
+    "CalendarChangeStarter",
+    "calendar_change_input",
     "EventRouter",
     "EventStarter",
     "RouteKind",

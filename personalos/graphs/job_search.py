@@ -151,12 +151,14 @@ from personalos.domain.interview_scheduling import (
     DEFAULT_PREP_BLOCKS,
     PAYLOAD_ENDS_AT,
     PAYLOAD_EVENT_ID,
+    PAYLOAD_INTERVIEW_STARTS_AT,
     PAYLOAD_LOGICAL_KEY,
     PAYLOAD_PROPERTIES,
     PAYLOAD_ROLE,
     PAYLOAD_STARTS_AT,
     PAYLOAD_TITLE,
     CalendarEvent,
+    CalendarEventRole,
     InterviewRequest,
     InterviewSchedulePlan,
     PrepBlockSpec,
@@ -2743,6 +2745,10 @@ def _calendar_intent(
         PAYLOAD_ENDS_AT: change.ends_at.isoformat(),
         PAYLOAD_SUBJECT: change.title,
     }
+    if change.role is CalendarEventRole.PREP:
+        # What the block was placed around, so a later move of the interview
+        # is visible on the block itself (`changed_interviews`).
+        payload[PAYLOAD_INTERVIEW_STARTS_AT] = plan.interview_starts_at.isoformat()
     if change.op is ScheduleOp.CREATE:
         payload[PAYLOAD_PROPERTIES] = event_properties(plan.application_id, change)
         payload[PAYLOAD_BODY] = f"{change.title}\n{when}"

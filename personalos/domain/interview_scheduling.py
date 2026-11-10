@@ -50,8 +50,19 @@ PROP_KEY = "personalos_key"
 PROP_ROLE = "personalos_role"
 #: On a prep block: the logical key of the interview it prepares for.
 PROP_INTERVIEW_KEY = "personalos_interview_key"
-#: The idempotency key of the last write applied to the event.
+#: The idempotency key of the last write applied to the event. Its presence
+#: is what marks an event as one this system made: an event without it is the
+#: candidate's, and is never moved or deleted.
 PROP_IDEMPOTENCY_KEY = "personalos_idempotency_key"
+#: The workflow whose approved write made (or last moved) the event.
+PROP_WORKFLOW_ID = "personalos_workflow_id"
+#: Where this system last put the event, as UTC stamps (`_stamp`). An event
+#: whose actual times differ was moved by someone else -- the candidate in
+#: the calendar UI, or the recruiter's invite update.
+PROP_SCHEDULED_STARTS_AT = "personalos_scheduled_starts_at"
+PROP_SCHEDULED_ENDS_AT = "personalos_scheduled_ends_at"
+#: On a prep block: the interview start (UTC stamp) it was planned against.
+PROP_PLANNED_FOR = "personalos_planned_for"
 
 #: `ActionIntent.payload` keys of the two calendar action kinds. Part of the
 #: payload, and so of the hash an approval is bound to.
@@ -62,6 +73,11 @@ PAYLOAD_TITLE = "title"
 PAYLOAD_STARTS_AT = "starts_at"
 PAYLOAD_ENDS_AT = "ends_at"
 PAYLOAD_PROPERTIES = "properties"
+#: Optional IANA zone a calendar write is stored in. Times in the payload are
+#: UTC regardless; the zone is what the event displays and recurs in.
+PAYLOAD_TIME_ZONE = "time_zone"
+#: On a prep block's write: the interview start it was planned against.
+PAYLOAD_INTERVIEW_STARTS_AT = "interview_starts_at"
 
 DEFAULT_INTERVIEW_DURATION = timedelta(hours=1)
 
@@ -108,6 +124,14 @@ class CalendarEvent(_Value):
     #: False for an event marked free/transparent, which blocks nothing.
     busy: bool = True
     etag: str | None = None
+    #: The IANA zone the calendar stores the event in, when it reports one.
+    #: `starts_at`/`ends_at` are UTC whatever it is.
+    time_zone: str | None = None
+
+    @property
+    def stamped(self) -> bool:
+        """True for an event this system created (it carries an idempotency stamp)."""
+        return bool(self.properties.get(PROP_IDEMPOTENCY_KEY))
 
     @property
     def application_id(self) -> str | None:
@@ -579,6 +603,159 @@ def plan_interview_schedule(
     return InterviewSchedulePlan(**plan, changes=tuple(changes), conflicts=tuple(conflicts))
 
 
+class BusyInterval(_Value):
+    """A stretch of time the calendar reports as taken. Naive UTC."""
+
+    starts_at: datetime
+    ends_at: datetime
+
+
+class AvailabilityWindow(_Value):
+    """A free stretch of time, long enough to be worth offering. Naive UTC."""
+
+    starts_at: datetime
+    ends_at: datetime
+
+    @property
+    def duration(self) -> timedelta:
+        return self.ends_at - self.starts_at
+
+
+def availability_windows(
+    busy: list[BusyInterval] | tuple[BusyInterval, ...],
+    *,
+    start: datetime,
+    end: datetime,
+    min_duration: timedelta = timedelta(minutes=30),
+    working_hours: WorkingHours | None = None,
+) -> tuple[AvailabilityWindow, ...]:
+    """The free windows between `start` and `end`, inside working hours if given.
+
+    Pure: the busy intervals are whatever free/busy answered. Overlapping and
+    touching intervals merge; a window shorter than `min_duration` is dropped.
+    """
+    if end <= start:
+        return ()
+    windows: list[AvailabilityWindow] = []
+    for g_start, g_end in _gaps(busy, start, end):
+        for piece in _within_hours(g_start, g_end, working_hours):
+            if piece[1] - piece[0] >= min_duration:
+                windows.append(AvailabilityWindow(starts_at=piece[0], ends_at=piece[1]))
+    return tuple(windows)
+
+
+def _gaps(
+    busy: list[BusyInterval] | tuple[BusyInterval, ...], start: datetime, end: datetime
+) -> list[tuple[datetime, datetime]]:
+    """The stretches of `[start, end)` no busy interval covers."""
+    spans = sorted((max(b.starts_at, start), min(b.ends_at, end)) for b in busy)
+    gaps: list[tuple[datetime, datetime]] = []
+    cursor = start
+    for s_at, e_at in spans:
+        if e_at <= s_at:
+            continue
+        if s_at > cursor:
+            gaps.append((cursor, s_at))
+        cursor = max(cursor, e_at)
+    if cursor < end:
+        gaps.append((cursor, end))
+    return gaps
+
+
+def _within_hours(
+    start: datetime, end: datetime, hours: WorkingHours | None
+) -> list[tuple[datetime, datetime]]:
+    """`[start, end)` cut down to the working day(s) it spans."""
+    if hours is None:
+        return [(start, end)]
+    pieces: list[tuple[datetime, datetime]] = []
+    day = (start + hours.utc_offset).date()
+    last = (end + hours.utc_offset).date()
+    while day <= last:
+        day_start = datetime.combine(day, hours.start) - hours.utc_offset
+        day_end = datetime.combine(day, hours.end) - hours.utc_offset
+        lo, hi = max(start, day_start), min(end, day_end)
+        if hi > lo:
+            pieces.append((lo, hi))
+        day += timedelta(days=1)
+    return pieces
+
+
+def _parse_stamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y%m%dT%H%M")
+    except ValueError:
+        return None
+
+
+def schedule_stamp(moment: datetime) -> str:
+    """The UTC stamp written in `PROP_SCHEDULED_*` and `PROP_PLANNED_FOR`."""
+    return _stamp(moment)
+
+
+def changed_interviews(
+    events: list[CalendarEvent] | tuple[CalendarEvent, ...],
+    *,
+    now: datetime | None = None,
+) -> tuple[CalendarEvent, ...]:
+    """The interview events this system made that have moved since it last placed them.
+
+    `events` is what the calendar holds for the applications in question:
+    their interview events and prep blocks. An interview counts as changed
+    when its actual times differ from the `PROP_SCHEDULED_*` stamps the last
+    approved write left on it, or when one of its upcoming prep blocks was
+    planned against a different interview start (`PROP_PLANNED_FOR`) -- the
+    second is what catches an interview moved away and then back, whose own
+    stamp matches again while its prep blocks still sit around the time in
+    between.
+
+    Events this system did not stamp are never reported: an event the
+    candidate made is theirs, whatever it says it is.
+    """
+    interviews = [
+        e for e in events if e.stamped and e.role is CalendarEventRole.INTERVIEW and e.logical_key
+    ]
+    preps: dict[str, list[CalendarEvent]] = {}
+    for event in events:
+        if event.stamped and event.role is CalendarEventRole.PREP:
+            interview_key = event.properties.get(PROP_INTERVIEW_KEY)
+            if interview_key and (now is None or event.ends_at > now):
+                preps.setdefault(interview_key, []).append(event)
+
+    changed: list[CalendarEvent] = []
+    for interview in interviews:
+        if now is not None and interview.starts_at <= now:
+            continue
+        stamped_start = _parse_stamp(interview.properties.get(PROP_SCHEDULED_STARTS_AT))
+        stamped_end = _parse_stamp(interview.properties.get(PROP_SCHEDULED_ENDS_AT))
+        actual = (_minute(interview.starts_at), _minute(interview.ends_at))
+        moved = stamped_start is not None and (stamped_start, stamped_end or actual[1]) != actual
+        stale_prep = any(
+            (planned := _parse_stamp(p.properties.get(PROP_PLANNED_FOR))) is not None
+            and planned != actual[0]
+            for p in preps.get(interview.logical_key or "", [])
+        )
+        if moved or stale_prep:
+            changed.append(interview)
+    return tuple(changed)
+
+
+def _minute(moment: datetime) -> datetime:
+    return moment.replace(second=0, microsecond=0)
+
+
+def calendar_change_dedupe_key(event: CalendarEvent) -> str:
+    """Identity of one observed move of one interview event.
+
+    The etag changes on every edit, so a second move is a second fact even if
+    it lands back where the first started; without an etag, the new time is.
+    """
+    version = event.etag or f"{_stamp(event.starts_at)}-{_stamp(event.ends_at)}"
+    return f"calendar.event_changed:{event.event_id}:{version}"[:255]
+
+
 def event_properties(application_id: UUID, change: ScheduleChange) -> dict[str, str]:
     """The private extended properties a created event is stamped with."""
     properties = {
@@ -597,6 +774,10 @@ __all__ = [
     "PROP_ROLE",
     "PROP_INTERVIEW_KEY",
     "PROP_IDEMPOTENCY_KEY",
+    "PROP_WORKFLOW_ID",
+    "PROP_SCHEDULED_STARTS_AT",
+    "PROP_SCHEDULED_ENDS_AT",
+    "PROP_PLANNED_FOR",
     "PAYLOAD_EVENT_ID",
     "PAYLOAD_LOGICAL_KEY",
     "PAYLOAD_ROLE",
@@ -604,6 +785,8 @@ __all__ = [
     "PAYLOAD_STARTS_AT",
     "PAYLOAD_ENDS_AT",
     "PAYLOAD_PROPERTIES",
+    "PAYLOAD_TIME_ZONE",
+    "PAYLOAD_INTERVIEW_STARTS_AT",
     "DEFAULT_INTERVIEW_DURATION",
     "DEFAULT_REMINDER_LEAD",
     "DEFAULT_PREP_BLOCKS",
@@ -627,4 +810,10 @@ __all__ = [
     "interview_request_from_event",
     "plan_interview_schedule",
     "event_properties",
+    "BusyInterval",
+    "AvailabilityWindow",
+    "availability_windows",
+    "schedule_stamp",
+    "changed_interviews",
+    "calendar_change_dedupe_key",
 ]

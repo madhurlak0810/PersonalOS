@@ -193,6 +193,13 @@ def audit_url(workflow_id: UUID) -> str:
     return f"/v1/workflows/{workflow_id}/audit"
 
 
+_CALENDAR_CONSEQUENCES = {
+    ActionKind.CREATE_CALENDAR_EVENT: "Adds an event to your calendar: {target}.",
+    ActionKind.UPDATE_CALENDAR_EVENT: "Moves an existing event on your calendar: {target}.",
+    ActionKind.CANCEL_CALENDAR_EVENT: "Deletes an event PersonalOS put on your calendar: {target}.",
+}
+
+
 def consequences(kind: ActionKind, target: str, preview: ActionPreview | None) -> tuple[str, ...]:
     """What carrying an action out would do, as a reviewer should read it first."""
     recipient = preview.recipient if preview else target
@@ -210,10 +217,8 @@ def consequences(kind: ActionKind, target: str, preview: ActionPreview | None) -
         lines.append("It cannot be withdrawn once the company has received it.")
     elif kind is ActionKind.OVERWRITE_DOCUMENT:
         lines.append(f"Replaces {recipient} with the proposed version.")
-    elif kind is ActionKind.CREATE_CALENDAR_EVENT:
-        lines.append(f"Adds an event to your calendar: {target}.")
-    elif kind is ActionKind.UPDATE_CALENDAR_EVENT:
-        lines.append(f"Moves an existing event on your calendar: {target}.")
+    elif kind in _CALENDAR_CONSEQUENCES:
+        lines.append(_CALENDAR_CONSEQUENCES[kind].format(target=target))
     if preview is not None:
         if preview.subject:
             lines.append(f"Subject: {preview.subject}")

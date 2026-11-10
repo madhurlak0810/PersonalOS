@@ -99,6 +99,9 @@ class NotConfiguredCalendar(_NotConfigured):
     async def update_event(self, event_id: str, **kwargs: Any) -> Any:
         raise self._refuse("update_event")
 
+    async def cancel_event(self, event_id: str, **kwargs: Any) -> Any:
+        raise self._refuse("cancel_event")
+
 
 class NotConfiguredEmbedder(_NotConfigured):
     """`Embedder` for evidence retrieval, which every tailored packet starts with."""

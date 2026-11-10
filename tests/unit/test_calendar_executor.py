@@ -12,6 +12,7 @@ it writes, and `CalendarReconciler` answers from the calendar and nothing else.
 """
 
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 import pytest
 
@@ -25,6 +26,9 @@ from personalos.domain.interview_scheduling import (
     PROP_APPLICATION_ID,
     PROP_IDEMPOTENCY_KEY,
     PROP_KEY,
+    PROP_SCHEDULED_ENDS_AT,
+    PROP_SCHEDULED_STARTS_AT,
+    PROP_WORKFLOW_ID,
 )
 from personalos.domain.job_search import (
     ActionIntent,
@@ -221,7 +225,24 @@ async def test_a_created_event_is_stamped_with_its_idempotency_key_and_links():
         PROP_APPLICATION_ID: str(fakes.APPLICATION_ID),
         PROP_KEY: KEY,
         PROP_IDEMPOTENCY_KEY: intent.idempotency_key,
+        PROP_SCHEDULED_STARTS_AT: "20261001T1400",
+        PROP_SCHEDULED_ENDS_AT: "20261001T1500",
     }
+
+
+async def test_a_created_event_is_stamped_with_its_workflow():
+    calendar = fakes.FakeCalendar()
+    intent = create_intent()
+    workflow_id = uuid4()
+
+    receipt = await CalendarActionExecutor(calendar, workflow_id=workflow_id).execute(
+        intent, approved(intent)
+    )
+
+    properties = calendar.events[receipt.external_reference].properties
+    assert properties[PROP_WORKFLOW_ID] == str(workflow_id)
+    assert properties[PROP_IDEMPOTENCY_KEY] == intent.idempotency_key
+    assert properties[PROP_APPLICATION_ID] == str(fakes.APPLICATION_ID)
 
 
 async def test_the_executor_itself_looks_before_it_creates():
@@ -306,3 +327,64 @@ async def test_the_reconciler_answers_from_the_calendar():
     # Not a calendar action: it has nothing to say, and says so.
     other = fakes.submit_intent()
     assert (await reconciler.reconcile(other)).outcome is ReconcileOutcome.INDETERMINATE
+
+
+# --- Events PersonalOS did not create ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kind", [ActionKind.UPDATE_CALENDAR_EVENT, ActionKind.CANCEL_CALENDAR_EVENT]
+)
+async def test_an_event_without_a_stamp_is_never_moved_or_cancelled(tmp_path, kind):
+    """Approved or not, an event the candidate made is not this system's to change."""
+    calendar = fakes.FakeCalendar()
+    theirs = calendar.add("Dentist", STARTS, ENDS)
+    intent = update_intent(theirs.event_id, STARTS + timedelta(days=1))
+    intent = intent.model_copy(update={"kind": kind})
+
+    receipt = await build_calendar_action_executor(
+        calendar, session_factory(tmp_path / "cal.db")
+    ).execute(intent, approved(intent))
+
+    assert receipt.ok is False
+    assert "not created by PersonalOS" in receipt.detail
+    assert calendar.updated == [] and calendar.cancelled == []
+    assert calendar.events[theirs.event_id] == theirs
+
+
+async def test_a_stamped_event_is_cancelled_once():
+    calendar = fakes.FakeCalendar()
+    create = create_intent()
+    created = await CalendarActionExecutor(calendar).execute(create, approved(create))
+    cancel = update_intent(created.external_reference, STARTS).model_copy(
+        update={"kind": ActionKind.CANCEL_CALENDAR_EVENT}
+    )
+
+    receipt = await CalendarActionExecutor(calendar).execute(cancel, approved(cancel))
+    assert receipt.ok is True and calendar.cancelled == [created.external_reference]
+
+    reconciled = await CalendarReconciler(calendar).reconcile(cancel)
+    assert reconciled.outcome is ReconcileOutcome.APPLIED
+    again = await CalendarActionExecutor(calendar).execute(cancel, approved(cancel))
+    assert again.ok is True and calendar.cancelled == [created.external_reference]
+
+
+async def test_every_write_is_handed_the_approval_it_is_made_under():
+    calendar = fakes.FakeCalendar()
+    intent = create_intent()
+    decision = approved(intent)
+
+    await CalendarActionExecutor(calendar).execute(intent, decision)
+
+    (authority,) = calendar.authorities
+    assert authority.intent == intent and authority.decision == decision
+
+
+async def test_a_calendar_write_without_an_authorizing_decision_is_refused():
+    from personalos.policy import PolicyViolation
+
+    calendar = fakes.FakeCalendar()
+    intent = create_intent()
+    with pytest.raises(PolicyViolation):
+        await CalendarActionExecutor(calendar).execute(intent, approved(create_intent()))
+    assert calendar.created == []

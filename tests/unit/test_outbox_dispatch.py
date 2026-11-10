@@ -702,3 +702,56 @@ def test_built_dispatcher_applies_transition_requests(factory, clock):
         assert ENVELOPE_KEY in stored
     finally:
         session.close()
+
+
+# --- calendar.event_changed ---------------------------------------------------
+
+
+def test_a_calendar_change_queues_one_prep_re_plan_on_a_job_search_thread(factory, clock):
+    """The event becomes a START whose input enters the graph at prep re-planning."""
+    from apps.worker.event_routing import CalendarChangeHandler
+    from personalos.bootstrap import register_calendar_change_thread
+    from personalos.domain.interview_scheduling import CalendarEvent
+    from personalos.domain.workflow import JOB_SEARCH_THREAD_NAMESPACE, thread_namespace
+    from personalos.executor.google_calendar import calendar_event_changed_envelope
+    from personalos.persistence.checkpointer import WorkflowThreadRegistry
+
+    user_id = uuid4()
+    moved = CalendarEvent(
+        event_id="evt1",
+        title="Interview",
+        starts_at=datetime(2026, 10, 6, 11),
+        ends_at=datetime(2026, 10, 6, 12),
+        properties={"personalos_role": "interview"},
+        etag='"7"',
+    )
+    registry = WorkflowThreadRegistry(factory)
+    commands = build_workflow_command_queue(factory)
+    handler = CalendarChangeHandler(
+        commands,
+        lambda envelope, uid: register_calendar_change_thread(envelope, uid, registry=registry),
+    )
+    outbox = _outbox(factory, clock)
+    dispatcher = OutboxDispatcher(outbox, {EventType.CALENDAR_EVENT_CHANGED: handler})
+
+    envelope = calendar_event_changed_envelope(user_id, moved, observed_at=T0)
+    outbox.publish(envelope)
+    assert asyncio.run(dispatcher.drain()) == 1
+    # The same observed move again is the same fact: nothing new is queued.
+    outbox.publish(calendar_event_changed_envelope(user_id, moved, observed_at=T0))
+    assert asyncio.run(dispatcher.drain()) == 0
+
+    claimed = commands.claim_next()
+    assert claimed is not None and commands.claim_next() is None
+    command = claimed.command
+    assert thread_namespace(command.thread_id) == JOB_SEARCH_THREAD_NAMESPACE
+    assert command.graph_input["user_id"] == str(user_id)
+    (change,) = command.graph_input["calendar_changes"]
+    assert change["event_id"] == "evt1"
+
+
+def test_the_default_dispatcher_routes_calendar_changes():
+    from apps.worker.event_routing import CalendarChangeHandler
+
+    dispatcher = build_outbox_dispatcher(sessionmaker())
+    assert isinstance(dispatcher.handlers[EventType.CALENDAR_EVENT_CHANGED], CalendarChangeHandler)

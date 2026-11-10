@@ -23,10 +23,15 @@ from datetime import datetime, timedelta
 
 from langgraph.types import Command
 
+from apps.worker.event_routing import calendar_change_input
+from personalos.domain.events import EventType
 from personalos.domain.interview_scheduling import (
     PROP_INTERVIEW_KEY,
+    PROP_PLANNED_FOR,
+    PROP_SCHEDULED_STARTS_AT,
     interview_event_key,
     prep_block_key,
+    schedule_stamp,
 )
 from personalos.domain.job_search import (
     ActionKind,
@@ -39,6 +44,7 @@ from personalos.domain.job_search import (
 from personalos.domain.recruiter_events import CommitmentActor, ExtractedCommitment
 from personalos.domain.workflow import recruiter_inbox_thread_id
 from personalos.executor.calendar import CalendarActionExecutor
+from personalos.executor.google_calendar import CalendarChangeScanner
 from personalos.graphs.job_search import APPROVAL_CHECKPOINT, JobSearchGraph
 from tests.fixtures import job_search_fakes as fakes
 
@@ -271,6 +277,83 @@ async def test_an_interview_moved_on_the_calendar_reschedules_its_prep_blocks():
     assert times[WARM][1] == NEW_TIME - timedelta(minutes=15)
     # Consumed: the input channel will not re-route this thread's next run.
     assert (await deployment.graph.aget_state(CONFIG)).values["calendar_changes"] == []
+
+
+async def test_a_detected_calendar_event_changed_reschedules_the_linked_prep_blocks():
+    """End to end from detection: nobody hands the graph the moved event.
+
+    The interview and its prep blocks are written by the executor, which
+    stamps where it put each one. The candidate drags the interview in the
+    calendar UI -- no stamp changes. The scanner notices, publishes
+    `calendar.event_changed`, and the input that event routes to (the same
+    `calendar_change_input` the outbox handler uses) re-plans the prep blocks.
+    """
+    deployment = await scheduled()
+    interview = deployment.calendar.by_key(INTERVIEW)
+    assert interview.properties[PROP_SCHEDULED_STARTS_AT] == schedule_stamp(FIRST_TIME)
+    for key in (DEEP, WARM):
+        assert deployment.calendar.by_key(key).properties[PROP_PLANNED_FOR] == schedule_stamp(
+            FIRST_TIME
+        )
+
+    published = []
+    scanner = CalendarChangeScanner(deployment.calendar, published.append, clock=lambda: fakes.NOW)
+    assert await scanner.scan(fakes.USER_ID) == [], "nothing has moved yet"
+
+    deployment.calendar.move(interview.event_id, NEW_TIME, NEW_TIME + timedelta(hours=1))
+    (envelope,) = await scanner.scan(fakes.USER_ID)
+    assert published == [envelope]
+    assert envelope.type == EventType.CALENDAR_EVENT_CHANGED
+    assert envelope.subject_ref == f"application:{APP}"
+
+    user_id, graph_input = calendar_change_input(envelope)
+    assert user_id == fakes.USER_ID
+    await deployment.graph.ainvoke(graph_input, CONFIG)
+    requests = await deployment.outstanding()
+    # The interview is already where the candidate put it; its prep blocks move.
+    assert [r.kind for r in requests] == [ActionKind.UPDATE_CALENDAR_EVENT] * 2
+    await deployment.answer(requests)
+
+    times = deployment.times()
+    assert len(deployment.calendar.events) == 3
+    assert times[INTERVIEW] == (NEW_TIME, NEW_TIME + timedelta(hours=1))
+    assert times[DEEP][1] <= NEW_TIME - timedelta(hours=12)
+    assert times[WARM][1] == NEW_TIME - timedelta(minutes=15)
+    for key in (DEEP, WARM):
+        assert deployment.calendar.by_key(key).properties[PROP_PLANNED_FOR] == schedule_stamp(
+            NEW_TIME
+        )
+
+    # Seeing the same version of the event again is the same fact: its
+    # dedupe key is unchanged, so the outbox publishes nothing new.
+    again = await scanner.scan(fakes.USER_ID)
+    assert [e.dedupe_key for e in again] in ([], [envelope.dedupe_key])
+
+
+async def test_an_interview_moved_away_and_back_is_still_detected():
+    """Its own stamp matches again; its prep blocks were planned for the time in between."""
+    deployment = await scheduled()
+    interview = deployment.calendar.by_key(INTERVIEW)
+    scanner = CalendarChangeScanner(deployment.calendar, lambda e: None, clock=lambda: fakes.NOW)
+
+    deployment.calendar.move(interview.event_id, NEW_TIME, NEW_TIME + timedelta(hours=1))
+    (envelope,) = await scanner.scan(fakes.USER_ID)
+    await deployment.graph.ainvoke(calendar_change_input(envelope)[1], CONFIG)
+    await deployment.answer(await deployment.outstanding())
+
+    deployment.calendar.move(interview.event_id, FIRST_TIME, FIRST_TIME + timedelta(hours=1))
+    (back,) = await scanner.scan(fakes.USER_ID)
+    assert back.dedupe_key != envelope.dedupe_key
+
+
+async def test_events_the_candidate_made_are_never_reported_as_changed():
+    deployment = await scheduled()
+    lunch = deployment.calendar.add(
+        "Interview prep (mine)", datetime(2026, 9, 30, 12, 0), datetime(2026, 9, 30, 13, 0)
+    )
+    deployment.calendar.move(lunch.event_id, NEW_TIME, NEW_TIME + timedelta(hours=1))
+    scanner = CalendarChangeScanner(deployment.calendar, lambda e: None, clock=lambda: fakes.NOW)
+    assert await scanner.scan(fakes.USER_ID) == []
 
 
 # --- Reminders -----------------------------------------------------------------

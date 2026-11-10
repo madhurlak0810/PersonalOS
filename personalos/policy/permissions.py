@@ -118,6 +118,8 @@ DEFAULT_TOOL_PERMISSIONS: Mapping[str, ToolPermission] = MappingProxyType(
         "google.calendar_list_events": _permission(
             PermissionClass.READ_EXTERNAL, {"calendar:read"}
         ),
+        "google.calendar_get_event": _permission(PermissionClass.READ_EXTERNAL, {"calendar:read"}),
+        "google.calendar_freebusy": _permission(PermissionClass.READ_EXTERNAL, {"calendar:read"}),
         # WRITE_REVERSIBLE
         "jobs.save_favorite_job": _permission(PermissionClass.WRITE_REVERSIBLE, {"jobs:write"}),
         "google.gmail_create_draft": _permission(

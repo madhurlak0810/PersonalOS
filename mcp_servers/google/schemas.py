@@ -24,8 +24,10 @@ header can add a field to a result, let alone change which tools exist.
 import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -62,15 +64,48 @@ HeaderText = Annotated[str, StringConstraints(pattern=r"^[^\r\n]*$", max_length=
 MessageIdHeader = Annotated[str, StringConstraints(pattern=r"^<[^\s<>\r\n]{1,994}>$")]
 
 _PROPERTY_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_TIME_ZONE = re.compile(r"^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+){0,2}$")
+
+
+def _iana_zone(value: str) -> str:
+    """An IANA zone name the tz database knows, e.g. `America/New_York` or `UTC`.
+
+    Never an abbreviation (`EST`) or an offset (`+05:00`): those do not say
+    what happens at a DST change, and Google would read them its own way.
+    """
+    if not _TIME_ZONE.match(value) or len(value) > 64 or ("/" not in value and value != "UTC"):
+        # `EST`, `PST8PDT` and the like are in the tz database only as legacy
+        # aliases; an Area/Location name (or UTC) says what DST does.
+        raise ValueError("time_zone must be an IANA zone name such as 'America/New_York'")
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(f"'{value}' is not a time zone in the IANA database") from None
+    return value
+
+
+#: An IANA time zone name, checked against the tz database.
+IanaTimeZone = Annotated[str, AfterValidator(_iana_zone)]
+
+#: A Calendar API page token.
+PageToken = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_=-]{1,1024}$")]
 
 MAX_SEARCH_RESULTS = 25
 MAX_EVENT_RESULTS = 100
 MAX_BODY_CHARS = 100_000
+MAX_FREEBUSY_CALENDARS = 10
 
 
 def _aware(value: datetime | None, field: str) -> datetime | None:
     if value is not None and value.tzinfo is None:
         raise ValueError(f"{field} must carry a timezone offset")
+    return value
+
+
+def _check_private_properties(value: dict[str, str]) -> dict[str, str]:
+    for key, item in value.items():
+        if not _PROPERTY_KEY.match(key) or len(item) > 1024 or "=" in key:
+            raise ValueError("private property keys are [A-Za-z0-9_.-]{1,64}, values ≤1024")
     return value
 
 
@@ -118,6 +153,18 @@ class CalendarListParams(Intent):
     time_max: datetime | None = None
     query: str | None = Field(None, max_length=500)
     max_results: int = Field(25, ge=1, le=MAX_EVENT_RESULTS)
+    #: Only events whose private extended properties include every pair --
+    #: how an event this system stamped is found again.
+    private_properties: dict[str, str] = Field(default_factory=dict, max_length=5)
+    #: The zone Google renders the returned times in. Instants are the same
+    #: either way; it is what makes an all-day event's day unambiguous.
+    time_zone: IanaTimeZone | None = None
+    page_token: PageToken | None = None
+
+    @field_validator("private_properties")
+    @classmethod
+    def _check_properties(cls, value: dict[str, str]) -> dict[str, str]:
+        return _check_private_properties(value)
 
     @model_validator(mode="after")
     def _check_window(self) -> "CalendarListParams":
@@ -141,14 +188,13 @@ class CalendarCreateParams(Intent):
     #: Written to the event's private extended properties, e.g. an
     #: idempotency stamp a later reconciliation looks the event up by.
     private_properties: dict[str, str] = Field(default_factory=dict, max_length=20)
+    #: The IANA zone the event is stored in (`start.timeZone`/`end.timeZone`).
+    time_zone: IanaTimeZone | None = None
 
     @field_validator("private_properties")
     @classmethod
     def _check_properties(cls, value: dict[str, str]) -> dict[str, str]:
-        for key, item in value.items():
-            if not _PROPERTY_KEY.match(key) or len(item) > 1024:
-                raise ValueError("private property keys are [A-Za-z0-9_.-]{1,64}, values ≤1024")
-        return value
+        return _check_private_properties(value)
 
     @model_validator(mode="after")
     def _check_times(self) -> "CalendarCreateParams":
@@ -173,14 +219,28 @@ class CalendarUpdateParams(Intent):
     end: datetime | None = None
     description: str | None = Field(None, max_length=8000)
     location: HeaderText | None = None
+    #: Merged into the event's private extended properties; keys not named
+    #: are left as they are.
+    private_properties: dict[str, str] = Field(default_factory=dict, max_length=20)
+    time_zone: IanaTimeZone | None = None
+
+    @field_validator("private_properties")
+    @classmethod
+    def _check_properties(cls, value: dict[str, str]) -> dict[str, str]:
+        return _check_private_properties(value)
 
     @model_validator(mode="after")
     def _check_patch(self) -> "CalendarUpdateParams":
-        if all(
-            getattr(self, name) is None
-            for name in ("summary", "start", "end", "description", "location")
+        if (
+            all(
+                getattr(self, name) is None
+                for name in ("summary", "start", "end", "description", "location")
+            )
+            and not self.private_properties
         ):
             raise ValueError("an update must change at least one field")
+        if self.time_zone is not None and self.start is None and self.end is None:
+            raise ValueError("time_zone applies to a start or end; give one")
         _aware(self.start, "start")
         _aware(self.end, "end")
         if self.start and self.end and self.end <= self.start:
@@ -201,6 +261,33 @@ class CalendarDeleteParams(Intent):
 
 class CalendarDeleteIntent(CalendarDeleteParams, MutatingIntent):
     """Typed parameters for the mutating `calendar_delete_event`."""
+
+
+class CalendarGetParams(Intent):
+    """`calendar_get_event`: one event by id."""
+
+    calendar_id: CalendarId = "primary"
+    event_id: GoogleId
+    time_zone: IanaTimeZone | None = None
+
+
+class CalendarFreeBusyParams(Intent):
+    """`calendar_freebusy`: busy intervals only -- no titles, no attendees."""
+
+    calendar_ids: list[CalendarId] = Field(
+        default_factory=lambda: ["primary"], min_length=1, max_length=MAX_FREEBUSY_CALENDARS
+    )
+    time_min: datetime
+    time_max: datetime
+    time_zone: IanaTimeZone | None = None
+
+    @model_validator(mode="after")
+    def _check_window(self) -> "CalendarFreeBusyParams":
+        _aware(self.time_min, "time_min")
+        _aware(self.time_max, "time_max")
+        if self.time_max <= self.time_min:
+            raise ValueError("time_max must be after time_min")
+        return self
 
 
 # --- What Google returns (read, never trusted) --------------------------------
@@ -269,6 +356,7 @@ class RawEventTime(_Raw):
 
     dateTime: datetime | None = None
     date: Annotated[str, StringConstraints(pattern=r"^\d{4}-\d{2}-\d{2}$")] | None = None
+    timeZone: Annotated[str, StringConstraints(max_length=64)] | None = None
 
 
 class RawAttendee(_Raw):
@@ -290,7 +378,9 @@ class RawEvent(_Raw):
     """`events.get` / `events.insert` / `events.patch`, and a `list` item."""
 
     id: GoogleId
+    etag: Annotated[str, StringConstraints(max_length=256)] | None = None
     status: Annotated[str, StringConstraints(max_length=32)] | None = None
+    transparency: Annotated[str, StringConstraints(max_length=32)] | None = None
     summary: Annotated[str, StringConstraints(max_length=20_000)] | None = None
     description: Annotated[str, StringConstraints(max_length=100_000)] | None = None
     location: Annotated[str, StringConstraints(max_length=20_000)] | None = None
@@ -306,6 +396,31 @@ class RawEventList(_Raw):
 
     items: list[RawEvent] = Field(default_factory=list, max_length=2500)
     nextPageToken: Annotated[str, StringConstraints(max_length=1024)] | None = None
+    timeZone: Annotated[str, StringConstraints(max_length=64)] | None = None
+
+
+class RawBusy(_Raw):
+    """One busy interval in a `freeBusy.query` answer."""
+
+    start: datetime
+    end: datetime
+
+
+class RawFreeBusyError(_Raw):
+    reason: Annotated[str, StringConstraints(max_length=64)] | None = None
+
+
+class RawFreeBusyCalendar(_Raw):
+    busy: list[RawBusy] = Field(default_factory=list, max_length=2500)
+    errors: list[RawFreeBusyError] = Field(default_factory=list, max_length=50)
+
+
+class RawFreeBusy(_Raw):
+    """`freeBusy.query`."""
+
+    calendars: dict[Annotated[str, StringConstraints(max_length=256)], RawFreeBusyCalendar] = Field(
+        default_factory=dict, max_length=MAX_FREEBUSY_CALENDARS
+    )
 
 
 # --- What a tool returns ------------------------------------------------------
@@ -400,6 +515,11 @@ class CalendarEventResult(BaseModel):
     start: str | None
     end: str | None
     all_day: bool
+    #: The IANA zone the event is stored in, when Google reported one.
+    time_zone: str | None = None
+    #: False for an event marked free (`transparency: transparent`).
+    busy: bool = True
+    etag: str | None = None
     html_link: str | None
     attendees: list[CalendarAttendee]
     private_properties: dict[str, str]
@@ -411,6 +531,40 @@ class CalendarListResult(_Output):
     calendar_id: str
     events: list[CalendarEventResult]
     next_page_token: str | None
+    #: The calendar's own zone, as Google reported it.
+    time_zone: str | None = None
+
+
+class CalendarGetResult(_Output):
+    """`calendar_get_event`. `found` is false for an event that does not exist or was deleted."""
+
+    calendar_id: str
+    found: bool
+    event: CalendarEventResult | None
+
+
+class CalendarBusyInterval(BaseModel):
+    """One busy interval. ISO strings with an offset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start: str
+    end: str
+
+
+class CalendarFreeBusyCalendar(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    busy: list[CalendarBusyInterval]
+    errors: list[str]
+
+
+class CalendarFreeBusyResult(_Output):
+    """`calendar_freebusy`."""
+
+    time_min: str
+    time_max: str
+    calendars: dict[str, CalendarFreeBusyCalendar]
 
 
 class CalendarWriteResult(_Output):
@@ -449,6 +603,9 @@ __all__ = [
     "CalendarUpdateIntent",
     "CalendarDeleteParams",
     "CalendarDeleteIntent",
+    "CalendarGetParams",
+    "CalendarFreeBusyParams",
+    "IanaTimeZone",
     "RawMessageRef",
     "RawMessageList",
     "RawHeader",
@@ -458,6 +615,7 @@ __all__ = [
     "RawEventTime",
     "RawEvent",
     "RawEventList",
+    "RawFreeBusy",
     "GmailMessageSummary",
     "GmailSearchResult",
     "GmailMessageResult",
@@ -466,6 +624,9 @@ __all__ = [
     "CalendarAttendee",
     "CalendarEventResult",
     "CalendarListResult",
+    "CalendarGetResult",
+    "CalendarBusyInterval",
+    "CalendarFreeBusyResult",
     "CalendarWriteResult",
     "CalendarDeleteResult",
 ]
