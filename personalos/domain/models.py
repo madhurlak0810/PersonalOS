@@ -691,6 +691,9 @@ class ArtifactType(str, Enum):
 
     RESUME = "resume"
     COVER_LETTER = "cover_letter"
+    #: A drafted reply to a recruiter's message. Stored before anyone decides
+    #: whether to send it; sending is a separate, approved `SEND_*` action.
+    RECRUITER_REPLY = "recruiter_reply"
 
 
 class InvalidEvidenceLinkage(ValidationFailed, ValueError):

@@ -152,6 +152,8 @@ class FakeGoogleApi:
     overrides: dict[tuple[str, str], Any] = field(default_factory=dict)
     #: Make the next event insert land, then answer 504 -- the lost response.
     fail_next_insert_after_commit: bool = False
+    #: Make the next `messages.send` land, then answer 504 -- the lost response.
+    fail_next_send_after_commit: bool = False
     #: Label id -> name. System labels are their own names, as at Google.
     labels: dict[str, str] = field(
         default_factory=lambda: {name: name for name in ("INBOX", "SENT", "SPAM", "UNREAD")}
@@ -255,24 +257,7 @@ class FakeGoogleApi:
 
     def _gmail(self, method: str, path: str, call: Call):
         if method == "GET" and path == "/messages":
-            query = call.params.get("q")
-            ids = [
-                i
-                for i, m in self.messages.items()
-                if not (query and self.evaluate_queries) or self._matches(m, query)
-            ]
-            size = int(call.params.get("maxResults", 100))
-            offset = int(call.params.get("pageToken") or 0)
-            body: dict[str, Any] = {
-                "messages": [
-                    {"id": i, "threadId": self.messages[i]["threadId"]}
-                    for i in ids[offset : offset + size]
-                ],
-                "resultSizeEstimate": len(ids),
-            }
-            if offset + size < len(ids):
-                body["nextPageToken"] = str(offset + size)
-            return body
+            return self._list_messages(call)
         if method == "GET" and path == "/profile":
             return {"emailAddress": ACCOUNT, "historyId": str(self.history_id)}
         if method == "GET" and path == "/labels":
@@ -286,7 +271,7 @@ class FakeGoogleApi:
             return self._history_page(call)
         match = re.fullmatch(r"/messages/([^/]+)", path)
         if method == "GET" and match:
-            message = self.messages.get(match.group(1))
+            message = self.messages.get(match.group(1)) or self._sent_message(match.group(1))
             if message is None:
                 raise_for_status(404)
             return message
@@ -304,12 +289,73 @@ class FakeGoogleApi:
         if method == "POST" and path == "/messages/send":
             message_id = f"m-sent-{next(self._ids)}"
             self.sent.append({**call.json, "id": message_id, "raw": decode_raw(call.json["raw"])})
+            if self.fail_next_send_after_commit:
+                # The message went out; the caller sees a gateway timeout.
+                self.fail_next_send_after_commit = False
+                raise_for_status(504)
             return {
                 "id": message_id,
                 "threadId": call.json.get("threadId", f"t-{message_id}"),
                 "labelIds": ["SENT"],
             }
         raise_for_status(404)
+
+    def _list_messages(self, call: Call) -> dict[str, Any]:
+        query = call.params.get("q")
+        if "in:sent" in (query or ""):
+            return self._sent_search(call)
+        ids = [
+            i
+            for i, m in self.messages.items()
+            if not (query and self.evaluate_queries) or self._matches(m, query)
+        ]
+        size = int(call.params.get("maxResults", 100))
+        offset = int(call.params.get("pageToken") or 0)
+        body: dict[str, Any] = {
+            "messages": [
+                {"id": i, "threadId": self.messages[i]["threadId"]}
+                for i in ids[offset : offset + size]
+            ],
+            "resultSizeEstimate": len(ids),
+        }
+        if offset + size < len(ids):
+            body["nextPageToken"] = str(offset + size)
+        return body
+
+    def _sent_message(self, message_id: str) -> dict[str, Any] | None:
+        """A sent message as `users.messages.get` returns it."""
+        for sent in self.sent:
+            if sent["id"] == message_id:
+                raw = sent["raw"]
+                return {
+                    "id": message_id,
+                    "threadId": sent.get("threadId", f"t-{message_id}"),
+                    "labelIds": ["SENT"],
+                    "snippet": "",
+                    "internalDate": "1762765200000",
+                    "payload": {
+                        "mimeType": "text/plain",
+                        "headers": [{"name": k, "value": str(v)} for k, v in raw.items()],
+                        "body": {"data": b64url(raw.get_content())},
+                    },
+                }
+        return None
+
+    def _sent_search(self, call: Call) -> dict[str, Any]:
+        """`in:sent`, optionally narrowed by `rfc822msgid:<...>`: the reconciler's lookup."""
+        wanted = re.search(r"rfc822msgid:(\S+)", call.params.get("q") or "")
+        hits = [
+            sent
+            for sent in self.sent
+            if wanted is None or str(sent["raw"].get("Message-ID", "")) == wanted.group(1)
+        ]
+        return {
+            "messages": [
+                {"id": sent["id"], "threadId": sent.get("threadId", f"t-{sent['id']}")}
+                for sent in hits
+            ],
+            "resultSizeEstimate": len(hits),
+        }
 
     def _history_page(self, call: Call) -> dict[str, Any]:
         start = int(call.params["startHistoryId"])

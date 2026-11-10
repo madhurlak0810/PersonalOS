@@ -1,7 +1,8 @@
 """The one place a model configuration becomes the model-backed ports.
 
-Four ports in this system are backed by a model: intent routing, recruiter
-event extraction, semantic assessment of a posting and artifact drafting.
+Five ports in this system are backed by a model: intent routing, recruiter
+event extraction, semantic assessment of a posting, artifact drafting and
+drafting a reply to a recruiter.
 Each already depends on nothing but the `StructuredChatModel` slice of a chat
 model, so which model sits behind them is a composition decision. This module
 makes it a *configuration* decision: a `ModelConfig` names a provider and a
@@ -20,7 +21,7 @@ Providers:
 - `rules`: the deterministic stand-ins. `KeywordIntentClassifier`,
   `RuleBasedRecruiterEventExtractor`, an assessor that always declines (so
   `HybridJobMatcher` scores on keyword overlap, its documented fallback), and
-  no draft writer. Needs nothing installed and no network.
+  no draft or reply writer. Needs nothing installed and no network.
 - `anthropic`: Claude through `langchain-anthropic` (the `llm` extra).
 - `ollama`: a local model served by Ollama, through `langchain-ollama`
   (the `local` extra).
@@ -57,6 +58,11 @@ from personalos.models.recruiter_events import (
     RuleBasedRecruiterEventExtractor,
     StructuredLLMRecruiterEventExtractor,
 )
+from personalos.models.reply_drafting import (
+    DEFAULT_REPLY_TEMPERATURE,
+    REPLY_DRAFTER_SYSTEM_PROMPT,
+    StructuredLLMReplyWriter,
+)
 from personalos.models.routing import (
     DEFAULT_CLASSIFIER_MODEL,
     KeywordIntentClassifier,
@@ -79,6 +85,9 @@ class ModelRole(str, Enum):
     RECRUITER_EVENT_EXTRACTOR = "recruiter_event_extractor"
     SEMANTIC_ASSESSOR = "semantic_assessor"
     DRAFT_WRITER = "draft_writer"
+    #: Writes the body of a reply to a recruiter. Text only: it is given no
+    #: tool and no way to send, and its output is checked against the evidence.
+    REPLY_DRAFTER = "reply_drafter"
 
 
 class ModelSpec(BaseModel):
@@ -135,6 +144,7 @@ def _system_prompts() -> dict[ModelRole, str]:
         ModelRole.RECRUITER_EVENT_EXTRACTOR: EXTRACTOR_SYSTEM_PROMPT,
         ModelRole.SEMANTIC_ASSESSOR: ASSESSOR_SYSTEM_PROMPT,
         ModelRole.DRAFT_WRITER: DRAFT_WRITER_SYSTEM_PROMPT,
+        ModelRole.REPLY_DRAFTER: REPLY_DRAFTER_SYSTEM_PROMPT,
     }
 
 
@@ -274,6 +284,22 @@ class ModelGateway:
         if spec.provider == "rules":
             return None
         return StructuredLLMDraftWriter(self._chat_model(spec), **kwargs)
+
+    def reply_writer(self) -> StructuredLLMReplyWriter | None:
+        """The recruiter-reply writer, or None under `rules`.
+
+        Runs on the configuration's primary model -- the `default` spec unless
+        `reply_drafter` is overridden -- at a medium temperature
+        (`DEFAULT_REPLY_TEMPERATURE`) unless the spec's `params` name one.
+        """
+        spec, kwargs = self._spec(ModelRole.REPLY_DRAFTER)
+        if spec.provider == "rules":
+            return None
+        if "temperature" not in spec.params:
+            spec = spec.model_copy(
+                update={"params": {**spec.params, "temperature": DEFAULT_REPLY_TEMPERATURE}}
+            )
+        return StructuredLLMReplyWriter(self._chat_model(spec), **kwargs)
 
 
 __all__ = [

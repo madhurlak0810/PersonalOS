@@ -93,6 +93,7 @@ ACTION_TOOLS: Mapping[ActionKind, str] = MappingProxyType(
     {
         ActionKind.SUBMIT_APPLICATION: "jobs.submit_application",
         ActionKind.SEND_RECRUITER_MESSAGE: "google.gmail_send_message",
+        ActionKind.SEND_EMAIL: "google.gmail_send_message",
         ActionKind.OVERWRITE_DOCUMENT: "files.overwrite_document",
         ActionKind.CREATE_CALENDAR_EVENT: "google.calendar_create_event",
         ActionKind.UPDATE_CALENDAR_EVENT: "google.calendar_update_event",
@@ -143,6 +144,23 @@ class ProviderReconciler(Protocol):
     async def reconcile(self, intent: ActionIntent) -> Reconciliation:
         """Report whether this intent's side effect exists at the provider."""
         ...
+
+
+class KindRoutingReconciler:
+    """Asks the reconciler for the action's kind; `INDETERMINATE` for a kind with none.
+
+    One `ToolExecutor` carries out calendar writes and sends alike, and each
+    provider answers "did this land?" its own way.
+    """
+
+    def __init__(self, routes: Mapping[ActionKind, ProviderReconciler]):
+        self.routes = dict(routes)
+
+    async def reconcile(self, intent: ActionIntent) -> Reconciliation:
+        reconciler = self.routes.get(intent.kind)
+        if reconciler is None:
+            return Reconciliation(ReconcileOutcome.INDETERMINATE)
+        return await reconciler.reconcile(intent)
 
 
 class ToolExecutor:
@@ -576,6 +594,7 @@ __all__ = [
     "ACTION_SUCCEEDED_EVENT",
     "ACTION_TOOLS",
     "ActionExecutorPort",
+    "KindRoutingReconciler",
     "ProviderReconciler",
     "ReconcileOutcome",
     "Reconciliation",

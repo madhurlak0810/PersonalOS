@@ -168,6 +168,10 @@ class GmailMessageParams(Intent):
     body: str = Field(max_length=MAX_BODY_CHARS)
     thread_id: GoogleId | None = None
     in_reply_to: MessageIdHeader | None = None
+    #: The `Message-ID` to stamp the message with. Set by PersonalOS from the
+    #: action's idempotency key, so a send whose response was lost can be
+    #: found in the Sent folder (`rfc822msgid:`) instead of sent again.
+    message_id: MessageIdHeader | None = None
 
 
 class GmailCreateDraftIntent(GmailMessageParams, MutatingIntent):

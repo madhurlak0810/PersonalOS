@@ -7,19 +7,21 @@
       "intent_classifier": "rules",
       "recruiter_event_extractor": "rules",
       "semantic_assessor": "rules",
-      "draft_writer": "rules"
+      "draft_writer": "rules",
+      "reply_drafter": "rules"
     },
     "prompt_versions": {
       "intent_classifier": "rules",
       "recruiter_event_extractor": "rules",
       "semantic_assessor": "rules",
-      "draft_writer": "rules"
+      "draft_writer": "rules",
+      "reply_drafter": "rules"
     },
     "config_sha256": "52f09b003aaaa4d0b17c3bd00ae0acc0017b6ec52c68b29a7aef4299fd477e1f",
-    "dataset_sha256": "c034d15e52c5837115760e9923e3292fe4f42dc026f2e9a149ec51d79e4417a5",
-    "git_commit": "203df1e",
-    "started_at": "2026-11-10T06:15:04+00:00",
-    "duration_s": 1.32
+    "dataset_sha256": "fae96e8a110f7172cf28b5d9fe003c18ab6648212d89cb3b51c6cfa7848e7716",
+    "git_commit": "91c22d2",
+    "started_at": "2026-11-10T09:36:59+00:00",
+    "duration_s": 1.31
   },
   "suites": {
     "routing": {

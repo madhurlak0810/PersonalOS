@@ -204,7 +204,7 @@ def consequences(kind: ActionKind, target: str, preview: ActionPreview | None) -
     """What carrying an action out would do, as a reviewer should read it first."""
     recipient = preview.recipient if preview else target
     lines: list[str] = []
-    if kind is ActionKind.SEND_RECRUITER_MESSAGE:
+    if kind in (ActionKind.SEND_RECRUITER_MESSAGE, ActionKind.SEND_EMAIL):
         thread = (
             f"as a reply in thread {preview.in_reply_to}"
             if preview and preview.is_reply
@@ -225,7 +225,11 @@ def consequences(kind: ActionKind, target: str, preview: ActionPreview | None) -
         if preview.attachments:
             names = ", ".join(item.name for item in preview.attachments)
             lines.append(f"Attaches {len(preview.attachments)} file(s): {names}.")
-        elif kind in (ActionKind.SEND_RECRUITER_MESSAGE, ActionKind.SUBMIT_APPLICATION):
+        elif kind in (
+            ActionKind.SEND_RECRUITER_MESSAGE,
+            ActionKind.SEND_EMAIL,
+            ActionKind.SUBMIT_APPLICATION,
+        ):
             lines.append("No attachments.")
     return tuple(lines)
 

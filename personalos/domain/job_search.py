@@ -793,6 +793,10 @@ class ActionKind(str, Enum):
 
     SUBMIT_APPLICATION = "submit_application"
     SEND_RECRUITER_MESSAGE = "send_recruiter_message"
+    #: Send one email from the candidate's Gmail: a reply in an existing
+    #: thread, or a new thread. The general-purpose outbound kind; its payload
+    #: is the `personalos.domain.outbound_email.OutboundEmail` contract.
+    SEND_EMAIL = "send_email"
     OVERWRITE_DOCUMENT = "overwrite_document"
     #: Put an interview, or a prep block for one, on the candidate's calendar.
     CREATE_CALENDAR_EVENT = "create_calendar_event"
@@ -868,6 +872,14 @@ ACTION_RISK_PROFILES: Mapping[ActionKind, ActionRiskProfile] = MappingProxyType(
             kind=ActionKind.SEND_RECRUITER_MESSAGE,
             # Embarrassing rather than unrecoverable: a wrong message can be
             # followed by a correction to the same thread.
+            risk=RiskLevel.MEDIUM,
+            scopes=("communications:send",),
+            approval_ttl=timedelta(days=3),
+        ),
+        ActionKind.SEND_EMAIL: ActionRiskProfile(
+            kind=ActionKind.SEND_EMAIL,
+            # As for a recruiter message: it cannot be unsent, but it can be
+            # followed by a correction.
             risk=RiskLevel.MEDIUM,
             scopes=("communications:send",),
             approval_ttl=timedelta(days=3),

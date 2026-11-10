@@ -217,6 +217,12 @@ from personalos.domain.models import (
     ArtifactType,
     CommunicationEventClassification,
 )
+from personalos.domain.outbound_email import (
+    PAYLOAD_ARTIFACT_VERSION_ID,
+    PAYLOAD_EVIDENCE_IDS,
+    PAYLOAD_GMAIL_DRAFT_ID,
+    PAYLOAD_THREAD_ID,
+)
 from personalos.domain.recruiter_events import (
     DEFAULT_CORRELATION_THRESHOLD,
     DEFAULT_MIN_CLASSIFICATION_CONFIDENCE,
@@ -2752,8 +2758,22 @@ def _interview_requests_for(
 def _reply_intent(
     event: RecruiterEvent, application_id: UUID, draft: ReplyDraft, now: datetime
 ) -> ActionIntent:
-    """The approval-gated proposal to send `draft` in reply to `event`'s message."""
+    """The approval-gated proposal to send `draft` in reply to `event`'s message.
+
+    Whatever the drafter recorded about the draft -- the evidence it cites, the
+    `artifact_versions` row and Gmail draft it was saved as -- rides in the
+    payload, and so in the hash the reviewer approves.
+    """
     message = event.message
+    saved: dict[str, Any] = {}
+    if message.thread_id:
+        saved[PAYLOAD_THREAD_ID] = message.thread_id
+    if draft.evidence_ids:
+        saved[PAYLOAD_EVIDENCE_IDS] = list(draft.evidence_ids)
+    if draft.artifact_version_id is not None:
+        saved[PAYLOAD_ARTIFACT_VERSION_ID] = str(draft.artifact_version_id)
+    if draft.gmail_draft_id:
+        saved[PAYLOAD_GMAIL_DRAFT_ID] = draft.gmail_draft_id
     return ActionIntent(
         kind=ActionKind.SEND_RECRUITER_MESSAGE,
         target=(
@@ -2771,6 +2791,7 @@ def _reply_intent(
             PAYLOAD_RECIPIENT: draft.recipient,
             PAYLOAD_SUBJECT: draft.subject,
             PAYLOAD_BODY: draft.body,
+            **saved,
         },
         idempotency_key=f"reply-{application_id}-{message.provider_message_id}"[:255],
         requested_by=f"graph:job_search#{RECORD_RECRUITER_EVENTS}",

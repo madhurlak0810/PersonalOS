@@ -568,11 +568,22 @@ class InterviewInviteReceived(_Value):
 
 
 class ReplyDraft(_Value):
-    """A proposed reply. Text only: sending it is a separate, approved action."""
+    """A proposed reply. Text only: sending it is a separate, approved action.
+
+    `recipient` and `subject` are set by code from the message being answered,
+    never by a model. The optional fields are filled by a drafter that keeps
+    what it wrote (`personalos.retrieval.reply_drafting.GroundedReplyDrafter`):
+    which evidence the body cites, the `artifact_versions` row it was stored
+    as, and the Gmail draft it was saved to.
+    """
 
     recipient: str
     subject: str
     body: str
+    evidence_ids: tuple[str, ...] = ()
+    artifact_version_id: UUID | None = None
+    gmail_draft_id: str | None = None
+    generated_by: str | None = None
 
 
 _REPLY_OPENERS: dict[CommunicationEventClassification, str] = {
@@ -604,12 +615,22 @@ def template_reply(event: RecruiterEvent) -> ReplyDraft:
         soonest = min(owed, key=lambda c: c.due_at or datetime.max)
         lines.append(f"I will follow up before {soonest.due_at:%B %d}.")
     lines += ["", "Best regards"]
-    subject = event.message.subject or "your message"
     return ReplyDraft(
-        recipient=event.message.from_address or "",
-        subject=subject if subject.lower().startswith("re:") else f"Re: {subject}",
+        recipient=reply_recipient(event),
+        subject=reply_subject(event),
         body="\n".join(lines),
     )
+
+
+def reply_recipient(event: RecruiterEvent) -> str:
+    """Who a reply to `event` goes to: the message's sender, and nobody else."""
+    return event.message.from_address or ""
+
+
+def reply_subject(event: RecruiterEvent) -> str:
+    """The subject of a reply to `event`: its own subject, with one `Re:`."""
+    subject = (event.message.subject or "your message").replace("\r", " ").replace("\n", " ")
+    return subject if subject.lower().startswith("re:") else f"Re: {subject}"
 
 
 # --- Deadlines in free text --------------------------------------------------
@@ -784,6 +805,8 @@ __all__ = [
     "RecruiterEventReview",
     "InterviewInviteReceived",
     "ReplyDraft",
+    "reply_recipient",
+    "reply_subject",
     "template_reply",
     "parse_deadline",
 ]

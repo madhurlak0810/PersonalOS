@@ -300,7 +300,15 @@ FILE_TOOL_ARGUMENTS = {
 }
 
 
-_GMAIL_MESSAGE_ARGUMENTS = {"to", "cc", "subject", "body", "thread_id", "in_reply_to"}
+_GMAIL_MESSAGE_ARGUMENTS = {
+    "to",
+    "cc",
+    "subject",
+    "body",
+    "thread_id",
+    "in_reply_to",
+    "message_id",
+}
 
 #: Tools exposed by the Google MCP server (`mcp_servers.google`). None of them
 #: takes an account or credential argument: whose mailbox and calendar a call
@@ -360,6 +368,19 @@ GOOGLE_TOOL_ARGUMENTS = {
 #: The `requested_by` of the Gmail inbox poller's reads.
 GMAIL_INBOX_POLLER = "worker:gmail_inbox_poller"
 
+#: The `requested_by` of every Gmail send, and of the Sent-folder lookups made
+#: around one (`personalos.executor.gmail_outbound`). Not a graph node: only
+#: the send executor stamps it, and only after the approved action it is
+#: carrying out has been checked against its approval.
+GMAIL_SENDER = "executor:gmail_send"
+
+#: Mutating tools that may run without a human's sign-off when *system* code
+#: asks. A Gmail draft is `WRITE_REVERSIBLE`: it sits in the candidate's own
+#: Drafts folder and reaches nobody. A model-originated intent for one is still
+#: held by `UntrustedOriginRule`, and which node may ask is still
+#: `GOOGLE_NODE_TOOL_ALLOWLISTS`.
+AUTO_APPROVED_MUTATING_TOOLS: frozenset[str] = frozenset({"google.gmail_create_draft"})
+
 
 def _job_search_node(node: str) -> str:
     return f"graph:job_search#{node}"
@@ -367,11 +388,11 @@ def _job_search_node(node: str) -> str:
 
 #: Which job-search node may call which Google tool, keyed by the
 #: `requested_by` the node stamps on its intents. Deliberately narrow:
-#: only the recruiter-response node can send mail, and only interview
-#: scheduling touches the calendar. That node may delete an event: a
-#: cancellation is DESTRUCTIVE, so it is held for approval like every write,
-#: and `CalendarActionExecutor` refuses to cancel an event this system did not
-#: stamp.
+#: only the recruiter-response node and the send executor can send mail, and
+#: only interview scheduling touches the calendar. That node may delete an
+#: event: a cancellation is DESTRUCTIVE, so it is held for approval like every
+#: write, and `CalendarActionExecutor` refuses to cancel an event this system
+#: did not stamp.
 GOOGLE_NODE_TOOL_ALLOWLISTS: Mapping[str, frozenset[str]] = {
     # Not a graph node: the worker sweep that watches the mailbox
     # (`personalos.executor.gmail_inbox`). It learns which messages arrived
@@ -387,6 +408,16 @@ GOOGLE_NODE_TOOL_ALLOWLISTS: Mapping[str, frozenset[str]] = {
     ),
     _job_search_node("classify_recruiter_events"): frozenset(
         {"google.gmail_search", "google.gmail_read_message"}
+    ),
+    # Where a reply is drafted. It may save the draft to Gmail's Drafts
+    # folder, and nothing else: the send is an approved action carried out
+    # as `GMAIL_SENDER`, never by this node.
+    _job_search_node("record_recruiter_events"): frozenset({"google.gmail_create_draft"}),
+    # The send executor: the send itself, the Sent-folder lookup that decides
+    # whether a send already landed, and reading the message a reply answers
+    # (for its `Message-ID` and thread).
+    GMAIL_SENDER: frozenset(
+        {"google.gmail_send_message", "google.gmail_search", "google.gmail_read_message"}
     ),
     _job_search_node("handle_recruiter_response"): frozenset(
         {
@@ -435,7 +466,7 @@ def default_rules(
         NodeToolAllowlistRule(
             GOOGLE_NODE_TOOL_ALLOWLISTS if node_tool_allowlists is None else node_tool_allowlists
         ),
-        MutatingToolRule(),
+        MutatingToolRule(AUTO_APPROVED_MUTATING_TOOLS),
         DocumentOverwriteRule(),
         UntrustedOriginRule(),
     ]
@@ -456,6 +487,8 @@ __all__ = [
     "GOOGLE_TOOL_ARGUMENTS",
     "GOOGLE_NODE_TOOL_ALLOWLISTS",
     "GMAIL_INBOX_POLLER",
+    "GMAIL_SENDER",
+    "AUTO_APPROVED_MUTATING_TOOLS",
     "default_rules",
     "IDEMPOTENCY_KEY_ARG",
 ]

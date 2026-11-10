@@ -907,9 +907,48 @@ left where it is, and raised for review.
 commitments with their times.
 
 **Replies.** A reply the sender is waiting on is drafted automatically (the
-`RecruiterReplyDrafter` port; a plain template by default) and proposed as a
-`SEND_RECRUITER_MESSAGE` intent. Sending it goes through the approval
-interrupt.
+`RecruiterReplyDrafter` port) and proposed as a `SEND_RECRUITER_MESSAGE`
+intent. Sending it goes through the approval interrupt.
+
+The drafter a worker binds is
+[`retrieval/reply_drafting.py`](personalos/retrieval/reply_drafting.py)
+(`GroundedReplyDrafter`, built by `bootstrap.build_reply_drafter`) once the
+model configuration is not `rules`; under `rules` the port stays unbound.
+
+```
+event -> EvidenceReplyGrounding: the application (company, role, skills) and
+         the candidate's evidence nearest the message
+      -> ReplyWriter (ModelGateway.reply_writer(): the primary model at
+         temperature 0.5, schema ReplyProposal -- segments citing evidence ids;
+         no recipient, no subject, no tools)
+      -> finalize_reply: the Phase E claim validator. Rejected -> nothing is
+         kept and the template reply is drafted instead
+      -> artifact_versions row (type recruiter_reply), evidence = the cited
+         records + the message it answers            [WRITE_REVERSIBLE]
+      -> Gmail draft in the thread (gmail_create_draft)    [WRITE_REVERSIBLE]
+      -> ReplyDraft -> SEND_RECRUITER_MESSAGE intent, its payload carrying the
+         evidence ids, the artifact version and the Gmail draft id
+```
+
+**Sending.** Approved `SEND_RECRUITER_MESSAGE` and `SEND_EMAIL` actions are
+carried out by [`executor/gmail_outbound.py`](personalos/executor/gmail_outbound.py)
+(`GmailSendExecutor`, inside `ToolExecutor`, with `GmailSentReconciler`).
+`SEND_EMAIL` is the general-purpose kind (`domain.outbound_email.send_email_intent`):
+`google.gmail_send_message`, `WRITE_EXTERNAL`, `require_approval`.
+
+| Question | Answer |
+| --- | --- |
+| What is sent? | `OutboundEmail.from_intent`: recipient, subject, body, reply-to and thread, read from the approved payload. A payload key outside `EMAIL_PAYLOAD_KEYS` -- a credential, an account, `from`, `bcc`, headers -- refuses the send. Whose mailbox sends is the gateway's `ToolAuthorization`, never an argument. |
+| Can it change after approval? | Not without a new approval: recipient, subject, body and attachments are in the hash (`ActionIntent.fingerprint`). `authorize_execution` refuses a changed action with `action_hash_mismatch`, and the executor, policy and gateway each refuse the old approval too. |
+| Who may send? | The principal `executor:gmail_send` (`GMAIL_SENDER`), stamped only by the send executor after checking the approval. The drafting node's allowlist is `gmail_create_draft` alone. |
+| Exactly once? | Every message carries a `Message-ID` derived from the action's idempotency key. The executor searches the Sent folder (`in:sent rfc822msgid:`) before every send; sends get no blind retry (`SEND`, 0 retries); and after a failure or a lost response, the next attempt reconciles against the Sent folder -- found: its receipt is recorded; missing twice, a moment apart: sent once. |
+| Attachments? | Shown in the approval preview. The Gmail tool cannot carry them, so an approved email with attachments is refused rather than sent without them. |
+
+Drafting and sending are tested in `tests/unit/test_gmail_outbound.py`, against
+the fake Google API in-process and over MCP stdio: no send without an
+approval, a mutated action refused on its hash, a lost send response
+reconciled from the Sent folder and not sent twice, and an untraceable claim
+rejected by the validator.
 
 **A reviewer's answer** to a review request is passed back as
 `confirmed_correlations: {provider_message_id: application_id}` alongside the
