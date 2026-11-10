@@ -16,10 +16,16 @@ completed steps -- is left out.
 """
 
 from collections.abc import Iterable, Sequence
+from datetime import datetime, timezone
 
 from apps.api.routes.approvals import PendingApprovalItem
 from apps.api.routes.workflows import WorkflowStatusResponse
 from personalos.domain.action_status import ActionStatus, ShortlistItem, WorkflowAction
+from personalos.domain.integrations import (
+    WRITE_CAPABILITIES,
+    IntegrationStatus,
+    RevokeResult,
+)
 from personalos.domain.job_search import ActionPreview
 
 #: Section order and headings. Done comes first so it cannot be mistaken for
@@ -178,4 +184,59 @@ def _unique(values: Iterable[str]) -> list[str]:
     return list(seen)
 
 
-__all__ = ["render_approvals", "render_workflow"]
+def render_integration(status: IntegrationStatus, now: datetime | None = None) -> str:
+    """`auth google --status`: account, scopes, consent expiry, and what to do next."""
+    now = now or datetime.now(timezone.utc)
+    name = status.provider.capitalize()
+    lines = [f"{name}: {'connected' if status.connected else 'not connected'}"]
+    for account in status.accounts:
+        capabilities = [c.value for c in account.capabilities]
+        writes = [c.value for c in account.capabilities if c in WRITE_CAPABILITIES]
+        lines += [
+            f"  account:  {account.account}",
+            f"  stored:   {account.credential_ref} (OS keychain)",
+            f"  scopes:   {', '.join(_short_scope(s) for s in account.granted_scopes) or '-'}",
+            f"  can:      {', '.join(capabilities) or '-'}" + ("" if writes else "  (read-only)"),
+            f"  consent:  {_expiry(account.consent_expires_at, now)}",
+        ]
+    if status.reconnect_required:
+        reason = f" ({status.health_reason})" if status.health_reason else ""
+        lines.append(f"  reconnect required{reason}: run `personalos.cli auth google`")
+    elif not status.connected:
+        lines.append("  connect with `python -m personalos.cli auth google`")
+    return "\n".join(lines)
+
+
+def render_revocations(results: Sequence[RevokeResult]) -> str:
+    """`auth google --revoke`: what was disconnected, and anything left to do by hand."""
+    lines = []
+    for result in results:
+        lines.append(
+            f"Disconnected {result.account}: keychain entry "
+            f"{'deleted' if result.secret_deleted else 'NOT deleted'}, "
+            f"{'revoked at Google' if result.revoked_at_provider else 'NOT revoked at Google'}."
+        )
+        if not result.revoked_at_provider:
+            detail = f" ({result.provider_error})" if result.provider_error else ""
+            lines.append(
+                f"  Google could not be told{detail}. Remove access by hand at "
+                "https://myaccount.google.com/permissions"
+            )
+    return "\n".join(lines)
+
+
+def _short_scope(scope: str) -> str:
+    return scope.rsplit("/", 1)[-1]
+
+
+def _expiry(expires_at: datetime | None, now: datetime) -> str:
+    if expires_at is None:
+        return "does not expire on a clock (revoke to end it)"
+    stamp = expires_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    if expires_at <= now:
+        return f"EXPIRED {stamp}; reconnect"
+    days = (expires_at - now).days
+    return f"expires {stamp} (in {days} day{'s' if days != 1 else ''})"
+
+
+__all__ = ["render_approvals", "render_integration", "render_revocations", "render_workflow"]

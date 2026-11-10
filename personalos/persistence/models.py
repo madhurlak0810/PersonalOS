@@ -1307,6 +1307,9 @@ class CredentialModel(Base):
         default="active",
     )
     last_exchanged_at = Column(DateTime, nullable=True)
+    #: When the provider stops honouring the stored grant without a fresh
+    #: consent, if it is known to (an unverified Google app's 7-day tokens).
+    consent_expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -1330,6 +1333,9 @@ class CredentialModel(Base):
             "status": self.status,
             "last_exchanged_at": (
                 self.last_exchanged_at.isoformat() if self.last_exchanged_at else None
+            ),
+            "consent_expires_at": (
+                self.consent_expires_at.isoformat() if self.consent_expires_at else None
             ),
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),

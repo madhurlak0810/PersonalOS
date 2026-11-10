@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from personalos.domain.credentials import (
     AccessToken,
     CredentialExchangeFailed,
-    CredentialNotFound,
+    CredentialReconnectRequired,
     CredentialRef,
 )
 from personalos.domain.redaction import Redactor, default_redactor
@@ -73,8 +73,9 @@ class CredentialBroker:
     async def exchange(self, ref: CredentialRef | str, scopes: Sequence[str] = ()) -> AccessToken:
         """Mint a short-lived token for `ref`.
 
-        Raises `CredentialNotFound` if the store holds no secret under the
-        reference, and `CredentialExchangeFailed` if the provider has no
+        Raises `CredentialReconnectRequired` (a `CredentialNotFound`) if the
+        store holds no secret under the reference -- it was revoked, or never
+        connected -- and `CredentialExchangeFailed` if the provider has no
         exchanger or the exchange fails.
         """
         ref = CredentialRef.parse(ref)
@@ -86,7 +87,10 @@ class CredentialBroker:
 
         secret = self._store.get(ref)
         if secret is None:
-            raise CredentialNotFound(f"no credential is stored for {ref}")
+            raise CredentialReconnectRequired(
+                f"no credential is stored for {ref}; reconnect required",
+                provider=ref.provider,
+            )
         # Registered before use: an exchanger failure is the likeliest moment
         # for the secret to be echoed back in an error.
         self._redactor.register_secret(secret.reveal())

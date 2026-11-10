@@ -104,6 +104,11 @@ class Settings(BaseSettings):
     secret_store_service: str = "personalos"
     google_oauth_client_id: str = ""
     google_oauth_client_secret_ref: str = "cred://google-oauth-client/default"
+    # `testing` (the default) or `production`: the OAuth client's publishing
+    # status in the Google Cloud console. An unverified app in Testing is
+    # limited to its listed test users and gets 7-day refresh tokens, so a
+    # connection made through it is recorded as expiring after a week.
+    google_oauth_publishing_status: str = "testing"
 
     # Application
     app_name: str = "PersonalOS"
