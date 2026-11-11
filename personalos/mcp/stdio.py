@@ -455,6 +455,10 @@ class RemoteMCPServer(MCPServer):
     def initialize(self):
         """Nothing to register: the tools were listed at connect time."""
 
+    async def ping(self) -> None:
+        """Ask the server process whether it is still answering. Raises if not."""
+        await self.client.request("ping")
+
     def get_tools(self) -> list[Tool]:
         """The tool set read at connect time. Never refreshed by the server."""
         return list(self._remote_tools.values())

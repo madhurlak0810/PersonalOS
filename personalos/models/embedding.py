@@ -40,6 +40,8 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from personalos.domain.health import EMBEDDER, HealthCheckResult, run_check
+
 #: The width of every stored vector: `personalos.persistence.models.EMBEDDING_DIMENSION`,
 #: restated because this layer may not import persistence (a test keeps the two equal).
 DEFAULT_EMBEDDING_DIMENSION = 1536
@@ -209,6 +211,12 @@ class HashingEmbedder:
         """The embeddings of `texts`, in order."""
         return [self.vector(text) for text in texts]
 
+    integration = EMBEDDER
+
+    async def health_check(self) -> HealthCheckResult:
+        """Always healthy: it runs in this process and needs nothing."""
+        return HealthCheckResult.healthy(self.integration)
+
 
 # --- Model-backed ---------------------------------------------------------------------
 
@@ -282,6 +290,12 @@ class ModelEmbedder:
     async def embed(self, text: str) -> list[float]:
         """`Embedder`: the embedding of `text`."""
         return (await self.embed_many([text]))[0]
+
+    integration = EMBEDDER
+
+    async def health_check(self) -> HealthCheckResult:
+        """Embed one word. Only ever run for a local embedder by the health monitor."""
+        return await run_check(self.integration, lambda: self.embed("health"))
 
 
 def _missing(provider: str, package: str) -> ImportError:

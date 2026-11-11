@@ -103,6 +103,10 @@ class AshbyProvider:
                 )
         return None
 
+    async def health_check(self) -> None:
+        """Read the first board's listing. Raises if it does not answer."""
+        await self.http.get_json(f"{BASE_URL}/{next(iter(self.boards))}")
+
     async def _jobs(self, board: str) -> list[Mapping[str, Any]]:
         """The board's listed postings, as objects."""
         body = await self.http.get_json(

@@ -40,13 +40,14 @@ import logging
 import signal
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 from langgraph.config import get_config
 
 from apps.worker.checkpoint_monitor import CheckpointConditionEvaluator, PendingCheckpointMonitor
+from apps.worker.health_monitor import GatedSweep, HealthGate, IntegrationHealthMonitor
 from apps.worker.outbox_dispatcher import OutboxDispatcher, build_outbox_dispatcher
 from apps.worker.scheduler import ScheduledSweep, Scheduler
 from apps.worker.stall_monitor import StalledApplicationMonitor
@@ -57,6 +58,7 @@ from personalos.bootstrap import (
     build_approval_queue,
     build_checkpoint_condition_evaluator,
     build_gmail_recruiter_inbox,
+    build_integration_health_store,
     build_job_search_subgraph_runner,
     build_pending_checkpoint_store,
     build_worker_command_queue,
@@ -66,6 +68,7 @@ from personalos.bootstrap import (
 )
 from personalos.config import settings
 from personalos.domain.errors import PortNotConfigured, ValidationFailed
+from personalos.domain.health import GMAIL, HealthCheck
 from personalos.domain.workflow import JOB_SEARCH_THREAD_NAMESPACE
 from personalos.observability.structured_logging import configure_logging_from_settings
 from personalos.observability.tracing_setup import configure_tracing_from_settings
@@ -93,11 +96,17 @@ class WorkerGraphs:
     `evaluator` answers the conditions those checkpoints wait on; by default,
     from the database. `unbound_ports` names the ports the graphs were built
     with a not-configured stand-in for, which the worker logs at startup.
+    `health_checks` are the health checks of the adapters the graphs were
+    built with, which the worker runs on a schedule; `model_integrations`
+    names the model servers model-backed steps run on, so work that needs a
+    model waits while its server is down.
     """
 
     runners: Mapping[str, DurableWorkflowRunner] = field(default_factory=dict)
     evaluator: CheckpointConditionEvaluator | None = None
     unbound_ports: tuple[str, ...] = ()
+    health_checks: tuple[HealthCheck, ...] = ()
+    model_integrations: tuple[str, ...] = ()
 
     @property
     def follow_ups(self) -> DurableWorkflowRunner | None:
@@ -197,20 +206,31 @@ class Worker:
         dispatcher: OutboxDispatcher | None = None,
         scheduler: Scheduler | None = None,
         idle_seconds: float = 1.0,
+        gate: HealthGate | None = None,
     ):
-        """Wire the queue and runners, and optionally the dispatcher and scheduler."""
+        """Wire the queue and runners, and optionally the dispatcher, scheduler and gate.
+
+        `gate` is the circuit breaker commands pass through before they run.
+        """
         self.commands = commands
         self.runners = dict(runners)
         self.dispatcher = dispatcher
         self.scheduler = scheduler
         self.idle_seconds = idle_seconds
+        self.gate = gate
 
     async def run(self, stop: asyncio.Event) -> None:
         """Run every loop this worker has until `stop` is set."""
         loops = []
         if self.runners:
             loops.append(
-                run_commands(self.commands, self.runners, stop, idle_seconds=self.idle_seconds)
+                run_commands(
+                    self.commands,
+                    self.runners,
+                    stop,
+                    idle_seconds=self.idle_seconds,
+                    gate=self.gate,
+                )
             )
         else:
             logger.warning(
@@ -229,10 +249,19 @@ class Worker:
         """Run queued commands until none is claimable (or `limit` ran). Returns how many."""
         ran = 0
         while limit is None or ran < limit:
-            if not await process_next(self.commands, self.runners):
+            if not await process_next(self.commands, self.runners, gate=self.gate):
                 break
             ran += 1
         return ran
+
+
+def build_health_gate(session_factory: Callable[[], Any], graphs: WorkerGraphs) -> HealthGate:
+    """The circuit breaker a worker's commands and follow-ups pass through."""
+    return HealthGate(
+        build_integration_health_store(session_factory),
+        model_integrations=graphs.model_integrations,
+        retry_after=timedelta(seconds=settings.integration_circuit_retry_seconds),
+    )
 
 
 def build_scheduler(
@@ -240,14 +269,21 @@ def build_scheduler(
     graphs: WorkerGraphs,
     *,
     clock: Callable[[], datetime] | None = None,
+    gate: HealthGate | None = None,
 ) -> Scheduler:
-    """The sweeps a worker runs: follow-ups, stalled applications, approval expiry, Gmail.
+    """The sweeps a worker runs: follow-ups, stalled applications, approval expiry,
+    Gmail, and integration health.
 
     The follow-up sweep is left out when no job search graph is wired, since a
     checkpoint it fired would have nothing to run on; the checkpoint stays
     pending, and due, for a worker that has one. The Gmail poll is left out
-    until the mailbox is configured (`build_gmail_recruiter_inbox`).
+    until the mailbox is configured (`build_gmail_recruiter_inbox`), and
+    skipped while Gmail is down or awaiting a reconnect. The health sweep runs
+    the checks of every adapter the graphs were built with, and the Gmail
+    inbox's.
     """
+    gate = gate or build_health_gate(session_factory, graphs)
+    health = gate.store
     clock_kwargs = {"clock": clock} if clock is not None else {}
     registry = build_workflow_thread_registry(session_factory)
     approvals = build_approval_queue(session_factory, registry)
@@ -269,9 +305,26 @@ def build_scheduler(
         ),
     ]
     inbox = _gmail_inbox(session_factory)
+    checks: list[HealthCheck] = list(graphs.health_checks)
     if inbox is not None:
         sweeps.append(
-            ScheduledSweep("gmail_inbox", settings.gmail_poll_interval_seconds, inbox.poll)
+            ScheduledSweep(
+                "gmail_inbox",
+                settings.gmail_poll_interval_seconds,
+                GatedSweep(GMAIL, inbox.poll, health),
+            )
+        )
+        if isinstance(inbox, HealthCheck):
+            checks.append(inbox)
+    if checks:
+        monitor_health = IntegrationHealthMonitor(checks, health)
+        sweeps.insert(
+            0,
+            ScheduledSweep(
+                "integration_health",
+                settings.integration_health_check_seconds,
+                monitor_health.sweep,
+            ),
         )
     if graphs.follow_ups is not None:
         store = build_pending_checkpoint_store(session_factory)
@@ -282,6 +335,7 @@ def build_scheduler(
             evaluator=graphs.evaluator or build_checkpoint_condition_evaluator(session_factory),
             runner=graphs.follow_ups,
             registry=registry,
+            gate=gate,
             **clock_kwargs,
         )
         sweeps.insert(
@@ -290,6 +344,8 @@ def build_scheduler(
                 "follow_up_checkpoints", settings.worker_checkpoint_sweep_seconds, monitor.sweep
             ),
         )
+    # Health first, so every other sweep in a pass sees what it just found.
+    sweeps.sort(key=lambda sweep: sweep.name != "integration_health")
     return Scheduler(sweeps)
 
 
@@ -317,12 +373,14 @@ def build_worker(
     that made it as gone.
     """
     graphs = graphs or WorkerGraphs()
+    gate = build_health_gate(session_factory, graphs)
     return Worker(
         commands=build_worker_command_queue(session_factory, lease_ttl_seconds=lease_ttl_seconds),
         runners=graphs.runners,
         dispatcher=build_outbox_dispatcher(session_factory),
-        scheduler=build_scheduler(session_factory, graphs, clock=clock),
+        scheduler=build_scheduler(session_factory, graphs, clock=clock, gate=gate),
         idle_seconds=settings.worker_idle_seconds if idle_seconds is None else idle_seconds,
+        gate=gate,
     )
 
 
@@ -380,6 +438,7 @@ __all__ = [
     "Worker",
     "WorkerGraphs",
     "WorkflowScopedJobSubgraph",
+    "build_health_gate",
     "build_scheduler",
     "build_worker",
     "load_graph_factory",

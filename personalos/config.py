@@ -162,6 +162,12 @@ class Settings(BaseSettings):
     worker_idle_seconds: float = 1.0
     worker_checkpoint_sweep_seconds: int = 60
     worker_approval_expiry_sweep_seconds: int = 300
+    # How often the worker checks every integration's health (Gmail, Calendar,
+    # the Google MCP server, job boards, the embedder, local model servers).
+    integration_health_check_seconds: float = 300.0
+    # How long work held back by an open circuit -- it needs an integration
+    # that is down or awaiting a reconnect -- waits before it is looked at again.
+    integration_circuit_retry_seconds: float = 60.0
     worker_graphs: str = "apps.worker.graphs:build_worker_graphs"
 
     # Credentials. These name *where* secrets are, never the secrets: refresh

@@ -41,6 +41,7 @@ import socket
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from apps.worker.health_monitor import http_get_ok
 from apps.worker.main import WorkerGraphs, WorkflowScopedJobSubgraph
 from apps.worker.unconfigured import (
     NotConfiguredApplicationStore,
@@ -81,7 +82,9 @@ from personalos.bootstrap import (
     build_workflow_lease_store,
     build_workflow_thread_registry,
 )
+from personalos.config import settings
 from personalos.domain.errors import PortNotConfigured
+from personalos.domain.health import GOOGLE_MCP, HealthCheck
 from personalos.domain.job_search import (
     ActionIntent,
     ActionKind,
@@ -96,6 +99,9 @@ from personalos.graphs.job_search import (
     JobSearchGraph,
 )
 from personalos.graphs.supervisor import SupervisorGraph
+from personalos.mcp.health import MCPServerHealthCheck
+from personalos.mcp.manager import get_mcp_manager
+from personalos.models.embedding import PrivacyTier
 from personalos.persistence.leases import DEFAULT_LEASE_TTL_SECONDS
 
 logger = logging.getLogger(__name__)
@@ -247,6 +253,44 @@ def default_job_search_ports(
     return ports, stubs
 
 
+def default_health_checks(ports: Mapping[str, Any]) -> list[HealthCheck]:
+    """The health checks of the adapters behind `ports`, as the graphs will use them.
+
+    Read from the final ports, after any override, so a replaced port is not
+    checked. Stand-ins have nothing to check. The embedder is checked only
+    when it is local: a probe of a hosted one would send text out on a timer.
+    The Google MCP server is checked whenever it is enabled.
+    """
+    candidates: list[Any] = [
+        *ports.get("providers", ()),
+        ports.get("inbound_message_reader"),
+        ports.get("calendar_reader"),
+    ]
+    embedder = _configured_embedder()
+    if embedder is not None and getattr(embedder, "tier", PrivacyTier.LOCAL) is PrivacyTier.LOCAL:
+        candidates.append(embedder)
+    checks: list[HealthCheck] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate is None or isinstance(candidate, _NotConfigured):
+            continue
+        if not isinstance(candidate, HealthCheck) or candidate.integration in seen:
+            continue
+        seen.add(candidate.integration)
+        checks.append(candidate)
+    if settings.mcp_google_enabled:
+        checks.append(MCPServerHealthCheck(get_mcp_manager(), "google", integration=GOOGLE_MCP))
+    return checks
+
+
+def _configured_embedder() -> Any:
+    try:
+        return build_embedder()
+    except Exception as exc:  # noqa: BLE001 - an unusable embedder is reported elsewhere
+        logger.info("the embedder is not health-checked: %s", exc)
+        return None
+
+
 def build_worker_graphs(
     session_factory: Callable[[], Any],
     *,
@@ -265,6 +309,9 @@ def build_worker_graphs(
     for name, port in (overrides or {}).items():
         ports[name] = port
         stubs.pop(name, None)
+
+    model_checks = build_model_gateway().health_checks(get=http_get_ok)
+    health_checks = [*default_health_checks(ports), *model_checks]
 
     job_search = JobSearchGraph(**ports, checkpointer=checkpointer).build()
     supervisor = SupervisorGraph(
@@ -288,7 +335,14 @@ def build_worker_graphs(
             JOB_SEARCH_THREAD_NAMESPACE: runner(job_search),
         },
         unbound_ports=tuple(sorted({stub.port for group in stubs.values() for stub in group})),
+        health_checks=tuple(health_checks),
+        model_integrations=tuple(check.integration for check in model_checks),
     )
 
 
-__all__ = ["ActionKindRouter", "build_worker_graphs", "default_job_search_ports"]
+__all__ = [
+    "ActionKindRouter",
+    "build_worker_graphs",
+    "default_health_checks",
+    "default_job_search_ports",
+]

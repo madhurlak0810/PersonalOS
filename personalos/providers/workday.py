@@ -156,6 +156,14 @@ class WorkdayProvider:
         payload = await self._payload(site, company, path)
         return RawPosting(provider=self.name, payload=payload) if payload else None
 
+    async def health_check(self) -> None:
+        """Ask the first site for one posting. Raises if it does not answer."""
+        site, _ = next(iter(self.sites.values()))
+        await self.http.query_json(
+            f"{site.api_base}/jobs",
+            {"appliedFacets": {}, "limit": 1, "offset": 0, "searchText": ""},
+        )
+
     async def _search_paths(self, site: WorkdaySite, queries: Sequence[str]) -> list[str]:
         """Every posting path the queries find, first occurrence kept, in order."""
         paths: list[str] = []

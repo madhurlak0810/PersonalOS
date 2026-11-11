@@ -68,6 +68,7 @@ from personalos.models.embedding import (
     PrivacyTier,
     default_embeddings_client_factory,
 )
+from personalos.models.health import HttpGet, LocalModelServerCheck, probe_url
 from personalos.models.job_matching import ASSESSOR_SYSTEM_PROMPT, StructuredLLMSemanticAssessor
 from personalos.models.recruiter_events import (
     EXTRACTOR_SYSTEM_PROMPT,
@@ -323,6 +324,21 @@ class ModelGateway:
                 update={"params": {**spec.params, "temperature": DEFAULT_REPLY_TEMPERATURE}}
             )
         return StructuredLLMReplyWriter(self._chat_model(spec), **kwargs)
+
+    def health_checks(self, *, get: HttpGet) -> list[LocalModelServerCheck]:
+        """One check per local model server any role runs on (see `personalos.models.health`).
+
+        The primary role's server comes first. A provider is checked once, at
+        the first `base_url` a role names for it.
+        """
+        roles = [ModelRole.INTENT_CLASSIFIER, *ModelRole]
+        checks: dict[str, LocalModelServerCheck] = {}
+        for role in roles:
+            spec = self.config.spec_for(role)
+            url = probe_url(spec.provider, spec.base_url)
+            if url is not None and spec.provider not in checks:
+                checks[spec.provider] = LocalModelServerCheck(spec.provider, url, get=get)
+        return list(checks.values())
 
     def embedder(
         self,

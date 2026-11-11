@@ -88,6 +88,11 @@ class GreenhouseProvider:
             provider=self.name, payload=self._to_payload(job, token, self.boards[token])
         )
 
+    async def health_check(self) -> None:
+        """List the first board's jobs without their content. Raises if it does not answer."""
+        token = next(iter(self.boards))
+        await self._get(f"{token}/jobs")
+
     async def _get(self, path: str, params: dict[str, str] | None = None) -> Any:
         """GET one API path, returning parsed JSON, or `None` on a 404."""
         return await self.http.get_json(f"{BASE_URL}/{path}", params=params)

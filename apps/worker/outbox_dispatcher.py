@@ -47,12 +47,14 @@ from personalos.bootstrap import (
     build_correlated_wait_lookup,
     build_event_outbox,
     build_idempotent_consumer,
+    build_integration_health_store,
     build_workflow_command_queue,
     build_workflow_thread_registry,
     register_calendar_change_thread,
     register_event_handler_thread,
     register_inbound_email_thread,
 )
+from personalos.domain.errors import ProviderPermanentFailure
 from personalos.domain.event_transport import EventConsumer
 from personalos.domain.events import EventEnvelope, EventType
 from personalos.observability import tracing
@@ -74,15 +76,20 @@ class OutboxDispatcher:
         handlers: Mapping[str, EventHandler],
         *,
         default: EventHandler | None = None,
+        integrations: Any = None,
     ):
         """Initialize with the consumer, per-type handlers, and the handler for every other type.
 
         An event with neither a handler for its type nor a default has nobody
         to deliver to, and is acknowledged rather than left to block the queue.
+        `integrations` (an `IntegrationHealthStore`), when given, is told about
+        a provider that refused a delivery permanently -- the event is
+        dead-lettered without retries, and the integration marked degraded.
         """
         self.consumer = consumer
         self.handlers = dict(handlers)
         self.default = default
+        self.integrations = integrations
 
     async def process_next(self) -> bool:
         """Claim and deliver the oldest claimable event. False when there was none."""
@@ -122,6 +129,7 @@ class OutboxDispatcher:
                         claimed.attempt,
                     )
                     failure = self.consumer.nack(claimed, error)
+                    self._note_broken_integration(error, envelope)
                     tracing.mark_failed(span, error)
                     tracing.set_attributes(
                         span, {Attr.EVENT_OUTCOME: failure.outcome, Attr.RETRY_DELAY: failure.delay}
@@ -130,6 +138,19 @@ class OutboxDispatcher:
                 self.consumer.ack(claimed)
                 tracing.set_attributes(span, {Attr.EVENT_OUTCOME: "acked"})
         return True
+
+    def _note_broken_integration(self, error: BaseException, envelope: EventEnvelope) -> None:
+        if self.integrations is None or not isinstance(error, ProviderPermanentFailure):
+            return
+        try:
+            self.integrations.mark_degraded(
+                error.provider,
+                reason=error.reason,
+                detail=error.message,
+                workflow_id=getattr(envelope, "workflow_id", None),
+            )
+        except Exception:
+            logger.exception("could not mark integration '%s' degraded", error.provider)
 
     async def drain(self, limit: int | None = None) -> int:
         """Deliver until nothing is claimable (or `limit` deliveries). Returns how many."""
@@ -199,6 +220,7 @@ def build_outbox_dispatcher(
             EventType.EMAIL_RECEIVED: inbound_email,
         },
         default=router,
+        integrations=build_integration_health_store(session_factory),
     )
 
 

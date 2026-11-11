@@ -37,6 +37,12 @@ redacted, and are listed:
 `POST /v1/failures/events/{failure_id}/retry` puts one back in line with a
 fresh attempt budget. Delivery is idempotent on the event's `dedupe_key`, so
 retrying an event that was in fact applied applies nothing twice.
+
+**So are integrations that stopped working.** `GET /v1/failures/integrations`
+lists every integration that is `degraded` or `down`, with the reason, the
+last error (redacted), when it last worked, and its `action`: `reconnect`
+when only a fresh consent fixes it (nothing retries it meanwhile), `retry`
+when the worker's next health check will try again by itself.
 """
 
 import logging
@@ -51,6 +57,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from personalos.bootstrap import (
     build_event_failure_store,
+    build_integration_health_store,
     build_workflow_command_queue,
     build_workflow_failure_store,
     build_workflow_thread_registry,
@@ -60,6 +67,7 @@ from personalos.domain.failures import (
     EventFailure,
     FailedOperation,
     FailureStatus,
+    IntegrationHealth,
     WorkflowFailure,
 )
 from personalos.domain.workflow import (
@@ -70,6 +78,7 @@ from personalos.domain.workflow import (
 )
 from personalos.persistence.database import SessionLocal
 from personalos.persistence.event_failures import DEFAULT_LIMIT, EventFailureStore
+from personalos.persistence.integration_health import IntegrationHealthStore
 from personalos.persistence.workflow_commands import WorkflowCommandQueue
 from personalos.persistence.workflow_failures import WorkflowFailureStore, retry_dedupe
 
@@ -91,6 +100,7 @@ class FailureServices:
     store: WorkflowFailureStore
     commands: WorkflowCommandQueue
     events: EventFailureStore
+    integrations: IntegrationHealthStore
 
 
 def build_failure_services(session_factory: Callable[[], Any]) -> FailureServices:
@@ -100,6 +110,7 @@ def build_failure_services(session_factory: Callable[[], Any]) -> FailureService
         store=build_workflow_failure_store(session_factory, registry),
         commands=build_workflow_command_queue(session_factory),
         events=build_event_failure_store(session_factory),
+        integrations=build_integration_health_store(session_factory),
     )
 
 
@@ -241,6 +252,18 @@ async def list_event_failures(
 ):
     """Every dead-lettered or quarantined event, with its last error, newest first."""
     return EventFailuresResponse(failures=services.events.failures(limit=limit))
+
+
+class IntegrationFailuresResponse(BaseModel):
+    """Every integration that is degraded or down."""
+
+    integrations: list[IntegrationHealth] = Field(default_factory=list)
+
+
+@router.get("/failures/integrations", response_model=IntegrationFailuresResponse)
+async def list_integration_failures(services: FailureServices = Depends(get_failure_services)):
+    """Every degraded or down integration, with its reason and what fixes it."""
+    return IntegrationFailuresResponse(integrations=services.integrations.unhealthy())
 
 
 @router.post(
@@ -408,6 +431,7 @@ __all__ = [
     "FailureSelection",
     "WorkflowFailuresResponse",
     "EventFailuresResponse",
+    "IntegrationFailuresResponse",
     "EventRetryResponse",
     "RetryResponse",
     "DismissResponse",

@@ -125,6 +125,11 @@ class GoogleConnectionReader:
         self._health = health
         self._clock = clock
 
+    @property
+    def health(self) -> IntegrationHealthStore:
+        """The health store the status is read from."""
+        return self._health
+
     def connections(self, *, active_only: bool = True) -> list[GoogleConnection]:
         """Connected Google accounts, most recently changed first."""
         session = self._session_factory()
@@ -145,13 +150,18 @@ class GoogleConnectionReader:
         expired = any(
             c.consent_expires_at is not None and c.consent_expires_at <= now for c in active
         )
-        degraded = health is not None and health.status == DEGRADED
+        degraded = health is not None and (health.reconnect_required or health.status == DEGRADED)
+        reconnect = expired or degraded or (not active and bool(every))
         return IntegrationStatus(
             provider=GOOGLE_PROVIDER,
             connected=bool(active),
-            reconnect_required=expired or degraded or (not active and bool(every)),
+            reconnect_required=reconnect,
             health=health.status if health else None,
             health_reason=health.reason if health else None,
+            action="reconnect" if reconnect else (health.action if health else None),
+            last_error=health.last_error if health else None,
+            last_success_at=health.last_success_at if health else None,
+            last_checked_at=health.last_checked_at if health else None,
             accounts=active,
         )
 

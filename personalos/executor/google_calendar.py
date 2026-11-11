@@ -41,6 +41,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from personalos.domain.errors import ValidationFailed
 from personalos.domain.events import EventEnvelope, EventType
+from personalos.domain.health import GOOGLE_CALENDAR, HealthCheckResult, run_check
 from personalos.domain.interview_scheduling import (
     PROP_APPLICATION_ID,
     PROP_ROLE,
@@ -108,6 +109,9 @@ def _instant(raw: str, *, all_day: bool, zone: ZoneInfo) -> datetime:
 
 class GoogleCalendar:
     """`CalendarReader` and `CalendarClient` over the `google.calendar_*` tools."""
+
+    #: The integration `health_check` reports on.
+    integration = GOOGLE_CALENDAR
 
     def __init__(
         self,
@@ -234,6 +238,26 @@ class GoogleCalendar:
             MAX_LIST_PAGES,
         )
         return events
+
+    # --- health ---------------------------------------------------------
+
+    async def health_check(self) -> HealthCheckResult:
+        """List at most one event in the next minute: the cheapest read the grant allows."""
+        now = datetime.now(timezone.utc)
+
+        async def probe() -> None:
+            await self._read(
+                "calendar_list_events",
+                {
+                    "calendar_id": self.calendar_id,
+                    "time_min": now.isoformat(),
+                    "time_max": (now + timedelta(minutes=1)).isoformat(),
+                    "max_results": 1,
+                    "time_zone": self.time_zone,
+                },
+            )
+
+        return await run_check(self.integration, probe)
 
     # --- CalendarReader -------------------------------------------------
 

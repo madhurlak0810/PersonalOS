@@ -31,6 +31,7 @@ from typing import Any
 from langgraph.types import Command
 from opentelemetry.trace import SpanKind
 
+from apps.worker.health_monitor import HealthGate, describe_blocked
 from apps.worker.workflow_runner import DurableWorkflowRunner
 from personalos.domain.workflow import WorkflowCommand, WorkflowCommandKind, thread_namespace
 from personalos.observability import tracing
@@ -121,6 +122,7 @@ async def process_next(
     runners: Mapping[str, DurableWorkflowRunner],
     *,
     lease_busy_delay: timedelta = DEFAULT_LEASE_BUSY_DELAY,
+    gate: HealthGate | None = None,
 ) -> bool:
     """Claim and run the oldest queued command. False when there was none.
 
@@ -135,11 +137,31 @@ async def process_next(
     so this worker does not spin on it. Any other failure settles the row as
     failed; the runner has already marked the thread failed, and its last
     checkpoint is what a later resume starts from.
+
+    `gate` is the circuit breaker: a command that needs an integration that is
+    down, or awaiting a reconnect, is put back for `gate.retry_after` instead
+    of being run into a failure (`apps.worker.health_monitor.HealthGate`).
     """
     claimed = queue.claim_next()
     if claimed is None:
         return False
     command = claimed.command
+    if gate is not None:
+        blocked = gate.blocked_for(command)
+        if blocked:
+            logger.info(
+                "holding command %s of workflow %s for %ss: it needs %s",
+                command.command_id,
+                command.workflow_id,
+                int(gate.retry_after.total_seconds()),
+                describe_blocked(blocked),
+                extra={
+                    "workflow_id": str(command.workflow_id),
+                    "integration": ",".join(h.provider for h in blocked),
+                },
+            )
+            queue.release(claimed.outbox_id, delay=gate.retry_after)
+            return True
     try:
         # A child of the span that queued the command -- the request, or the
         # event delivery -- carried across in the command itself.
@@ -187,6 +209,7 @@ async def run_commands(
     *,
     idle_seconds: float = 1.0,
     lease_busy_delay: timedelta = DEFAULT_LEASE_BUSY_DELAY,
+    gate: HealthGate | None = None,
 ) -> None:
     """Run queued commands until `stop` is set, pausing `idle_seconds` when there are none.
 
@@ -196,7 +219,7 @@ async def run_commands(
     """
     while not stop.is_set():
         try:
-            ran = await process_next(queue, runners, lease_busy_delay=lease_busy_delay)
+            ran = await process_next(queue, runners, lease_busy_delay=lease_busy_delay, gate=gate)
         except Exception:
             # Either the command failed (already logged and settled) or the
             # claim itself could not reach the database; in the second case

@@ -159,15 +159,22 @@ class GoogleConnection(_Value):
 
 
 class IntegrationStatus(_Value):
-    """One provider's connection state, for `GET /v1/integrations`."""
+    """One integration's connection and health state, for `GET /v1/integrations`."""
 
     provider: str
     connected: bool
     #: True when the provider was disconnected or refused its credential, and
     #: nothing will work until it is connected again.
     reconnect_required: bool = False
+    #: `healthy`, `degraded` or `down`; absent when never checked.
     health: str | None = None
     health_reason: str | None = None
+    #: `reconnect` or `retry` while unhealthy (see `personalos.domain.health`).
+    action: str | None = None
+    #: The last failure's error, redacted.
+    last_error: str | None = None
+    last_success_at: datetime | None = None
+    last_checked_at: datetime | None = None
     accounts: list[GoogleConnection] = Field(default_factory=list)
 
 

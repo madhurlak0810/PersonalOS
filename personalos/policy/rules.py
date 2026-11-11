@@ -285,6 +285,8 @@ JOB_SEARCH_TOOL_ARGUMENTS = {
 JOB_PROVIDER_TOOL_ARGUMENTS = {
     "job_providers.search": {"provider", "profile"},
     "job_providers.get_job": {"provider", "source_job_id"},
+    # The cheapest read that proves a board answers, for the health monitor.
+    "job_providers.health_check": {"provider"},
 }
 
 
