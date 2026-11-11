@@ -369,9 +369,11 @@ The `persistence` dependency is deliberate and narrow: `MCPServer` uses
 ### `providers` — `personalos/providers/`
 
 Job board adapters. `base.py` defines `JobProvider` (`search`, `get_job`);
-`greenhouse.py` is the real adapter, `fake.py` the in-memory one, and
-`invoker.py` the `ToolInvoker` that runs approved `job_providers.search` /
-`job_providers.get_job` intents against them.
+`greenhouse.py`, `lever.py`, `ashby.py` and `workday.py` are the real
+adapters, `fake.py` the in-memory one, and `invoker.py` the `ToolInvoker` that
+runs approved `job_providers.search` / `job_providers.get_job` intents against
+them. Every real adapter reads through `http.py`'s `ProviderHttp` and builds
+its payload with `text.py`'s shape-tolerant accessors.
 
 - **May import:** `domain`, `policy`, `tools`, `config`.
 - **Must not:** be imported by `graphs` or `executor`. The graph is handed
@@ -394,7 +396,52 @@ outside party and is treated as data, never as instructions:
   anything that model proposes is an `origin=LLM` intent that still clears
   policy and the approval triple.
 
-`tests/adversarial/test_posting_prompt_injection.py` holds the regression.
+`tests/adversarial/test_posting_prompt_injection.py` holds the regression,
+for the fake adapter and for each real one over its recorded responses.
+
+**Polite by construction.** `ProviderHttp` is the only way an adapter reaches
+the network. It spaces requests per adapter instance (`min_interval`, 0.5s by
+default and 1s for Workday), retries transport errors, 429s and 5xx under
+the `READ` retry budget with jittered exponential backoff, treats a
+`Retry-After` (seconds or HTTP-date) as a floor and as a hold on every later
+request, and gives up at once on a `Retry-After` longer than
+`max_retry_after` (60s) or on a 4xx that will not improve. It exposes GET and
+a JSON-body query POST and nothing else, and sends a generic User-Agent and
+no credential.
+
+**Job board coverage.** An adapter is added only for a board whose postings
+can be read without scraping a page or breaking its terms:
+
+| Board | Adapter | Endpoint | Status |
+| --- | --- | --- | --- |
+| Greenhouse | `greenhouse.py` | `boards-api.greenhouse.io/v1/boards/<token>/jobs` (public Job Board API) | Supported |
+| Lever | `lever.py` | `api.lever.co/v0/postings/<site>` (public Postings API; `api.eu.lever.co` for EU sites) | Supported |
+| Ashby | `ashby.py` | `api.ashbyhq.com/posting-api/job-board/<board>` (public Job Postings API) | Supported |
+| Workday | `workday.py` | `<tenant>.wd<N>.myworkdayjobs.com/wday/cxs/<tenant>/<site>/` (career-site backend) | **Opt-in per employer** |
+| LinkedIn | none | no public job search API | **Out of scope** |
+| Indeed | none | no public job search API (the publisher API is closed) | **Out of scope** |
+
+- *LinkedIn and Indeed* offer no public search API; the only way to read
+  them is to scrape, which their terms of service prohibit and which risks
+  the user's own account. They stay out, and so does any aggregator library
+  that scrapes them (`jobspy`, `linkedin_api` and friends are on the
+  architecture test's forbidden-import list).
+- *Workday* has no published job-seeker API: its documented REST/SOAP APIs
+  belong to a tenant and need that tenant's credentials. What `workday.py`
+  reads is the unauthenticated JSON endpoint each public career page is
+  rendered from -- the same data, at a human pace, read-only. It is
+  undocumented and may change or be blocked without notice, so it is never on
+  by default: nothing is read until `WORKDAY_SITES` names an employer, and the
+  person adding one should check that site's `robots.txt` and terms first.
+  Because search results carry no description, each candidate costs a detail
+  request; the adapter caps pages per query and details per site.
+- Other closed boards (iCIMS, Taleo, SuccessFactors, ...) stay out unless a
+  compliant read path exists.
+
+Contract: `tests/contracts/test_job_providers.py` runs every real adapter
+through the same suite against the recorded responses in
+`evals/golden/provider_normalization.json`, which also pins each adapter's
+normalized output (`tests/unit/test_provider_golden.py`).
 
 ### `mcp_servers` — `mcp_servers/`
 

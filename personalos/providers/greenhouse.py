@@ -7,7 +7,6 @@ configured with the board tokens to watch and filters their postings against
 the profile locally.
 """
 
-import html
 import logging
 import re
 from collections.abc import Mapping, Sequence
@@ -17,28 +16,14 @@ import httpx
 
 from personalos.domain.job_search import RawPosting, SearchProfile
 from personalos.providers.base import ProviderUnavailable
+from personalos.providers.http import DEFAULT_TIMEOUT_SECONDS, ProviderHttp
+from personalos.providers.text import html_to_text, is_remote, items, mapping, matches, text
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://boards-api.greenhouse.io/v1/boards"
-DEFAULT_TIMEOUT_SECONDS = 15.0
 
-#: Tags whose end marks a line break when HTML is flattened to text.
-_BLOCK_TAGS = re.compile(r"</?(?:p|div|br|li|ul|ol|h[1-6]|tr)\b[^>]*>", re.IGNORECASE)
-_ANY_TAG = re.compile(r"<[^>]+>")
-_NON_TEXT = re.compile(r"<(script|style)\b.*?</\1>", re.IGNORECASE | re.DOTALL)
-
-
-def html_to_text(content: str) -> str:
-    """Flatten a Greenhouse `content` field to plain text.
-
-    The field is HTML that has itself been entity-escaped, so it is unescaped
-    before tags are removed and once more after, for entities inside the text.
-    """
-    text = _NON_TEXT.sub(" ", html.unescape(content))
-    text = _ANY_TAG.sub("", _BLOCK_TAGS.sub("\n", text))
-    lines = (" ".join(line.split()) for line in html.unescape(text).splitlines())
-    return "\n".join(line for line in lines if line)
+_BOARD_TOKEN = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 
 
 class GreenhouseProvider:
@@ -57,13 +42,16 @@ class GreenhouseProvider:
         *,
         client: httpx.AsyncClient | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        http: ProviderHttp | None = None,
     ):
-        """Take the boards to watch, and optionally a client to reuse."""
+        """Take the boards to watch, and optionally a client or HTTP layer to reuse."""
         if not boards:
             raise ValueError("GreenhouseProvider requires at least one board token")
+        bad = [token for token in boards if not _BOARD_TOKEN.match(token)]
+        if bad:
+            raise ValueError(f"invalid greenhouse board token(s): {', '.join(bad)}")
         self.boards = dict(boards)
-        self._client = client
-        self._timeout = timeout
+        self.http = http or ProviderHttp(self.name, client=client, timeout=timeout)
 
     async def search(self, profile: SearchProfile) -> Sequence[RawPosting]:
         """Return postings on the configured boards that match the profile.
@@ -80,9 +68,9 @@ class GreenhouseProvider:
                 logger.warning("greenhouse board '%s' failed during search", token, exc_info=True)
                 failed.append(token)
                 continue
-            for job in (body or {}).get("jobs", []):
-                payload = self._to_payload(job, token, company)
-                if _matches(payload, profile):
+            for job in items(mapping(body).get("jobs")):
+                payload = self._to_payload(mapping(job), token, company)
+                if matches(payload, profile):
                     postings.append(RawPosting(provider=self.name, payload=payload))
         if failed and len(failed) == len(self.boards):
             raise ProviderUnavailable(f"no greenhouse board answered: {', '.join(failed)}")
@@ -94,7 +82,7 @@ class GreenhouseProvider:
         if token not in self.boards or not job_id.isdigit():
             return None
         job = await self._get(f"{token}/jobs/{job_id}")
-        if job is None:
+        if not isinstance(job, Mapping):
             return None
         return RawPosting(
             provider=self.name, payload=self._to_payload(job, token, self.boards[token])
@@ -102,51 +90,25 @@ class GreenhouseProvider:
 
     async def _get(self, path: str, params: dict[str, str] | None = None) -> Any:
         """GET one API path, returning parsed JSON, or `None` on a 404."""
-        url = f"{BASE_URL}/{path}"
-        try:
-            if self._client is not None:
-                response = await self._client.get(url, params=params)
-            else:
-                async with httpx.AsyncClient(timeout=self._timeout) as client:
-                    response = await client.get(url, params=params)
-            if response.status_code == 404:
-                return None
-            response.raise_for_status()
-            return response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise ProviderUnavailable(f"greenhouse request failed for '{path}': {exc}") from exc
+        return await self.http.get_json(f"{BASE_URL}/{path}", params=params)
 
     @staticmethod
     def _to_payload(job: Mapping[str, Any], token: str, company: str) -> dict[str, Any]:
         """Map a Greenhouse job onto the conventional posting keys."""
-        location = (job.get("location") or {}).get("name")
+        location = text(mapping(job.get("location")).get("name"))
         return {
             # Job ids are only unique within a board.
             "id": f"{token}:{job.get('id')}",
             "title": job.get("title"),
-            "company": job.get("company_name") or company,
+            "company": text(job.get("company_name")) or company,
             "location": location,
             "url": job.get("absolute_url"),
-            "description": html_to_text(job.get("content") or ""),
-            "remote": bool(location and "remote" in location.lower()),
-            "posted_at": job.get("first_published") or job.get("updated_at"),
-            "departments": [d.get("name") for d in job.get("departments") or []],
+            "description": html_to_text(text(job.get("content")) or ""),
+            "remote": is_remote(location),
+            "posted_at": text(job.get("first_published")) or text(job.get("updated_at")),
+            "departments": [text(mapping(d).get("name")) for d in items(job.get("departments"))],
             "board_token": token,
         }
-
-
-def _matches(payload: Mapping[str, Any], profile: SearchProfile) -> bool:
-    """True when a posting mentions any of the profile's roles or keywords.
-
-    A profile with neither matches everything. This is a coarse recall filter
-    standing in for the search endpoint Greenhouse does not have; precision is
-    `hard_filter` and the scorer's job.
-    """
-    terms = [term.lower() for term in (*profile.target_roles, *profile.keywords) if term.strip()]
-    if not terms:
-        return True
-    haystack = f"{payload.get('title') or ''} {payload.get('description') or ''}".lower()
-    return any(term in haystack for term in terms)
 
 
 __all__ = ["GreenhouseProvider", "html_to_text", "BASE_URL"]

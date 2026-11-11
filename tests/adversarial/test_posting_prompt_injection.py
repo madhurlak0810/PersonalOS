@@ -8,6 +8,8 @@ allows, which ports the graph calls, which actions it proposes -- differs from
 a run that discovered an ordinary posting.
 """
 
+import html
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -21,6 +23,7 @@ from personalos.policy import (
     default_policy_engine,
 )
 from personalos.providers import FakeJobProvider
+from tests.fixtures import job_provider_contract as recorded
 from tests.fixtures import job_search_fakes as fakes
 from tests.fixtures.job_discovery import (
     build_discovery_graph,
@@ -147,3 +150,83 @@ def test_invisible_and_control_characters_are_stripped_from_posting_text(hidden)
             ),
         ).dedupe_key
     )
+
+
+# --- Through the real board adapters ------------------------------------------
+#
+# The same check, with each real adapter's HTML flattening and field mapping
+# between the board's response and the stored row. The recorded responses in
+# `evals/golden/provider_normalization.json` list a "Backend Engineer,
+# Payments" opening whose description carries the golden `injection` text.
+
+GOLDEN_INJECTION = recorded.golden()["injection"]
+CLEAN_SENTENCE = "We ship billing APIs on a small, friendly team."
+
+
+def _scrub(value: Any) -> Any:
+    """The recorded responses with the injection replaced by an ordinary sentence."""
+    if isinstance(value, str):
+        return value.replace(GOLDEN_INJECTION, CLEAN_SENTENCE).replace(
+            html.escape(GOLDEN_INJECTION), CLEAN_SENTENCE
+        )
+    if isinstance(value, list):
+        return [_scrub(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _scrub(item) for key, item in value.items()}
+    return value
+
+
+async def run_board(tmp_path, provider: str, *, injected: bool):
+    routes = recorded.case(provider)["routes"]
+    adapter = recorded.build(provider, routes=routes if injected else _scrub(routes)).provider
+    factory = session_factory(tmp_path)
+    graph, ports, decisions = build_discovery_graph([adapter], factory)
+    final = await graph.ainvoke(
+        {"user_id": str(fakes.USER_ID), "prepare_application": True},
+        config={"configurable": {"thread_id": f"t-{uuid4()}"}},
+    )
+    return final, ports, decisions, factory
+
+
+@pytest.mark.parametrize("provider", recorded.PROVIDERS)
+async def test_an_injected_board_posting_is_stored_as_data(tmp_path, provider):
+    _, _, _, factory = await run_board(tmp_path, provider, injected=True)
+
+    (row,) = [r for r in stored_postings(factory) if r.title == "Backend Engineer, Payments"]
+    assert GOLDEN_INJECTION in row.normalized_json["description"]
+    assert GOLDEN_INJECTION in row.raw_json["description"]
+    assert row.company.startswith("Acme")
+    assert row.source == provider
+    for field in (row.url or "", row.dedupe_key, row.source_job_id or "", row.location or ""):
+        assert "evil.test" not in field
+
+
+@pytest.mark.parametrize("provider", recorded.PROVIDERS)
+async def test_an_injected_board_posting_does_not_alter_tool_availability(tmp_path, provider):
+    before = tool_surface(default_policy_engine())
+
+    clean, clean_ports, clean_decisions, _ = await run_board(
+        tmp_path / "clean", provider, injected=False
+    )
+    dirty, dirty_ports, dirty_decisions, _ = await run_board(
+        tmp_path / "dirty", provider, injected=True
+    )
+
+    assert tool_surface(default_policy_engine()) == before
+    # Discovery made the one provider read, and nothing else, in both runs.
+    assert [i.tool_ref for i, _ in dirty_decisions] == ["job_providers.search"]
+    assert [i.tool_ref for i, _ in dirty_decisions] == [i.tool_ref for i, _ in clean_decisions]
+
+    def proposed(final, ports):
+        executed = [intent for intent, _ in ports["action_executor"].executed]
+        return (
+            [(intent.kind, intent.target) for intent in executed],
+            [request["requested_scopes"] for request in final["approval_requests"]],
+            [event["type"] for event in final["emitted_events"]],
+        )
+
+    assert proposed(dirty, dirty_ports) == proposed(clean, clean_ports)
+    for intent, _ in dirty_ports["action_executor"].executed:
+        assert intent.kind is ActionKind.SUBMIT_APPLICATION
+        assert "evil.test" not in str(intent.target)
+        assert "evil.test" not in str(intent.payload)

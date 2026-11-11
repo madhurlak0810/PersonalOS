@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from personalos.policy import Decision
 from personalos.providers import FakeJobProvider
+from tests.fixtures import job_provider_contract as recorded
 from tests.fixtures import job_search_fakes as fakes
 from tests.fixtures.job_discovery import (
     build_discovery_graph,
@@ -159,3 +160,58 @@ async def test_one_provider_failing_does_not_lose_the_others(tmp_path):
 
     assert [failure["provider"] for failure in final["provider_failures"]] == ["deadboard"]
     assert len(stored_postings(factory)) == 1
+
+
+# --- Real adapters, recorded responses ---------------------------------------
+
+
+def real_boards():
+    """Greenhouse, Lever, Ashby and Workday over their recorded responses.
+
+    Each lists Acme's Senior Backend Engineer opening in its own markup, with
+    its own id and URL; Lever names the employer "Acme, Inc.".
+    """
+    return [recorded.build(name).provider for name in recorded.PROVIDERS]
+
+
+async def test_the_same_posting_on_greenhouse_lever_ashby_and_workday_is_one_row(tmp_path):
+    """The acceptance criterion, with the real adapters' normalization in the loop."""
+    factory = session_factory(tmp_path)
+    graph, _, decisions = build_discovery_graph(real_boards(), factory)
+
+    final = await discover(graph)
+
+    assert [intent.arguments["provider"] for intent, _ in decisions] == list(recorded.PROVIDERS)
+    shared = [p for p in final["normalized_postings"] if p["title"] == "Senior Backend Engineer"]
+    assert [p["source"] for p in shared] == list(recorded.PROVIDERS)
+
+    rows = stored_postings(factory)
+    (row,) = [r for r in rows if r.title == "Senior Backend Engineer"]
+    # The first provider to return it keeps the attribution.
+    assert (row.source, row.source_job_id) == ("greenhouse", "acme:4012345")
+    assert row.dedupe_key in final["duplicate_dedupe_keys"]
+    # One row per distinct opening, however many boards listed it.
+    assert len(final["raw_postings"]) > len(final["deduplicated_postings"]) == len(rows)
+    assert len({r.dedupe_key for r in rows}) == len(rows)
+    assert {p["dedupe_key"] for p in final["persisted_postings"]} == {r.dedupe_key for r in rows}
+
+
+async def test_a_board_listing_it_later_resolves_to_the_existing_row(tmp_path):
+    factory = session_factory(tmp_path)
+    first, *later = real_boards()
+
+    graph, _, _ = build_discovery_graph([first], factory)
+    await discover(graph)
+    before = {r.dedupe_key: r.id for r in stored_postings(factory)}
+    for adapter in later:
+        graph, _, _ = build_discovery_graph([adapter], factory)
+        final = await discover(graph)
+        shared = [
+            p
+            for p in final["persisted_postings"]
+            if p["dedupe_key"].startswith("acme|senior backend engineer|")
+        ]
+        assert [p["created"] for p in shared] == [False], adapter.name
+
+    rows = {r.dedupe_key: r.id for r in stored_postings(factory)}
+    assert {k: v for k, v in rows.items() if k in before} == before

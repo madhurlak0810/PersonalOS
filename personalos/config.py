@@ -132,6 +132,19 @@ class Settings(BaseSettings):
     # name; a board belongs to one company, so there is no global search.
     # Set as JSON: GREENHOUSE_BOARDS={"acme": "Acme"}
     greenhouse_boards: dict[str, str] = {}
+    # Lever sites (the slug in jobs.lever.co/<site>; prefix `eu/` for an
+    # EU-hosted site) and Ashby boards (jobs.ashbyhq.com/<board>), each to the
+    # employer's display name. Both are public, documented read-only APIs.
+    #   LEVER_SITES={"acme": "Acme", "eu/globex": "Globex"}
+    #   ASHBY_BOARDS={"initech": "Initech"}
+    lever_sites: dict[str, str] = {}
+    ashby_boards: dict[str, str] = {}
+    # Workday career sites, as "<tenant>.wd<N>.myworkdayjobs.com/<site>" ->
+    # employer name. Opt-in per employer: this reads the career page's own
+    # undocumented endpoint, not a published API (see personalos/providers/
+    # workday.py and "Job board coverage" in docs/ARCHITECTURE_BOUNDARIES.md).
+    #   WORKDAY_SITES={"acme.wd5.myworkdayjobs.com/AcmeCareers": "Acme"}
+    workday_sites: dict[str, str] = {}
 
     # Application lifecycle. An application with no activity for this many
     # days is moved to STALLED by `apps.worker.stall_monitor`, which a
