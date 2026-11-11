@@ -50,5 +50,9 @@ class JobProvider(Protocol):
         """Return one posting by the provider's own id, or `None` if it is gone."""
         ...
 
+    # Optionally, `async def health_check(self) -> None`: the cheapest read
+    # that proves the provider answers, raising `ProviderUnavailable` if it
+    # does not. `JobProviderInvoker` treats a provider without one as healthy.
+
 
 __all__ = ["JobProvider", "ProviderUnavailable"]

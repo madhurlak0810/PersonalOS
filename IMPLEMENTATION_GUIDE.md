@@ -416,6 +416,7 @@ PersonalOS/
 │   └── worker/                    # workflow commands, outbox dispatch, scheduled sweeps
 │       ├── graphs.py              # default graph factory (WORKER_GRAPHS)
 │       ├── fake_providers.py      # quick-start factory: fake board, extractive drafts
+│       ├── health_monitor.py      # scheduled integration health checks, circuit breakers
 │       └── unconfigured.py        # stand-ins for ports with no adapter yet
 │
 ├── mcp_servers/
@@ -1595,6 +1596,8 @@ Settings come from the environment, then `.env` in the working directory.
 | `GMAIL_POLL_INTERVAL_SECONDS` | `300` | How often the worker reads the Gmail history. |
 | `GMAIL_BACKFILL_DAYS` | `14` | How far back a first poll, or a resync, searches. `0` means only new mail. |
 | `GMAIL_INBOX_ACTOR` | `api` | Whose applications inbound mail is matched against, as `--actor` / `X-Actor-Id`. |
+| `INTEGRATION_HEALTH_CHECK_SECONDS` | `300` | How often the worker health-checks every adapter. Results are at `GET /v1/integrations` and `GET /v1/failures/integrations`. |
+| `INTEGRATION_CIRCUIT_RETRY_SECONDS` | `60` | How long work that needs an integration that is down, or awaiting a reconnect, waits in its queue before it is looked at again. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Optional MCP response cache. |
 
 ---

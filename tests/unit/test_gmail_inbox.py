@@ -531,10 +531,13 @@ def test_the_worker_does_not_poll_an_unconfigured_mailbox(factory):
 
 def test_the_worker_polls_a_configured_mailbox(factory, monkeypatch):
     from apps.worker import main
+    from apps.worker.health_monitor import GatedSweep
 
     sentinel = object()
     monkeypatch.setattr(main, "_gmail_inbox", lambda _factory: type("I", (), {"poll": sentinel})())
     scheduler = main.build_scheduler(factory, main.WorkerGraphs())
     (sweep,) = [s for s in scheduler.sweeps if s.name == "gmail_inbox"]
-    assert sweep.run is sentinel
+    # Behind the Gmail circuit breaker: skipped while Gmail is down.
+    assert isinstance(sweep.run, GatedSweep) and sweep.run.integration == "gmail"
+    assert sweep.run.inner is sentinel
     assert sweep.interval_seconds == timedelta(minutes=5).total_seconds()

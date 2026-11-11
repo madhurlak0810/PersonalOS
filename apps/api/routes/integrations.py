@@ -2,7 +2,12 @@
 
 - `GET /v1/integrations` lists each integration: whether it is connected, as
   which account, with which scopes, until when, and whether it needs
-  reconnecting. It works before anything is configured.
+  reconnecting. Google comes first; after it, every other integration the
+  worker has health-checked (`gmail`, `google_calendar`, `google_mcp`, each
+  job board, the embedder, each local model server), with its health
+  (`healthy`, `degraded` or `down`), the reason, `last_success_at`, the last
+  error (redacted) and the `action` that fixes it: `reconnect` or `retry`.
+  It works before anything is configured.
 - `POST /v1/integrations/google/connect` begins a consent flow and returns the
   `authorization_url` to open in a browser. With no body it is read-only;
   `{"enable": ["gmail.send"]}` asks for a write capability, and is refused
@@ -27,6 +32,8 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from personalos.bootstrap import build_google_connection_reader, build_google_connector
+from personalos.domain.failures import IntegrationHealth
+from personalos.domain.health import GOOGLE, GOOGLE_INTEGRATIONS
 from personalos.domain.integrations import (
     ConsentRequest,
     GoogleCapability,
@@ -93,8 +100,32 @@ def _callback_uri(request: Request) -> str:
 
 @router.get("/integrations", response_model=IntegrationsResponse)
 def list_integrations(reader: GoogleConnectionReader = Depends(get_google_connection_reader)):
-    """Every integration's connection state. Never includes token material."""
-    return IntegrationsResponse(integrations=[reader.status()])
+    """Every integration's connection and health state. Never includes token material."""
+    google = reader.status()
+    others = [
+        _status(health, google) for health in reader.health.all() if health.provider != GOOGLE
+    ]
+    return IntegrationsResponse(integrations=[google, *others])
+
+
+def _status(health: IntegrationHealth, google: IntegrationStatus) -> IntegrationStatus:
+    """One health-checked integration, as `GET /v1/integrations` shows it.
+
+    A Google integration is connected when the Google account is; any other
+    is configured, which is what having been checked at all means.
+    """
+    connected = google.connected if health.provider in GOOGLE_INTEGRATIONS else True
+    return IntegrationStatus(
+        provider=health.provider,
+        connected=connected,
+        reconnect_required=health.reconnect_required,
+        health=health.status,
+        health_reason=health.reason,
+        action=health.action,
+        last_error=health.last_error,
+        last_success_at=health.last_success_at,
+        last_checked_at=health.last_checked_at,
+    )
 
 
 @router.post("/integrations/google/connect", response_model=ConsentRequest, status_code=201)

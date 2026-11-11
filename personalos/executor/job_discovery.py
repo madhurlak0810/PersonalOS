@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from personalos.domain.context import ExecutionContext
+from personalos.domain.health import HealthCheckResult, run_check
 from personalos.domain.job_search import RawPosting, SearchProfile
 from personalos.executor.retry import dispatch_with_retry
 from personalos.policy import IntentOrigin, ToolIntent
@@ -20,6 +21,7 @@ from personalos.tools.gateway import ToolGateway
 JOB_PROVIDERS_SERVER = "job_providers"
 SEARCH_TOOL = "search"
 GET_JOB_TOOL = "get_job"
+HEALTH_CHECK_TOOL = "health_check"
 
 
 class GatewayJobProvider:
@@ -38,6 +40,33 @@ class GatewayJobProvider:
         self.name = name
         self.gateway = gateway
         self.context = context
+
+    @property
+    def integration(self) -> str:
+        """The integration `health_check` reports on: the provider's own name."""
+        return self.name
+
+    async def health_check(self) -> HealthCheckResult:
+        """Ask the provider for its cheapest read, once, without retrying.
+
+        Through the gateway like every other call, so the probe is a recorded
+        `READ_EXTERNAL` decision too. Not retried: a probe is asked again on
+        the next scheduled check, and a backoff here would only delay the sweep.
+        """
+
+        async def probe() -> None:
+            intent = ToolIntent(
+                server=JOB_PROVIDERS_SERVER,
+                tool=HEALTH_CHECK_TOOL,
+                arguments={"provider": self.name},
+                origin=IntentOrigin.SYSTEM,
+                mutating=False,
+                requested_by=f"executor:job_discovery#{HEALTH_CHECK_TOOL}",
+                **({"context": self.context} if self.context else {}),
+            )
+            (await self.gateway.dispatch(intent)).unwrap()
+
+        return await run_check(self.integration, probe)
 
     async def search(self, profile: SearchProfile) -> Sequence[RawPosting]:
         """Search the provider for postings matching the profile."""

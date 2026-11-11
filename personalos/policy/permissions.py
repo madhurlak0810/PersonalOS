@@ -111,6 +111,7 @@ DEFAULT_TOOL_PERMISSIONS: Mapping[str, ToolPermission] = MappingProxyType(
         "jobs.scrape_job_details": _permission(PermissionClass.READ_EXTERNAL, {"jobs:read"}),
         "job_providers.search": _permission(PermissionClass.READ_EXTERNAL, {"jobs:read"}),
         "job_providers.get_job": _permission(PermissionClass.READ_EXTERNAL, {"jobs:read"}),
+        "job_providers.health_check": _permission(PermissionClass.READ_EXTERNAL, {"jobs:read"}),
         "google.gmail_search": _permission(PermissionClass.READ_EXTERNAL, {"communications:read"}),
         "google.gmail_read_message": _permission(
             PermissionClass.READ_EXTERNAL, {"communications:read"}

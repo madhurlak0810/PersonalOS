@@ -15,6 +15,15 @@ class FakeJobProvider:
         self.postings = [dict(payload) for payload in postings]
         self.search_calls: list[SearchProfile] = []
         self.get_job_calls: list[str] = []
+        self.health_calls = 0
+        #: Raised by `health_check` while set.
+        self.health_error: Exception | None = None
+
+    async def health_check(self) -> None:
+        """Answer, or raise `health_error` when a test set one."""
+        self.health_calls += 1
+        if self.health_error is not None:
+            raise self.health_error
 
     async def search(self, profile: SearchProfile) -> Sequence[RawPosting]:
         """Return every posting; filtering is the pipeline's job, not the fake's."""

@@ -49,6 +49,7 @@ from typing import Any
 from uuid import UUID
 
 from personalos.domain.events import EventEnvelope
+from personalos.domain.health import GMAIL, HealthCheckResult, run_check
 from personalos.domain.job_search import RecruiterMessage
 from personalos.domain.mailbox import (
     EXCLUDED_LABEL_IDS,
@@ -135,6 +136,9 @@ class PollResult:
 class GmailRecruiterInbox:
     """Polls one Gmail account for in-scope mail, and reads a message on demand."""
 
+    #: The integration `health_check` reports on.
+    integration = GMAIL
+
     def __init__(
         self,
         gateway: ToolGateway,
@@ -181,6 +185,14 @@ class GmailRecruiterInbox:
 
     async def _poller(self, tool: str, arguments: dict[str, Any]) -> dict:
         return await self._call(tool, arguments, self.poller_requested_by)
+
+    # --- health ---------------------------------------------------------
+
+    async def health_check(self) -> HealthCheckResult:
+        """Read the mailbox's profile: one cheap call that needs the same grant a poll does."""
+        return await run_check(
+            self.integration, lambda: self._poller("gmail_get_profile", {}), checked_at=self.clock()
+        )
 
     # --- poll -----------------------------------------------------------
 

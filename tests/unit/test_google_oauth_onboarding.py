@@ -537,6 +537,10 @@ def test_the_api_connects_reports_and_revokes_without_returning_token_material(i
         "reconnect_required": False,
         "health": None,
         "health_reason": None,
+        "action": None,
+        "last_error": None,
+        "last_success_at": None,
+        "last_checked_at": None,
         "accounts": [],
     }
 

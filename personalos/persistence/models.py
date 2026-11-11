@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from pgvector.sqlalchemy import Vector as PGVector
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -1347,26 +1348,34 @@ class CredentialModel(Base):
 class IntegrationHealthModel(Base):
     """ORM model for whether an integration can currently be used.
 
-    One row per provider, written when a provider refuses in a way no retry can
-    change -- revoked OAuth, a missing scope -- so a workflow failure can ask
-    the user to reconnect instead of offering a retry that would fail the same
-    way. A provider with no row has never been seen to fail like that.
+    One row per integration (`google`, `gmail`, `greenhouse`, `model.ollama`,
+    ...), written by the worker's scheduled health checks and by any path
+    that sees a real call fail. A permanent refusal -- revoked OAuth, a
+    missing scope -- makes it `degraded` until reconnected, so a workflow
+    failure asks for a reconnect instead of a retry that would fail the same
+    way. Transient failures in a row make it `down`. A success makes it
+    `healthy`. An integration with no row has never been checked or failed.
     """
 
     __tablename__ = "integration_health"
 
     provider = Column(String(63), primary_key=True)
     status = Column(
-        Enum("healthy", "degraded", name="integration_health_status"),
+        Enum("healthy", "degraded", "down", name="integration_health_status"),
         nullable=False,
         default="healthy",
     )
-    #: Why it is degraded: `revoked_auth`, `missing_scope`, ...
+    #: Why it is unhealthy: `revoked_auth`, `missing_scope`, `unavailable`, ...
     reason = Column(String(63), nullable=True)
     #: The provider's refusal, redacted.
     detail = Column(Text, nullable=True)
+    #: True when only a reconnect fixes it.
+    reconnect_required = Column(Boolean, nullable=False, default=False)
+    consecutive_failures = Column(Integer, nullable=False, default=0)
     workflow_id = Column(GUID(), ForeignKey("workflows.id"), nullable=True)
     degraded_at = Column(DateTime, nullable=True)
+    last_success_at = Column(DateTime, nullable=True)
+    last_checked_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     def to_dict(self) -> dict:
@@ -1376,8 +1385,12 @@ class IntegrationHealthModel(Base):
             "status": self.status,
             "reason": self.reason,
             "detail": self.detail,
+            "reconnect_required": bool(self.reconnect_required),
+            "consecutive_failures": self.consecutive_failures or 0,
             "workflow_id": str(self.workflow_id) if self.workflow_id else None,
             "degraded_at": self.degraded_at.isoformat() if self.degraded_at else None,
+            "last_success_at": (self.last_success_at.isoformat() if self.last_success_at else None),
+            "last_checked_at": (self.last_checked_at.isoformat() if self.last_checked_at else None),
             "updated_at": self.updated_at.isoformat(),
         }
 

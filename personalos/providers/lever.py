@@ -104,6 +104,11 @@ class LeverProvider:
             return None
         return RawPosting(provider=self.name, payload=self._to_payload(job, site, self.sites[site]))
 
+    async def health_check(self) -> None:
+        """Read one posting from the first site. Raises if it does not answer."""
+        site = next(iter(self.sites))
+        await self.http.get_json(_url(site), params={"mode": "json", "limit": "1"})
+
     @staticmethod
     def _to_payload(job: Mapping[str, Any], site: str, company: str) -> dict[str, Any]:
         """Map a Lever posting onto the conventional posting keys."""

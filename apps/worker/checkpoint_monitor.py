@@ -51,6 +51,7 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
+from apps.worker.health_monitor import HealthGate, describe_blocked
 from apps.worker.workflow_runner import DurableWorkflowRunner
 from personalos.domain.checkpoints import (
     CheckpointCondition,
@@ -179,8 +180,15 @@ class PendingCheckpointMonitor:
         runner: DurableWorkflowRunner,
         registry: WorkflowThreadRegistry,
         clock=datetime.utcnow,
+        gate: HealthGate | None = None,
     ):
-        """Wire the store, the condition evaluator and the runner that resumes threads."""
+        """Wire the store, the condition evaluator and the runner that resumes threads.
+
+        `gate`, when given, is the circuit breaker: a due follow-up is left
+        pending, unclaimed, while an integration the follow-up path needs
+        (Gmail) is down or awaiting a reconnect, and fires on the first sweep
+        after it recovers.
+        """
         if store is None:
             raise ValueError("PendingCheckpointMonitor requires a PendingCheckpointStore")
         if evaluator is None:
@@ -194,6 +202,7 @@ class PendingCheckpointMonitor:
         self.runner = runner
         self.registry = registry
         self.clock = clock
+        self.gate = gate
 
     async def sweep(
         self, *, now: datetime | None = None, limit: int = DEFAULT_SWEEP_LIMIT
@@ -341,6 +350,24 @@ class PendingCheckpointMonitor:
             )
             buckets.deferred.append(checkpoint.checkpoint_id)
             return
+
+        if self.gate is not None:
+            blocked = self.gate.blocked(self.gate.requirements(self.fire_input(checkpoint)))
+            if blocked:
+                # Left pending rather than fired into a failure: the claim
+                # would be spent and the follow-up lost. Its own expiry still
+                # ends it if the integration never comes back.
+                logger.info(
+                    "deferring checkpoint %s: the follow-up needs %s",
+                    checkpoint.checkpoint_id,
+                    describe_blocked(blocked),
+                    extra={
+                        "workflow_id": str(thread.workflow_id),
+                        "integration": ",".join(h.provider for h in blocked),
+                    },
+                )
+                buckets.deferred.append(checkpoint.checkpoint_id)
+                return
 
         # Claim before acting. The guarded UPDATE is what excludes a second
         # monitor that selected the same checkpoint in the same second.

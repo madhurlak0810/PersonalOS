@@ -18,6 +18,7 @@ from personalos.providers.base import JobProvider
 JOB_PROVIDERS_SERVER = "job_providers"
 SEARCH_TOOL = "search"
 GET_JOB_TOOL = "get_job"
+HEALTH_CHECK_TOOL = "health_check"
 
 
 class JobProviderInvoker:
@@ -57,6 +58,11 @@ class JobProviderInvoker:
             elif approved.tool == GET_JOB_TOOL:
                 raw = await provider.get_job(str(arguments.get("source_job_id")))
                 postings = [raw.model_dump(mode="json")] if raw else []
+            elif approved.tool == HEALTH_CHECK_TOOL:
+                check = getattr(provider, "health_check", None)
+                if check is not None:
+                    await check()
+                return {"success": True, "result": {"healthy": True}, "error": None}
             else:
                 return _failure(f"unknown job provider tool '{approved.tool}'", ErrorCode.NOT_FOUND)
         except PersonalOSError as exc:
@@ -71,4 +77,10 @@ def _failure(error: str, code: ErrorCode) -> dict[str, Any]:
     return {"success": False, "result": None, "error": error, "error_code": code.value}
 
 
-__all__ = ["JobProviderInvoker", "JOB_PROVIDERS_SERVER", "SEARCH_TOOL", "GET_JOB_TOOL"]
+__all__ = [
+    "JobProviderInvoker",
+    "JOB_PROVIDERS_SERVER",
+    "SEARCH_TOOL",
+    "GET_JOB_TOOL",
+    "HEALTH_CHECK_TOOL",
+]

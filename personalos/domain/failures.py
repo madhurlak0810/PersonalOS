@@ -158,13 +158,30 @@ class FailedOperation(_Value):
 
 
 class IntegrationHealth(_Value):
-    """The state of the integration a provider-permanent failure broke."""
+    """One integration's health, as its `integration_health` row records it.
+
+    Shown on a failure the integration caused, under `GET /v1/integrations`
+    and at `GET /v1/failures/integrations`. See `personalos.domain.health`.
+    """
 
     provider: str
-    #: `healthy` or `degraded`.
+    #: `healthy`, `degraded` or `down`.
     status: str
     reason: str | None = None
+    #: True when only a reconnect will fix it; nothing retries meanwhile.
     reconnect_required: bool = False
+    #: `reconnect` or `retry`; absent while healthy.
+    action: str | None = None
+    #: The last failure's error, redacted.
+    last_error: str | None = None
+    last_success_at: datetime | None = None
+    last_checked_at: datetime | None = None
+    #: Failed checks or calls in a row since the last success.
+    consecutive_failures: int = 0
+    #: When it stopped being healthy.
+    degraded_at: datetime | None = None
+    #: The workflow whose failure degraded it, when one did.
+    workflow_id: UUID | None = None
     updated_at: datetime | None = None
 
 
@@ -316,6 +333,7 @@ def assess_failure(
             status="degraded",
             reason=error.reason,
             reconnect_required=True,
+            action="reconnect",
         )
 
     attempts = 1 + retries_queued
