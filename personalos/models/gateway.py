@@ -28,6 +28,12 @@ Providers:
 - `openai_compatible`: any server speaking the OpenAI chat API -- llama.cpp,
   vLLM, LM Studio -- through `langchain-openai` (the `local` extra).
 
+The gateway also selects the embedder (`ModelGateway.embedder`), by the
+`embedding` spec of the configuration (see `personalos.models.embedding`). It
+refuses a hosted embedder unless the gateway was built with
+`cloud_inference_allowed`, so resume and email text cannot reach a cloud API
+just because a configuration file names one.
+
 Provider packages are imported when a model is built, never at module scope,
 so importing this module -- and running on `rules` -- needs none of them.
 """
@@ -51,6 +57,16 @@ from personalos.domain.job_search import (
 from personalos.models.artifact_drafting import (
     DRAFT_WRITER_SYSTEM_PROMPT,
     StructuredLLMDraftWriter,
+)
+from personalos.models.embedding import (
+    DEFAULT_EMBEDDING_DIMENSION,
+    CloudInferenceNotAllowed,
+    EmbeddingsClientFactory,
+    EmbeddingSpec,
+    HashingEmbedder,
+    ModelEmbedder,
+    PrivacyTier,
+    default_embeddings_client_factory,
 )
 from personalos.models.job_matching import ASSESSOR_SYSTEM_PROMPT, StructuredLLMSemanticAssessor
 from personalos.models.recruiter_events import (
@@ -123,6 +139,9 @@ class ModelConfig(BaseModel):
     description: str = ""
     default: ModelSpec = Field(default_factory=ModelSpec)
     roles: dict[ModelRole, ModelSpec] = Field(default_factory=dict)
+    #: The embedder. When unset, the composition root builds one from the
+    #: `EMBEDDING_*` settings.
+    embedding: EmbeddingSpec | None = None
 
     def spec_for(self, role: ModelRole) -> ModelSpec:
         return self.roles.get(role, self.default)
@@ -245,13 +264,17 @@ class ModelGateway:
         config: ModelConfig,
         *,
         chat_model_factory: ChatModelFactory | None = None,
+        embeddings_client_factory: EmbeddingsClientFactory | None = None,
+        cloud_inference_allowed: bool = False,
     ):
         for role in ModelRole:
             spec = config.spec_for(role)
             if spec.provider in CHAT_PROVIDERS and not spec.model:
                 raise ValueError(f"{config.name}: {role.value} uses {spec.provider} but no model")
         self.config = config
+        self.cloud_inference_allowed = cloud_inference_allowed
         self._chat_model = chat_model_factory or default_chat_model_factory
+        self._embeddings_client = embeddings_client_factory or default_embeddings_client_factory
 
     def _spec(self, role: ModelRole) -> tuple[ModelSpec, dict[str, Any]]:
         spec = self.config.spec_for(role)
@@ -301,6 +324,40 @@ class ModelGateway:
             )
         return StructuredLLMReplyWriter(self._chat_model(spec), **kwargs)
 
+    def embedder(
+        self,
+        spec: EmbeddingSpec | None = None,
+        *,
+        dimension: int = DEFAULT_EMBEDDING_DIMENSION,
+    ) -> HashingEmbedder | ModelEmbedder | None:
+        """The embedder for `spec` (by default the configuration's), or None if there is none.
+
+        Raises `CloudInferenceNotAllowed` for a hosted embedder when this
+        gateway was not built with `cloud_inference_allowed`. The check runs
+        before any client is built, so a refused embedder never makes a request.
+        The client itself is built on the first embedding.
+        """
+        spec = spec if spec is not None else self.config.embedding
+        if spec is None:
+            return None
+        if spec.tier is PrivacyTier.CLOUD and not self.cloud_inference_allowed:
+            raise CloudInferenceNotAllowed(
+                f"the '{spec.provider}' embedder sends resume and email text to a hosted "
+                f"API; set CLOUD_INFERENCE_ALLOWED=true to allow it, or use a local "
+                f"embedder ('ollama' or 'hashing')"
+            )
+        if spec.provider == "hashing":
+            if dimension != DEFAULT_EMBEDDING_DIMENSION:
+                raise ValueError("the hashing embedder only produces the default width")
+            return HashingEmbedder()
+        return ModelEmbedder(
+            lambda: self._embeddings_client(spec),
+            model=spec.model_name(),
+            version=spec.model_version(),
+            tier=spec.tier,
+            dimension=dimension,
+        )
+
 
 __all__ = [
     "CHAT_PROVIDERS",
@@ -313,4 +370,7 @@ __all__ = [
     "DecliningSemanticAssessor",
     "default_chat_model_factory",
     "ModelGateway",
+    "EmbeddingSpec",
+    "PrivacyTier",
+    "CloudInferenceNotAllowed",
 ]

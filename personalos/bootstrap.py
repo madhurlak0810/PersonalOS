@@ -60,6 +60,11 @@ from personalos.graphs.job_search import JobSearchSubgraphRunner
 from personalos.mcp.adapter import Authorizer, MCPToolInvoker
 from personalos.mcp.base import MCPServer
 from personalos.mcp.manager import MCPServerManager, get_mcp_manager
+from personalos.models.embedding import (
+    EMBEDDING_PROVIDERS,
+    EmbeddingsClientFactory,
+    EmbeddingSpec,
+)
 from personalos.models.gateway import ModelConfig, ModelGateway
 from personalos.persistence.action_journal import ActionExecutorPort, JournaledActionExecutor
 from personalos.persistence.application_board import ApplicationBoardStore
@@ -98,6 +103,7 @@ from personalos.persistence.pending_checkpoints import (
 )
 from personalos.persistence.policy_log import SqlPolicyDecisionLog
 from personalos.persistence.recruiter_events import SqlRecruiterEventStore
+from personalos.persistence.reembedding import SqlReembedStore
 from personalos.persistence.reply_drafts import SqlReplyApplicationLookup, SqlReplyDraftStore
 from personalos.persistence.search_profiles import SqlSearchProfileStore
 from personalos.persistence.workflow_actions import WorkflowActionReader
@@ -118,10 +124,11 @@ from personalos.retrieval.artifact_prep import (
     Embedder,
     EvidenceSelector,
     TailoredPacketBuilder,
+    retrieval_query,
 )
-from personalos.retrieval.embedding import HashingEmbedder
 from personalos.retrieval.evidence_ingestion import ResumeIngestor
 from personalos.retrieval.job_matching import HybridJobMatcher, ScoringConfig, SemanticAssessor
+from personalos.retrieval.reembedding import Reembedder
 from personalos.retrieval.reply_drafting import (
     EvidenceReplyGrounding,
     GroundedReplyDrafter,
@@ -269,7 +276,11 @@ def build_event_emitter(session_factory=SessionLocal) -> OutboxEventEmitter:
     return OutboxEventEmitter(session_factory)
 
 
-def build_model_gateway(config_path: str | None = None) -> ModelGateway:
+def build_model_gateway(
+    config_path: str | None = None,
+    *,
+    embeddings_client_factory: EmbeddingsClientFactory | None = None,
+) -> ModelGateway:
     """Build the `ModelGateway` every model-backed port is taken from.
 
     `config_path` (default: `settings.llm_gateway_config`) names a
@@ -277,9 +288,17 @@ def build_model_gateway(config_path: str | None = None) -> ModelGateway:
     with none set, every role runs on the deterministic `rules` provider.
     Changing models is changing this file, which is also what
     `python -m evals.harness --config` measures before the change ships.
+
+    The gateway allows a hosted embedder only if `CLOUD_INFERENCE_ALLOWED` is
+    set. `embeddings_client_factory` is the seam a test uses to stand in for
+    the embedding server.
     """
     path = config_path if config_path is not None else settings.llm_gateway_config
-    return ModelGateway(ModelConfig.load(path) if path else ModelConfig(name="rules"))
+    return ModelGateway(
+        ModelConfig.load(path) if path else ModelConfig(name="rules"),
+        embeddings_client_factory=embeddings_client_factory,
+        cloud_inference_allowed=settings.cloud_inference_allowed,
+    )
 
 
 def build_job_matcher(
@@ -340,27 +359,80 @@ def build_artifact_packet_builder(
     )
 
 
-#: `EMBEDDING_PROVIDER` values this build has an embedder for.
-EMBEDDING_PROVIDERS = ("hashing",)
+def embedding_spec_from_settings(
+    provider: str | None = None,
+    *,
+    model: str | None = None,
+    version: str | None = None,
+    base_url: str | None = None,
+) -> EmbeddingSpec | None:
+    """The `EmbeddingSpec` the `EMBEDDING_*` settings name, with any argument overriding its setting.
 
-
-def build_embedder(provider: str | None = None) -> Embedder | None:
-    """The embedder `EMBEDDING_PROVIDER` names, or None when it names none.
-
-    Ingestion and artifact prep must share it: retrieval only compares
-    vectors from the model the evidence was ingested with. Raises
-    `ValueError` for a provider this build does not have, so a typo stops
-    startup instead of leaving retrieval silently unconfigured.
+    None when the provider is empty. Raises `ValueError` for a provider this
+    build does not have, so a typo stops startup instead of leaving retrieval
+    silently unconfigured.
     """
     provider = settings.embedding_provider if provider is None else provider
     name = provider.strip().lower()
     if not name:
         return None
-    if name == "hashing":
-        return HashingEmbedder()
-    raise ValueError(
-        f"unknown EMBEDDING_PROVIDER {provider!r}; this build has: {', '.join(EMBEDDING_PROVIDERS)}"
+    if name not in EMBEDDING_PROVIDERS:
+        raise ValueError(
+            f"unknown EMBEDDING_PROVIDER {provider!r}; this build has: "
+            f"{', '.join(EMBEDDING_PROVIDERS)}"
+        )
+    return EmbeddingSpec(
+        provider=name,
+        model=(model if model is not None else settings.embedding_model) or None,
+        version=(version if version is not None else settings.embedding_model_version) or None,
+        base_url=(base_url if base_url is not None else settings.embedding_base_url) or None,
+        api_key_env=settings.embedding_api_key_env or None,
     )
+
+
+def build_embedder(
+    provider: str | None = None,
+    *,
+    model: str | None = None,
+    version: str | None = None,
+    base_url: str | None = None,
+    gateway: ModelGateway | None = None,
+) -> Embedder | None:
+    """The configured embedder, chosen by the `ModelGateway`. None if none is configured.
+
+    Ingestion and artifact prep must share it: retrieval only compares
+    vectors from the model the evidence was ingested with. An `embedding`
+    block in the model configuration file wins. Otherwise the `EMBEDDING_*`
+    settings are used, and any argument given overrides its setting.
+
+    Raises `ValueError` for an unknown provider, and
+    `personalos.models.embedding.CloudInferenceNotAllowed` for a hosted one
+    while `CLOUD_INFERENCE_ALLOWED` is false.
+    """
+    gateway = gateway or build_model_gateway()
+    overridden = any(value is not None for value in (provider, model, version, base_url))
+    if gateway.config.embedding is not None and not overridden:
+        return gateway.embedder()
+    spec = embedding_spec_from_settings(provider, model=model, version=version, base_url=base_url)
+    return gateway.embedder(spec) if spec is not None else None
+
+
+def build_reembedder(
+    session_factory=SessionLocal,
+    *,
+    embedder: Embedder | None = None,
+    batch_size: int | None = None,
+) -> Reembedder:
+    """Build what `reembed` runs: the backfill onto `embedder` (default: the configured one)."""
+    embedder = embedder or build_embedder()
+    if embedder is None:
+        raise PortNotConfigured(
+            "re-embedding needs an embedder; set EMBEDDING_PROVIDER or pass --provider",
+            port="embedder",
+        )
+    kwargs = {} if batch_size is None else {"batch_size": batch_size}
+    store = SqlReembedStore(session_factory, posting_text=retrieval_query)
+    return Reembedder(embedder, store, **kwargs)
 
 
 def build_resume_ingestor(
@@ -381,7 +453,7 @@ def build_resume_ingestor(
     embedder = embedder or build_embedder()
     if embedder is None:
         raise PortNotConfigured(
-            "resume ingestion needs an embedder; set EMBEDDING_PROVIDER (e.g. 'hashing')",
+            "resume ingestion needs an embedder; set EMBEDDING_PROVIDER (e.g. 'ollama')",
             port="embedder",
         )
     gateway = gateway or build_tool_gateway(policy=build_policy_engine(session_factory))
@@ -1386,6 +1458,8 @@ __all__ = [
     "build_artifact_packet_builder",
     "EMBEDDING_PROVIDERS",
     "build_embedder",
+    "embedding_spec_from_settings",
+    "build_reembedder",
     "build_resume_ingestor",
     "build_document_overwrite_executor",
     "GOOGLE_PROVIDER",

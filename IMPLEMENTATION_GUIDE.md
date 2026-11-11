@@ -62,6 +62,7 @@ cat > .env <<EOF
 DATABASE_URL=postgresql://personalos:personalos@127.0.0.1:5432/personalos
 FILES_ALLOWED_ROOTS=["$PWD/docs/quickstart"]
 WORKER_GRAPHS=apps.worker.fake_providers:build_worker_graphs
+EMBEDDING_PROVIDER=hashing
 LOG_FORMAT=text
 EOF
 ```
@@ -71,6 +72,7 @@ EOF
 | `DATABASE_URL` | The database from step 2. |
 | `FILES_ALLOWED_ROOTS` | The only directories the file tools may read. The sample resume lives in `docs/quickstart/`. |
 | `WORKER_GRAPHS` | Runs the worker on the fake job board and the extractive draft writer (`apps/worker/fake_providers.py`). Leave it unset to use the real wiring, which needs `GREENHOUSE_BOARDS` and `LLM_GATEWAY_CONFIG`. |
+| `EMBEDDING_PROVIDER` | The offline `hashing` embedder, so the quick start needs no Ollama. The default is a local Ollama model. |
 | `LOG_FORMAT` | Readable logs in a terminal. The default is JSON. |
 
 Everything else keeps its default. See [Configuration](#configuration) for the
@@ -90,7 +92,7 @@ python -m personalos.cli ingest-resume resume.md
 
 A relative path resolves against the first allowed root, so this reads
 `docs/quickstart/resume.md`. It splits the resume into evidence chunks and
-embeds them with the local `hashing` embedder. Job matching and drafts can
+embeds them with the `hashing` embedder set in step 3. Job matching and drafts can
 cite only these chunks. The output ends with `"added": 7`. Running it again on
 the unchanged file changes nothing.
 
@@ -555,6 +557,16 @@ postings and grounds each claim in that evidence. The model gateway
 (`LLM_GATEWAY_CONFIG`) assigns a provider to each role. With no config,
 routing and recruiter-event extraction run on deterministic rules, semantic
 assessment declines, and the draft writer is unbound.
+
+The gateway also selects the embedder (`personalos/models/embedding.py`). The
+default is a local Ollama model (`nomic-embed-text`), and `hashing` is the
+offline fallback. A hosted embedder (`openai`) is refused unless
+`CLOUD_INFERENCE_ALLOWED=true`. Every vector row records its embedding model
+and version, and retrieval only compares vectors from one model. So after
+changing the embedder, run `python -m personalos.cli reembed`. It re-embeds
+evidence, posting and message vectors in batches. Evidence is overwritten in
+place, so cited evidence ids do not change. Rows already on the new model are
+skipped, so an interrupted run resumes when you run it again.
 
 ### 7. API (`apps/api/`)
 
@@ -1565,7 +1577,8 @@ Settings come from the environment, then `.env` in the working directory.
 | `WORKER_GRAPHS` | `apps.worker.graphs:build_worker_graphs` | `module:callable`. Empty runs no graphs. |
 | `GREENHOUSE_BOARDS` | `{}` | JSON, board token to employer name. |
 | `LLM_GATEWAY_CONFIG` | empty (rules) | A `ModelConfig` JSON file, such as those in `evals/model_benchmarks/configs/`. |
-| `EMBEDDING_PROVIDER` | `hashing` | Changing it means re-running `ingest-resume`. |
+| `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` | `ollama` / empty (`nomic-embed-text`) | `ollama`, `hashing` or `openai`. After a change, run `reembed`. |
+| `CLOUD_INFERENCE_ALLOWED` | `false` | Must be `true` before a hosted embedder (`openai`) can be selected. |
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | Use `text` in a terminal. |
 | `TRACING_ENABLED` / `OTEL_EXPORTER_OTLP_ENDPOINT` | `false` / empty | An OTLP/HTTP collector, for example Jaeger at `http://localhost:4318`. |
 | `SECRET_STORE_SERVICE` | `personalos` | The OS keychain service that holds secrets. Never put a secret in `.env`. |

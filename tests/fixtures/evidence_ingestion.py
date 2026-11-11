@@ -21,6 +21,7 @@ from mcp_servers.files.sandbox import PathSandbox
 from mcp_servers.files.server import FilesMCPServer
 from personalos.bootstrap import build_resume_ingestor, build_tool_gateway
 from personalos.mcp.manager import MCPServerManager
+from personalos.models.embedding import HashingEmbedder
 from personalos.persistence.models import (
     ApplicationModel,
     ArtifactVersionModel,
@@ -29,7 +30,6 @@ from personalos.persistence.models import (
     JobPostingModel,
 )
 from personalos.policy import default_policy_engine
-from personalos.retrieval.embedding import HashingEmbedder
 from personalos.retrieval.evidence_ingestion import ResumeIngestor
 
 FIXTURE_RESUME = Path(__file__).parent / "resumes" / "candidate_resume.md"
@@ -48,6 +48,9 @@ class CountingEmbedder(HashingEmbedder):
     async def embed(self, text: str) -> list[float]:
         self.calls.append(text)
         return self.vector(text)
+
+    async def embed_many(self, texts) -> list[list[float]]:
+        return [await self.embed(text) for text in texts]
 
 
 def allowed_root(tmp_path: Path) -> Path:

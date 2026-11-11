@@ -7,8 +7,8 @@ import pytest
 from personalos.domain.errors import ValidationFailed
 from personalos.domain.evidence import ChunkKind, DocumentKind, evidence_id_for
 from personalos.domain.models import EvidenceSourceType
+from personalos.models.embedding import HashingEmbedder, tokenize
 from personalos.persistence.models import EMBEDDING_DIMENSION
-from personalos.retrieval.embedding import HashingEmbedder, tokenize
 from personalos.retrieval.resume_chunking import (
     MAX_CHUNK_CHARS,
     chunk_resume,
