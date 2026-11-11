@@ -57,7 +57,7 @@ class NotConfiguredJobBoard(_NotConfigured):
     """
 
     port = JOB_BOARDS_PORT
-    hint = "set GREENHOUSE_BOARDS to search a job board"
+    hint = "set GREENHOUSE_BOARDS, LEVER_SITES, ASHBY_BOARDS or WORKDAY_SITES to search a job board"
     name = "not_configured"
 
     async def search(self, profile: Any) -> Sequence[Any]:

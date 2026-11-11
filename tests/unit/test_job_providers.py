@@ -4,6 +4,8 @@ The Greenhouse adapter is exercised against `httpx.MockTransport`, so the
 requests it makes are asserted without a network.
 """
 
+from datetime import datetime, timezone
+
 import httpx
 import pytest
 
@@ -22,12 +24,20 @@ from personalos.policy import (
     default_policy_engine,
 )
 from personalos.providers import (
+    AshbyProvider,
     FakeJobProvider,
     GreenhouseProvider,
     JobProvider,
+    LeverProvider,
+    ProviderHttp,
     ProviderUnavailable,
+    RateLimiter,
+    WorkdayProvider,
 )
 from personalos.providers.greenhouse import html_to_text
+from personalos.providers.http import parse_retry_after
+from personalos.providers.lever import EU_BASE_URL
+from personalos.providers.workday import WorkdaySite
 from personalos.tools.gateway import ToolExecutionError
 from tests.fixtures import job_search_fakes as fakes
 
@@ -58,7 +68,12 @@ def greenhouse(handler) -> tuple[GreenhouseProvider, list[httpx.Request]]:
         return handler(request)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(record))
-    return GreenhouseProvider({"acme": "Acme"}, client=client), requests
+    http = ProviderHttp("greenhouse", client=client, min_interval=0, sleep=_no_wait)
+    return GreenhouseProvider({"acme": "Acme"}, http=http), requests
+
+
+async def _no_wait(seconds: float) -> None:
+    """Retries in these tests back off without spending wall-clock time."""
 
 
 def board(request: httpx.Request) -> httpx.Response:
@@ -78,9 +93,12 @@ def board(request: httpx.Request) -> httpx.Response:
     [
         FakeJobProvider(),
         GreenhouseProvider({"acme": "Acme"}),
+        LeverProvider({"acme": "Acme"}),
+        AshbyProvider({"acme": "Acme"}),
+        WorkdayProvider({"acme.wd5.myworkdayjobs.com/AcmeCareers": "Acme"}),
         GatewayJobProvider("fakeboard", build_tool_gateway()),
     ],
-    ids=["fake", "greenhouse", "gateway"],
+    ids=["fake", "greenhouse", "lever", "ashby", "workday", "gateway"],
 )
 def test_adapters_satisfy_the_job_provider_interface(provider):
     """Every adapter is swappable for any other behind `JobProvider`."""
@@ -161,6 +179,119 @@ async def test_greenhouse_reports_an_unreachable_board_as_provider_unavailable()
 
     with pytest.raises(ProviderUnavailable):
         await provider.search(fakes.profile())
+
+
+# --- Configuration ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("adapter", "config"),
+    [
+        (GreenhouseProvider, {"acme/../x": "Acme"}),
+        (LeverProvider, {"acme?x=1": "Acme"}),
+        (LeverProvider, {"us/acme": "Acme"}),
+        (AshbyProvider, {"ac me": "Acme"}),
+        (WorkdayProvider, {"evil.example/Careers": "Acme"}),
+        (WorkdayProvider, {"acme.wd5.myworkdayjobs.com.evil.example/Careers": "Acme"}),
+        (WorkdayProvider, {"acme.wd5.myworkdayjobs.com/../admin": "Acme"}),
+        (WorkdayProvider, {"acme.wd5.myworkdayjobs.com": "Acme"}),
+    ],
+)
+def test_a_board_key_that_could_steer_a_request_elsewhere_is_rejected(adapter, config):
+    with pytest.raises(ValueError):
+        adapter(config)
+
+
+@pytest.mark.parametrize(
+    "adapter", [GreenhouseProvider, LeverProvider, AshbyProvider, WorkdayProvider]
+)
+def test_an_adapter_with_nothing_to_watch_is_a_configuration_error(adapter):
+    with pytest.raises(ValueError):
+        adapter({})
+
+
+def test_workday_site_keys_resolve_to_the_career_site_endpoint():
+    site = WorkdaySite("Acme.WD5.myworkdayjobs.com/AcmeCareers")
+
+    assert site.key == "acme.wd5.myworkdayjobs.com/AcmeCareers"
+    assert site.api_base == "https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/AcmeCareers"
+
+
+async def test_lever_reads_an_eu_site_from_the_eu_region():
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=[])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    provider = LeverProvider({"eu/globex": "Globex"}, http=ProviderHttp("lever", client=client))
+
+    assert await provider.search(fakes.profile()) == []
+    assert str(requests[0].url).startswith(f"{EU_BASE_URL}/globex?")
+
+
+def test_bootstrap_configures_every_board_that_is_set(monkeypatch):
+    from personalos import bootstrap
+
+    monkeypatch.setattr(bootstrap.settings, "greenhouse_boards", {"acme": "Acme"})
+    monkeypatch.setattr(bootstrap.settings, "lever_sites", {"acme": "Acme"})
+    monkeypatch.setattr(bootstrap.settings, "ashby_boards", {})
+    monkeypatch.setattr(
+        bootstrap.settings, "workday_sites", {"acme.wd5.myworkdayjobs.com/AcmeCareers": "Acme"}
+    )
+
+    assert [p.name for p in bootstrap.configured_job_providers()] == [
+        "greenhouse",
+        "lever",
+        "workday",
+    ]
+
+
+# --- HTTP layer ----------------------------------------------------------------
+
+NOW = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("header", "seconds"),
+    [
+        ("120", 120.0),
+        (" 1.5 ", 1.5),
+        ("Wed, 11 Nov 2026 12:00:30 GMT", 30.0),
+        ("Wed, 11 Nov 2026 11:00:00 GMT", 0.0),
+        ("-5", None),
+        ("soon", None),
+        ("", None),
+        (None, None),
+        ("nan", None),
+    ],
+)
+def test_retry_after_parses_seconds_and_http_dates_and_ignores_junk(header, seconds):
+    assert parse_retry_after(header, NOW) == seconds
+
+
+async def test_the_rate_limiter_spaces_requests_and_honours_a_deferral():
+    now = [0.0]
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now[0] += seconds
+
+    limiter = RateLimiter(1.5, clock=lambda: now[0], sleep=sleep)
+
+    await limiter.acquire()
+    await limiter.acquire()
+    limiter.defer(10)
+    await limiter.acquire()
+
+    assert slept == [1.5, 10.0]
+
+
+def test_the_rate_limiter_rejects_a_negative_interval():
+    with pytest.raises(ValueError):
+        RateLimiter(-1)
 
 
 # --- Policy -------------------------------------------------------------------

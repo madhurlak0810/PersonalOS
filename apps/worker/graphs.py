@@ -12,7 +12,8 @@ Supervisor and the Job Search subgraph on the durable Postgres checkpointer
   events, lifecycle transitions, durable waits and the outbox;
 - the embedder `EMBEDDING_PROVIDER` names, the same one `ingest-resume`
   stores evidence vectors with;
-- the Greenhouse boards in `GREENHOUSE_BOARDS`, through the gateway;
+- the job boards in `GREENHOUSE_BOARDS`, `LEVER_SITES`, `ASHBY_BOARDS` and
+  `WORKDAY_SITES`, through the gateway;
 - Google Calendar, as both the calendar reader and the calendar executor's
   client, once `MCP_GOOGLE_ENABLED` and `CALENDAR_TIME_ZONE` are set;
 - the Gmail inbox, as the reader `email.received` runs fetch their message

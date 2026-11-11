@@ -114,9 +114,12 @@ from personalos.persistence.workflow_status import WorkflowStatusReader
 from personalos.policy import ApprovedIntent, PolicyEngine, default_policy_engine
 from personalos.providers import (
     JOB_PROVIDERS_SERVER,
+    AshbyProvider,
     GreenhouseProvider,
     JobProvider,
     JobProviderInvoker,
+    LeverProvider,
+    WorkdayProvider,
 )
 from personalos.retrieval.artifact_prep import (
     DEFAULT_TOP_K,
@@ -243,6 +246,12 @@ def configured_job_providers() -> list[JobProvider]:
     providers: list[JobProvider] = []
     if settings.greenhouse_boards:
         providers.append(GreenhouseProvider(settings.greenhouse_boards))
+    if settings.lever_sites:
+        providers.append(LeverProvider(settings.lever_sites))
+    if settings.ashby_boards:
+        providers.append(AshbyProvider(settings.ashby_boards))
+    if settings.workday_sites:
+        providers.append(WorkdayProvider(settings.workday_sites))
     return providers
 
 

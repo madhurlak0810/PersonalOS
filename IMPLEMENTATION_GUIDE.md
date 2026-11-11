@@ -71,7 +71,7 @@ EOF
 | --- | --- |
 | `DATABASE_URL` | The database from step 2. |
 | `FILES_ALLOWED_ROOTS` | The only directories the file tools may read. The sample resume lives in `docs/quickstart/`. |
-| `WORKER_GRAPHS` | Runs the worker on the fake job board and the extractive draft writer (`apps/worker/fake_providers.py`). Leave it unset to use the real wiring, which needs `GREENHOUSE_BOARDS` and `LLM_GATEWAY_CONFIG`. |
+| `WORKER_GRAPHS` | Runs the worker on the fake job board and the extractive draft writer (`apps/worker/fake_providers.py`). Leave it unset to use the real wiring, which needs at least one job board (`GREENHOUSE_BOARDS`, `LEVER_SITES`, `ASHBY_BOARDS` or `WORKDAY_SITES`) and `LLM_GATEWAY_CONFIG`. |
 | `EMBEDDING_PROVIDER` | The offline `hashing` embedder, so the quick start needs no Ollama. The default is a local Ollama model. |
 | `LOG_FORMAT` | Readable logs in a terminal. The default is JSON. |
 
@@ -403,7 +403,7 @@ PersonalOS/
 │   ├── persistence/               # ORM, repositories, checkpointer, outbox, audit, leases
 │   ├── events/                    # event bus and the in-memory event transport
 │   ├── mcp/                       # MCP server base, manager, cache, gateway adapter
-│   ├── providers/                 # job board adapters: Greenhouse, and a fake for local runs
+│   ├── providers/                 # job board adapters: Greenhouse, Lever, Ashby, Workday (opt-in), and a fake
 │   ├── retrieval/                 # resume ingestion, embedder, evidence selection, job matching
 │   ├── models/                    # model gateway: rules by default; Anthropic, Ollama, OpenAI-compatible
 │   ├── secrets/                   # OS keychain store and short-lived token exchange
@@ -1576,6 +1576,9 @@ Settings come from the environment, then `.env` in the working directory.
 | `FILES_ALLOWED_ROOTS` | `[]` | JSON list of absolute paths. If empty, every file read and write is refused. |
 | `WORKER_GRAPHS` | `apps.worker.graphs:build_worker_graphs` | `module:callable`. Empty runs no graphs. |
 | `GREENHOUSE_BOARDS` | `{}` | JSON, board token to employer name. |
+| `LEVER_SITES` | `{}` | JSON, Lever site (`jobs.lever.co/<site>`; prefix `eu/` for EU-hosted) to employer name. |
+| `ASHBY_BOARDS` | `{}` | JSON, Ashby board (`jobs.ashbyhq.com/<board>`) to employer name. |
+| `WORKDAY_SITES` | `{}` | JSON, `<tenant>.wd<N>.myworkdayjobs.com/<site>` to employer name. Opt-in per employer: reads the career page's undocumented endpoint, not a published API. See "Job board coverage" in `docs/ARCHITECTURE_BOUNDARIES.md`. |
 | `LLM_GATEWAY_CONFIG` | empty (rules) | A `ModelConfig` JSON file, such as those in `evals/model_benchmarks/configs/`. |
 | `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` | `ollama` / empty (`nomic-embed-text`) | `ollama`, `hashing` or `openai`. After a change, run `reembed`. |
 | `CLOUD_INFERENCE_ALLOWED` | `false` | Must be `true` before a hosted embedder (`openai`) can be selected. |
