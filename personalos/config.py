@@ -58,13 +58,34 @@ class Settings(BaseSettings):
     # --config <file>` before pointing this at it.
     llm_gateway_config: str = ""
 
-    # Embeddings. The embedder resume ingestion stores evidence vectors with
-    # and artifact prep embeds postings with -- one setting, because vectors
-    # from different embedders are not comparable. `hashing` is the local,
-    # deterministic feature-hashing embedder this build ships with
-    # (`personalos.retrieval.embedding`); empty leaves evidence retrieval
-    # unconfigured. Changing it means re-running `ingest-resume`.
-    embedding_provider: str = "hashing"
+    # Embeddings. Resume ingestion stores evidence vectors with this embedder,
+    # and artifact prep embeds postings with it. It is one setting because
+    # vectors from different embedders are not comparable
+    # (`personalos.models.embedding`).
+    #   ollama   a local embedding model served by Ollama (the default; needs
+    #            `ollama pull nomic-embed-text` and the `local` extra)
+    #   hashing  the deterministic feature-hashing embedder: offline, no download
+    #   openai   the hosted OpenAI embeddings API; refused unless
+    #            CLOUD_INFERENCE_ALLOWED is true
+    # Empty leaves evidence retrieval unconfigured. An `embedding` block in the
+    # LLM_GATEWAY_CONFIG file takes precedence over these settings. Changing the
+    # embedder means re-embedding what is stored: `personalos.cli reembed`.
+    embedding_provider: str = "ollama"
+    # The provider's model; empty uses the provider's default
+    # (`nomic-embed-text`, `text-embedding-3-small`).
+    embedding_model: str = ""
+    # Stored as `embedding_version` on every vector row. Empty uses the
+    # model's tag (`latest` when the name has none).
+    embedding_model_version: str = ""
+    # Server URL for `ollama` or `openai`; empty uses the client's default.
+    embedding_base_url: str = ""
+    # Environment variable holding the `openai` API key.
+    embedding_api_key_env: str = "OPENAI_API_KEY"
+
+    # Privacy. False (the default) keeps resume and email text on this
+    # machine: a hosted embedder cannot be selected. Set it to true to
+    # allow hosted inference.
+    cloud_inference_allowed: bool = False
 
     # MCP Servers
     mcp_files_enabled: bool = True

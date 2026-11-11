@@ -19,9 +19,9 @@ from personalos.domain.evidence import (
 from personalos.domain.models import EvidenceSourceType
 from personalos.domain.search_profiles import actor_user_id
 from personalos.executor.document_reader import DocumentReadRefused
+from personalos.models.embedding import HASHING_EMBEDDER_MODEL, HASHING_EMBEDDER_VERSION
 from personalos.persistence.evidence import SqlEvidenceIndex, SqlEvidenceSource
 from personalos.persistence.models import EMBEDDING_DIMENSION
-from personalos.retrieval.embedding import HASHING_EMBEDDER_MODEL, HASHING_EMBEDDER_VERSION
 from tests.fixtures import evidence_ingestion as fx
 from tests.fixtures import job_search_fakes as fakes
 from tests.fixtures.job_discovery import session_factory
@@ -336,13 +336,13 @@ async def test_a_resume_with_no_text_is_refused(root, factory):
 # --- Configuration -------------------------------------------------------------------------
 
 
-def test_the_default_embedder_is_the_local_hashing_one():
+def test_the_hashing_embedder_is_still_available_by_name():
     embedder = bootstrap.build_embedder("hashing")
 
     assert embedder.model == HASHING_EMBEDDER_MODEL
     assert bootstrap.build_embedder("") is None
     with pytest.raises(ValueError, match="unknown EMBEDDING_PROVIDER"):
-        bootstrap.build_embedder("openai")
+        bootstrap.build_embedder("word2vec")
 
 
 def test_ingestion_without_an_embedder_is_refused(factory, monkeypatch):

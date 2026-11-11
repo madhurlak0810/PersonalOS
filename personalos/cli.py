@@ -241,6 +241,66 @@ def ingest_resume(path: str, actor_id: str):
     click.echo(result.model_dump_json(indent=2))
 
 
+@cli.command("reembed")
+@click.option(
+    "--provider",
+    default=None,
+    help="Embedding provider to re-embed with (default: EMBEDDING_PROVIDER).",
+)
+@click.option("--model", default=None, help="The provider's model (default: EMBEDDING_MODEL).")
+@click.option(
+    "--model-version",
+    "model_version",
+    default=None,
+    help="Version stored on each row (default: EMBEDDING_MODEL_VERSION, else the model's tag).",
+)
+@click.option(
+    "--base-url", default=None, help="Embedding server URL (default: EMBEDDING_BASE_URL)."
+)
+@click.option(
+    "--only",
+    "tables",
+    multiple=True,
+    type=click.Choice(["evidence", "postings", "messages"]),
+    help="Re-embed only these vector tables (repeatable). Default: all three.",
+)
+@click.option("--batch-size", default=64, show_default=True, type=click.IntRange(min=1))
+@click.option("--dry-run", is_flag=True, help="Count what is pending; embed nothing.")
+def reembed(
+    provider: str | None,
+    model: str | None,
+    model_version: str | None,
+    base_url: str | None,
+    tables: tuple[str, ...],
+    batch_size: int,
+    dry_run: bool,
+):
+    """Re-embed stored evidence, posting and message vectors with one embedder.
+
+    Rows that already have a vector from the target model and version are
+    skipped, so an interrupted run is resumed by running it again. Evidence is
+    re-embedded in place, so the evidence ids artifact versions cite do not
+    change. Run it before (or right after) switching EMBEDDING_PROVIDER or
+    EMBEDDING_MODEL: retrieval only finds rows embedded by the configured model.
+    A hosted provider is refused unless CLOUD_INFERENCE_ALLOWED is true.
+    """
+    import asyncio
+
+    from personalos.bootstrap import build_embedder, build_reembedder
+    from personalos.domain.embeddings import VectorTable
+    from personalos.models.embedding import CloudInferenceNotAllowed
+
+    init_db()
+    try:
+        embedder = build_embedder(provider, model=model, version=model_version, base_url=base_url)
+    except (ValueError, CloudInferenceNotAllowed) as exc:
+        raise click.ClickException(str(exc)) from exc
+    reembedder = _profile_call(lambda: build_reembedder(embedder=embedder, batch_size=batch_size))
+    selected = [VectorTable(name) for name in tables] or list(VectorTable)
+    report = _profile_call(lambda: asyncio.run(reembedder.run(selected, dry_run=dry_run)))
+    click.echo(report.model_dump_json(indent=2))
+
+
 # --- Integrations -----------------------------------------------------------------
 #
 # `auth google` is the only way a Google refresh token is ever obtained: it

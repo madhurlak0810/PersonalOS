@@ -81,7 +81,9 @@ llm = [
 
 local = [
     # Back the `ollama` and `openai_compatible` providers of
-    # personalos.models.gateway, for running and benchmarking local models.
+    # personalos.models.gateway, for running and benchmarking local models,
+    # and the `ollama` (default) and `openai` embedders of
+    # personalos.models.embedding.
     "langchain-ollama>=0.2",
     "langchain-openai>=0.2",
 ]

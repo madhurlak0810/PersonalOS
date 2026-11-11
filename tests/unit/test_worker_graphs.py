@@ -250,7 +250,11 @@ def test_a_chat_queued_job_search_runs_to_completion_with_only_a_database(factor
     assert "GREENHOUSE_BOARDS" in caplog.text
 
 
-def test_a_step_that_needs_an_unbound_port_is_a_retryable_failure_not_a_crash(factory, tmp_path):
+def test_a_step_that_needs_an_unbound_port_is_a_retryable_failure_not_a_crash(
+    factory, tmp_path, monkeypatch
+):
+    # The worker must embed postings with the embedder the evidence was ingested with.
+    monkeypatch.setattr(bootstrap.settings, "embedding_provider", "hashing")
     root = evidence_ingestion.allowed_root(tmp_path)
     asyncio.run(evidence_ingestion.ingestor(root, factory).ingest(fakes.USER_ID, "resume.md"))
     client = _client(factory)
