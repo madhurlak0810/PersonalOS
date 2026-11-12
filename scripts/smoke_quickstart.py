@@ -10,7 +10,8 @@ breaks the walkthrough fails here instead of in someone's terminal:
 2. ingest `docs/quickstart/resume.md` (`personalos.cli ingest-resume`);
 3. create the search profile `docs/quickstart/profile.json` (`profile create`);
 4. start the API and the worker as real processes, the worker on
-   `apps.worker.fake_providers:build_worker_graphs`;
+   `apps.worker.fake_providers:build_worker_graphs`, and read the API token
+   (`personalos.cli auth token`) the requests below send as a bearer token;
 5. start a job search with `POST /v1/chat` and wait for its approval interrupt;
 6. approve the pending action with `POST /v1/approvals/{id}/decision`;
 7. check the run resumed and stopped where the guide says it does: at the
@@ -56,7 +57,7 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _env(database_url: str, port: int) -> dict[str, str]:
+def _env(database_url: str, port: int, token_file: Path) -> dict[str, str]:
     """The quick start's minimum settings, over anything a local `.env` sets."""
     env = dict(os.environ)
     env.update(
@@ -65,6 +66,10 @@ def _env(database_url: str, port: int) -> dict[str, str]:
             "FILES_ALLOWED_ROOTS": json.dumps([str(QUICKSTART)]),
             "WORKER_GRAPHS": FAKE_GRAPHS,
             "API_PORT": str(port),
+            # A throwaway token, never the contributor's own.
+            "API_TOKEN_FILE": str(token_file),
+            "API_TOKEN_STORE": "file",
+            "API_AUTH_ENABLED": "true",
             "LOG_FORMAT": "text",
             # Pinned rather than left to `.env`: the smoke test never calls a
             # model or a real job board.
@@ -113,7 +118,7 @@ def _wait_for(what: str, probe, timeout: float, processes: dict[str, subprocess.
 
 def _api_ready(client: httpx.Client) -> bool:
     try:
-        return client.get("/openapi.json").status_code == 200
+        return client.get("/health").status_code == 200
     except httpx.TransportError:
         return False
 
@@ -204,7 +209,7 @@ def _search_and_approve(client: httpx.Client, processes: dict[str, subprocess.Po
 
 def smoke(database_url: str, logs: Path) -> None:
     port = _free_port()
-    env = _env(database_url, port)
+    env = _env(database_url, port, logs / "api-token")
     _prepare(database_url, env)
 
     processes = {
@@ -214,6 +219,10 @@ def smoke(database_url: str, logs: Path) -> None:
     try:
         with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=10) as client:
             _wait_for("the API", lambda: _api_ready(client), STARTUP_TIMEOUT_SECONDS, processes)
+            token = _run("read API token", ["-m", "personalos.cli", "auth", "token"], env)
+            client.headers["Authorization"] = f"Bearer {token.strip().splitlines()[-1]}"
+            if client.get("/v1/approvals", headers={"Authorization": ""}).status_code != 401:
+                raise SmokeFailure("the API answered a request that carried no token")
             workflow_id = _search_and_approve(client, processes)
     finally:
         for process in processes.values():

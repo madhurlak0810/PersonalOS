@@ -58,6 +58,7 @@ from personalos.persistence.workflow_commands import WORKFLOW_COMMAND_EVENT
 from tests.fixtures import durable_workflow as durable
 from tests.fixtures import job_search_fakes as fakes
 from tests.fixtures import worker_process
+from tests.fixtures.auth import bearer, install_test_auth
 from tests.graph_scenarios.test_pending_checkpoints import AT_TRIGGER, NOW, Deployment
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -86,7 +87,7 @@ def _database(tmp_path) -> tuple[Path, sessionmaker]:
 def _client(factory) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
-    return TestClient(app)
+    return TestClient(install_test_auth(app), headers=bearer())
 
 
 def _chat(client: TestClient, message: str = "find me a python job") -> dict:

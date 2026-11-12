@@ -24,8 +24,15 @@ No response here has, or could have, a field holding a token: every body is a
 the authorization code, and the access log line for it goes through the same
 log redaction as everything else.
 
-**Unauthenticated**, like every route until Phase L1, and deployment-wide:
-there is one set of Google connections per PersonalOS install.
+Behind the API token, except the callback, and deployment-wide: there is one
+set of Google connections per PersonalOS install. **The callback is the one
+exemption besides `/health`**, because it is Google redirecting the user's
+browser, which has no bearer token to send. It is authenticated instead by
+its `state`: single-use, minted only by an authenticated `connect`, bound to
+the PKCE verifier held server-side, and expiring with the pending consent. A
+request with any other `state` is refused before anything is stored. It is
+mounted from `callback_router` so `apps.api.main` can leave it out of the
+bearer dependency, and `tests/unit/test_api_auth.py` names it explicitly.
 """
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -139,7 +146,12 @@ def begin_google_connect(
     return connector.begin(redirect_uri=_callback_uri(request), enable=enable)
 
 
-@router.get(
+#: Routes authenticated by something other than the bearer token. Only the
+#: OAuth callback, whose `state` is its credential.
+callback_router = APIRouter()
+
+
+@callback_router.get(
     "/integrations/google/callback",
     response_model=GoogleConnection,
     name=CALLBACK_ROUTE,
@@ -166,6 +178,7 @@ async def revoke_google(
 
 __all__ = [
     "router",
+    "callback_router",
     "get_google_connection_reader",
     "get_google_connector",
     "IntegrationsResponse",

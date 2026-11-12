@@ -22,7 +22,7 @@ cache below this layer, `WorkflowThreadRegistry`'s memo, dies with the request.
 `WorkflowCommandQueue.enqueue` and return `202 Accepted`; the worker claims the
 command and runs it under the workflow's lease (`apps.worker.workflow_commands`).
 
-**Identity crosses the hand-off in the command.** The caller's `X-Actor-Id` and
+**Identity crosses the hand-off in the command.** The caller's authenticated actor and
 the request's correlation id (`CorrelationIdMiddleware`) are written into the
 command and onto the thread's `workflow_runs` row, and the worker puts both into
 the run's config -- the Phase A `ExecutionContext` contract, carried into a
@@ -32,8 +32,9 @@ actor too, never a field the caller fills in.
 **The candidate defaults to the actor.** A chat that names no `user_id` searches
 for the actor's own candidate id (`actor_user_id`) -- the one its
 `/v1/profile` is stored under -- so the job search loads that stored profile
-and the request carries no profile at all. Like the profile routes, this is
-unauthenticated until Phase L.
+and the request carries no profile at all. The actor is the one the bearer
+token verified as (`apps.api.auth`); which candidates an actor may name in
+`user_id` is the follow-up phase's authorization model.
 """
 
 import logging
@@ -43,10 +44,11 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Header, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from apps.api.auth import current_actor
 from personalos.bootstrap import (
     SUPERVISOR_WORKFLOW,
     build_approval_queue,
@@ -89,9 +91,6 @@ from personalos.persistence.workflow_status import WorkflowStatusReader
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-#: Actor recorded when a caller does not declare one, matching the jobs routes.
-_DEFAULT_ACTOR = "api"
 
 #: Upper bound on one chat message. Generous for a request, and well short of
 #: anything that would make a checkpoint row unreasonable.
@@ -367,7 +366,7 @@ async def chat(
     http_response: Response,
     request: ChatRequest,
     services: WorkflowServices = Depends(get_workflow_services),
-    x_actor_id: str | None = Header(default=None, alias="X-Actor-Id"),
+    actor_id: str = Depends(current_actor),
 ):
     """Start a Supervisor conversation, or continue one, by queuing a run of it.
 
@@ -375,7 +374,6 @@ async def chat(
     409: a new message would start the thread over and strand the question it
     is waiting on. Answer it through the resume endpoint first.
     """
-    actor_id = x_actor_id or _DEFAULT_ACTOR
     correlation_id = _correlation_id(http_request)
     new_workflow = request.thread_id is None
 
@@ -472,7 +470,7 @@ async def resume_workflow(
     http_request: Request,
     request: ResumeRequest,
     services: WorkflowServices = Depends(get_workflow_services),
-    x_actor_id: str | None = Header(default=None, alias="X-Actor-Id"),
+    actor_id: str = Depends(current_actor),
 ):
     """Queue the answer to the interrupt a workflow is parked on.
 
@@ -481,7 +479,6 @@ async def resume_workflow(
     naming its actual status, never a silently accepted no-op. So is an answer
     racing another answer to the same interrupt: the queue refuses the second.
     """
-    actor_id = x_actor_id or _DEFAULT_ACTOR
     correlation_id = _correlation_id(http_request)
     snapshot = _read_or_404(services, workflow_id)
 

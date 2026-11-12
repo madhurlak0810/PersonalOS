@@ -61,6 +61,7 @@ from personalos.observability.tracing_setup import configure_tracing, reset_trac
 from personalos.persistence.execution_ledger import ExecutionLedger
 from personalos.persistence.models import Base
 from tests.fixtures import job_search_fakes as fakes
+from tests.fixtures.auth import bearer, install_test_auth
 
 USER_ID = UUID("6f1e7b3a-0000-4000-8000-0000000000aa")
 
@@ -111,7 +112,7 @@ def api_process(db_path: Path) -> TestClient:
     factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     app = create_app()
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
-    return TestClient(app)
+    return TestClient(install_test_auth(app), headers=bearer())
 
 
 class FlakyProvider:
@@ -219,7 +220,7 @@ def run_demo_workflow(db_path: Path, *, message: str) -> tuple[UUID, FlakyProvid
     provider = FlakyProvider()
 
     started = api_process(db_path).post(
-        "/v1/chat", json={"message": message}, headers={"X-Actor-Id": "user:candidate"}
+        "/v1/chat", json={"message": message}, headers=bearer("user:candidate")
     )
     assert started.status_code == 202, started.text
     workflow_id = UUID(started.json()["workflow_id"])
@@ -239,7 +240,7 @@ def run_demo_workflow(db_path: Path, *, message: str) -> tuple[UUID, FlakyProvid
                 }
             ]
         },
-        headers={"X-Actor-Id": "user:reviewer"},
+        headers=bearer("user:reviewer"),
     )
     assert resumed.status_code == 202, resumed.text
 

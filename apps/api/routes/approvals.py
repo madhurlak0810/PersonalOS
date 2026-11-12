@@ -19,17 +19,18 @@ is a reply or a new thread) and the consequences of saying yes.
 **A decision is bound to the action it was shown.** The body must carry the
 `action_hash` the list returned; one that does not match the hash stored with
 the request is a 409, so an approval of an action that has since changed can
-never be spent on what replaced it. The decider is the request's actor
-(`X-Actor-Id`), never a field of the body.
+never be spent on what replaced it. The decider is the request's
+authenticated actor (`apps.api.auth.current_actor`), never a field of the body.
 """
 
 import logging
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from apps.api.auth import current_actor
 from apps.api.routes.workflows import WorkflowServices, get_workflow_services
 from personalos.domain.action_status import ActionStatus, consequences
 from personalos.domain.job_search import ActionKind, ActionPreview
@@ -43,9 +44,6 @@ from personalos.domain.workflow import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-#: Actor recorded when a caller does not declare one, matching the other routes.
-_DEFAULT_ACTOR = "api"
 
 
 # --- Request / response models --------------------------------------------------
@@ -168,7 +166,7 @@ async def decide_approval(
     http_request: Request,
     request: DecisionRequest,
     services: WorkflowServices = Depends(get_workflow_services),
-    x_actor_id: str | None = Header(default=None, alias="X-Actor-Id"),
+    actor_id: str = Depends(current_actor),
 ):
     """Approve or reject one pending approval.
 
@@ -178,7 +176,6 @@ async def decide_approval(
     decision are each a 409. Repeating a recorded decision returns it
     unchanged and resumes nothing a second time.
     """
-    actor_id = x_actor_id or _DEFAULT_ACTOR
     decision = services.approvals.decide(
         approval_id,
         approved=request.approved,

@@ -55,6 +55,7 @@ from personalos.domain.workflow import (
 )
 from personalos.persistence.models import ApprovalModel, AuditEventModel, Base, OutboxEventModel
 from tests.fixtures import job_search_fakes as fakes
+from tests.fixtures.auth import bearer, install_test_auth
 
 USER_ID = UUID("6f1e7b3a-0000-4000-8000-0000000000aa")
 
@@ -86,7 +87,7 @@ def api_process(db_path: Path) -> TestClient:
     factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     app = create_app()
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
-    return TestClient(app)
+    return TestClient(install_test_auth(app), headers=bearer())
 
 
 class _JobState(TypedDict, total=False):
@@ -205,7 +206,7 @@ def decide(client: TestClient, request: ApprovalRequest, approved: bool, **overr
     return client.post(
         f"/v1/approvals/{request.request_id}/decision",
         json=body,
-        headers={"X-Actor-Id": "user:reviewer"},
+        headers=bearer("user:reviewer"),
     )
 
 

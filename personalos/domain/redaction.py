@@ -166,12 +166,20 @@ _TEXT_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     # Well-known token shapes, wherever they turn up.
     (re.compile(r"\bya29\.[0-9A-Za-z._-]{10,}"), REDACTED),  # Google access token
     (re.compile(r"\b1//[0-9A-Za-z_-]{20,}"), REDACTED),  # Google refresh token
-    (re.compile(r"\b4/[0-9A-Za-z_-]{20,}"), REDACTED),  # Google authorization code
+    # Google authorization code. Not after `-`, `/`, `.` or a word character:
+    # that is a path (`/tmp/pytest-4/test_a_long_name0`), not a code.
+    (re.compile(r"(?<![\w/.-])4/[0-9A-Za-z_-]{20,}"), REDACTED),
     (re.compile(r"\bAIza[0-9A-Za-z_-]{35,}"), REDACTED),  # Google API key
     (
         re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]+"),
         REDACTED,
     ),  # JWT
+    # PersonalOS's own API token and SSE stream tickets
+    # (`personalos.domain.auth`). Matched by shape as well as registered as
+    # known values, so a token minted by another process -- the CLI rotating
+    # it while the API runs -- is still caught.
+    (re.compile(r"\bpos_at_[A-Za-z0-9_-]{20,}"), REDACTED),
+    (re.compile(r"\bpos_st_[A-Za-z0-9_.-]{20,}"), REDACTED),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"), REDACTED),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}"), REDACTED),
     (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), REDACTED),

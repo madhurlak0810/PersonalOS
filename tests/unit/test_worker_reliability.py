@@ -79,6 +79,7 @@ from personalos.persistence.repositories import OutboxEventRepository
 from personalos.persistence.workflow_commands import WORKFLOW_COMMAND_EVENT
 from personalos.policy import ToolIntent
 from personalos.tools.gateway import ToolResult
+from tests.fixtures.auth import bearer, install_test_auth
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 T0 = datetime(2026, 10, 23, 9, 0)
@@ -171,7 +172,7 @@ def _api(db_path: Path) -> TestClient:
     api_factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     app = create_app()
     app.dependency_overrides[get_failure_services] = lambda: build_failure_services(api_factory)
-    return TestClient(app)
+    return TestClient(install_test_auth(app), headers=bearer())
 
 
 class Recorder:
@@ -601,9 +602,7 @@ def test_a_schema_invalid_event_is_quarantined_and_surfaced_for_retry(factory, c
     assert failure["status"] == "failed"
     assert failure["workflow_id"] == str(workflow_id)
 
-    retried = client.post(
-        f"/v1/failures/events/{poison_id}/retry", headers={"X-Actor-Id": "operator"}
-    )
+    retried = client.post(f"/v1/failures/events/{poison_id}/retry", headers=bearer("operator"))
     assert retried.status_code == 202, retried.text
     assert retried.json()["status"] == "retry_queued"
     row = _row(factory, poison_id)

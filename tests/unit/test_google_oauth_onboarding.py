@@ -69,6 +69,7 @@ from personalos.persistence.models import CredentialModel
 from personalos.secrets.exchange import GoogleOAuthTokenExchanger
 from personalos.secrets.google_oauth import GoogleOAuthClient
 from personalos.secrets.store import KeyringSecretStore
+from tests.fixtures.auth import bearer, install_test_auth
 from tests.fixtures.durable_workflow import session_factory
 
 ACCOUNT = "alice@example.com"
@@ -523,7 +524,7 @@ def _api(install: Onboarding) -> TestClient:
     app.dependency_overrides[get_google_connection_reader] = lambda: GoogleConnectionReader(
         install.factory, install.health
     )
-    return TestClient(app)
+    return TestClient(install_test_auth(app), headers=bearer())
 
 
 def test_the_api_connects_reports_and_revokes_without_returning_token_material(install):
@@ -555,9 +556,17 @@ def test_the_api_connects_reports_and_revokes_without_returning_token_material(i
     assert body["redirect_uri"].startswith("http://127.0.0.1")
     assert body["redirect_uri"].endswith("/v1/integrations/google/callback")
 
-    # The browser consents, and Google redirects it to the callback.
+    # The browser consents, and Google redirects it to the callback. The
+    # browser has no API token: the one-time `state` is the credential, so a
+    # forged one is refused and the real one is accepted.
+    browser = TestClient(client.app)
+    assert browser.post("/v1/integrations/google/connect").status_code == 401
+    forged = browser.get(
+        "/v1/integrations/google/callback", params={"state": "0" * 32, "code": "4/" + "f" * 30}
+    )
+    assert forged.status_code == 422, forged.text
     redirect = urlsplit(install.google.consent(body["authorization_url"]))
-    callback = client.get(f"/v1/integrations/google/callback?{redirect.query}")
+    callback = browser.get(f"/v1/integrations/google/callback?{redirect.query}")
     assert callback.status_code == 200, callback.text
     assert callback.json()["credential_ref"] == str(REF)
 

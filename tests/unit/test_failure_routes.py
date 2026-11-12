@@ -82,6 +82,7 @@ from personalos.persistence.leases import WorkflowLeaseUnavailable
 from personalos.persistence.models import AuditEventModel, Base, ToolExecutionModel
 from personalos.policy import Decision, PermissionClass, PolicyEngine
 from personalos.providers.base import ProviderUnavailable
+from tests.fixtures.auth import bearer, install_test_auth
 
 USER_ID = UUID("6f1e7b3a-0000-4000-8000-0000000000cc")
 SECRET = "sk-live-4f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c"
@@ -106,7 +107,7 @@ def api_process(db_path: Path) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_failure_services] = lambda: build_failure_services(factory)
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
-    return TestClient(app)
+    return TestClient(install_test_auth(app), headers=bearer())
 
 
 class SpyProvider:
@@ -301,7 +302,7 @@ def test_retrying_a_step_whose_send_already_succeeded_replays_its_receipt(db_pat
     assert operation["receipt"] == stored["receipt_json"]
 
     response = client.post(
-        f"/v1/workflows/{harness.workflow_id}/retry", headers={"X-Actor-Id": "user:alice"}
+        f"/v1/workflows/{harness.workflow_id}/retry", headers=bearer("user:alice")
     )
     assert response.status_code == 202, response.text
     retry = response.json()
@@ -347,7 +348,7 @@ def test_a_policy_denied_action_is_denied_not_failed_and_offers_no_retry(db_path
     assert harness.provider.calls == []
 
     dismissed = client.post(
-        f"/v1/workflows/{harness.workflow_id}/dismiss", headers={"X-Actor-Id": "user:alice"}
+        f"/v1/workflows/{harness.workflow_id}/dismiss", headers=bearer("user:alice")
     )
     assert dismissed.status_code == 200, dismissed.text
     assert dismissed.json()["status"] == "dismissed"
@@ -488,7 +489,7 @@ def test_retry_and_dismiss_are_recorded_in_the_audit_trail(db_path):
     client = api_process(db_path)
     failure_id = only_failure(client, harness.workflow_id)["failure_id"]
 
-    client.post(f"/v1/workflows/{harness.workflow_id}/retry", headers={"X-Actor-Id": "user:a"})
+    client.post(f"/v1/workflows/{harness.workflow_id}/retry", headers=bearer("user:a"))
     actions = [
         (row["actor"], row["action"], row["target_ref"])
         for row in harness.rows(AuditEventModel)

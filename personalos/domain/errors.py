@@ -35,6 +35,7 @@ class ErrorCode(str, Enum):
     """
 
     VALIDATION = "validation"
+    UNAUTHENTICATED = "unauthenticated"
     NOT_FOUND = "not_found"
     POLICY_DENIED = "policy_denied"
     APPROVAL_REQUIRED = "approval_required"
@@ -144,6 +145,18 @@ class ValidationFailed(PersonalOSError):
     code = ErrorCode.VALIDATION
     http_status = 422
     default_message = "request failed validation"
+
+
+class Unauthenticated(PersonalOSError):
+    """The request carried no credential, or one that did not verify.
+
+    Deliberately says nothing about *which*: a caller probing for a valid
+    token learns the same thing from a missing one as from a wrong one.
+    """
+
+    code = ErrorCode.UNAUTHENTICATED
+    http_status = 401
+    default_message = "authentication required"
 
 
 class NotFound(PersonalOSError):

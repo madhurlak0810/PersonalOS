@@ -64,6 +64,7 @@ from personalos.persistence.models import (
     UserModel,
 )
 from personalos.persistence.repositories import ApplicationRepository, JobPostingRepository
+from tests.fixtures.auth import bearer, install_test_auth
 
 S = ApplicationStatus
 ACTOR = "maddy"
@@ -99,7 +100,7 @@ def api_process(db_path: Path) -> TestClient:
     app.dependency_overrides[get_audit_store] = lambda: build_audit_store(factory)
     app.dependency_overrides[get_application_services] = lambda: build_application_services(factory)
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
-    return TestClient(app)
+    return TestClient(install_test_auth(app), headers=bearer())
 
 
 def applied_application(factory) -> UUID:
@@ -226,7 +227,7 @@ def approved_send(db_path: Path, factory) -> tuple[UUID, UUID, Worker]:
             "recipient": "recruiter@acme.example",
             "message": "I'm withdrawing my application.",
         },
-        headers={"X-Actor-Id": ACTOR},
+        headers=bearer(ACTOR),
     )
     assert queued.status_code == 202, queued.text
     workflow_id = UUID(queued.json()["workflow_id"])
@@ -238,7 +239,7 @@ def approved_send(db_path: Path, factory) -> tuple[UUID, UUID, Worker]:
     decided = api_process(db_path).post(
         f"/v1/approvals/{pending['id']}/decision",
         json={"approved": True, "action_hash": pending["action_hash"]},
-        headers={"X-Actor-Id": ACTOR},
+        headers=bearer(ACTOR),
     )
     assert decided.status_code == 200, decided.text
     assert decided.json()["resumed"] is True

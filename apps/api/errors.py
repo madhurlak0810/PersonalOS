@@ -18,7 +18,12 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from personalos.domain.errors import InternalError, PersonalOSError, ValidationFailed
+from personalos.domain.errors import (
+    InternalError,
+    PersonalOSError,
+    Unauthenticated,
+    ValidationFailed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,21 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(PersonalOSError)
     async def handle_personalos_error(request: Request, exc: PersonalOSError):
+        if isinstance(exc, Unauthenticated):
+            # Routine, and the caller's doing: no stack trace, and never the
+            # credential that failed -- only that one did.
+            logger.info(
+                "%s %s rejected: not authenticated (context_id=%s, correlation_id=%s)",
+                request.method,
+                request.url.path,
+                exc.context_id,
+                _correlation_id(request),
+            )
+            return JSONResponse(
+                status_code=exc.http_status,
+                content=exc.to_envelope(),
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         logger.error(
             "%s %s failed (error_code=%s, context_id=%s, correlation_id=%s): %s",
             request.method,

@@ -12,7 +12,10 @@
 
 import ipaddress
 import random
+import shutil
 import socket
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -71,3 +74,30 @@ def _block_network():
 @pytest.fixture(autouse=True)
 def _fixed_seed():
     random.seed(TEST_SEED)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_api_token(monkeypatch):
+    """Point the local API token at a per-test file, never the user's real one.
+
+    An app whose authentication is built from settings (`build_api_auth`)
+    mints the token on first use; without this, that would be
+    `~/.config/personalos/api-token`.
+
+    A plain `tempfile` directory rather than `tmp_path_factory`: using that in
+    every test makes every pytest run create a numbered base temp dir, which
+    shifts the `pytest-N` in every other test's `tmp_path`.
+    """
+    from personalos.config import settings
+
+    directory = Path(tempfile.mkdtemp(prefix="personalos-api-token-"))
+    path = directory / "api-token"
+    monkeypatch.setattr(settings, "api_token_file", str(path))
+    monkeypatch.setattr(settings, "api_token_store", "file")
+    monkeypatch.setattr(settings, "api_auth_enabled", True)
+    monkeypatch.setenv("API_TOKEN_FILE", str(path))
+    monkeypatch.setenv("API_TOKEN_STORE", "file")
+    try:
+        yield path
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)

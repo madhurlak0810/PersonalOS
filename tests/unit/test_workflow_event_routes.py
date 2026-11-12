@@ -61,6 +61,7 @@ from personalos.domain.workflow import (
 )
 from personalos.persistence.models import Base, EventLogModel
 from personalos.persistence.workflow_progress import WorkflowProgressLog
+from tests.fixtures.auth import bearer, install_test_auth
 
 USER_ID = UUID("6f1e7b3a-0000-4000-8000-0000000000dd")
 SECRET = "sk-live-4f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c"
@@ -105,7 +106,7 @@ def api_process(db_path: Path) -> TestClient:
     app.dependency_overrides[get_progress_log] = lambda: build_progress_log(factory)
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
     app.dependency_overrides[get_failure_services] = lambda: build_failure_services(factory)
-    return TestClient(app)
+    return TestClient(install_test_auth(app), headers=bearer())
 
 
 class _State(TypedDict, total=False):
@@ -208,7 +209,7 @@ class Harness:
     def approve(self, client: TestClient) -> None:
         response = client.post(
             f"/v1/workflows/{self.workflow_id}/resume",
-            headers={"X-Actor-Id": ACTOR},
+            headers=bearer(ACTOR),
             json={
                 "decisions": [
                     {

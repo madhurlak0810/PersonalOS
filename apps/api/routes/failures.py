@@ -52,9 +52,10 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from apps.api.auth import current_actor
 from personalos.bootstrap import (
     build_event_failure_store,
     build_integration_health_store,
@@ -85,9 +86,6 @@ from personalos.persistence.workflow_failures import WorkflowFailureStore, retry
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-#: Actor recorded when a caller does not declare one, matching the other routes.
-_DEFAULT_ACTOR = "api"
 
 
 # --- Dependencies ---------------------------------------------------------------
@@ -272,14 +270,13 @@ async def list_integration_failures(services: FailureServices = Depends(get_fail
 async def retry_event_failure(
     failure_id: UUID,
     services: FailureServices = Depends(get_failure_services),
-    x_actor_id: str | None = Header(default=None, alias="X-Actor-Id"),
+    actor_id: str = Depends(current_actor),
 ):
     """Put a dead-lettered or quarantined event back in line, with a fresh attempt budget.
 
     A 404 when there is no such event, and a 409 when it is not parked --
     pending, being delivered, or delivered.
     """
-    actor_id = x_actor_id or _DEFAULT_ACTOR
     row = services.events.retry(failure_id, actor=actor_id)
     if row is None:
         if services.events.exists(failure_id):
@@ -311,7 +308,7 @@ async def retry_failure(
     http_request: Request,
     request: FailureSelection | None = None,
     services: FailureServices = Depends(get_failure_services),
-    x_actor_id: str | None = Header(default=None, alias="X-Actor-Id"),
+    actor_id: str = Depends(current_actor),
 ):
     """Queue a re-run of a failed step, from the checkpoint before it.
 
@@ -319,7 +316,6 @@ async def retry_failure(
     that needs reconnecting, a step out of attempts, one already dismissed or
     already being retried -- naming the reason.
     """
-    actor_id = x_actor_id or _DEFAULT_ACTOR
     correlation_id = _correlation_id(http_request)
     snapshot = _snapshot_or_404(services, workflow_id)
     failure = _select(services, snapshot, (request or FailureSelection()).failure_id)
@@ -378,7 +374,7 @@ async def dismiss_failure(
     workflow_id: UUID,
     request: FailureSelection | None = None,
     services: FailureServices = Depends(get_failure_services),
-    x_actor_id: str | None = Header(default=None, alias="X-Actor-Id"),
+    actor_id: str = Depends(current_actor),
 ):
     """Acknowledge a failure and close it, without retrying it.
 
@@ -386,7 +382,6 @@ async def dismiss_failure(
     dismissal is an audit event naming who closed it. A 409 for a failure
     already dismissed, or one with a retry queued -- let the retry finish.
     """
-    actor_id = x_actor_id or _DEFAULT_ACTOR
     snapshot = _snapshot_or_404(services, workflow_id)
     failure = _select(services, snapshot, (request or FailureSelection()).failure_id)
 

@@ -38,9 +38,10 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Header, Query, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from apps.api.auth import current_actor
 from apps.api.routes.approvals import PendingApprovalItem
 from apps.api.routes.workflows import WorkflowServices, build_workflow_services
 from personalos.bootstrap import (
@@ -83,9 +84,6 @@ from personalos.policy.permissions import Provenance
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-#: Actor recorded when a caller does not declare one, matching the other routes.
-_DEFAULT_ACTOR = "api"
 
 #: Upper bounds on the free text a move carries.
 _MAX_REASON_LENGTH = 2_000
@@ -306,7 +304,7 @@ async def transition_application(
     http_response: Response,
     request: TransitionRequest,
     services: ApplicationServices = Depends(get_application_services),
-    x_actor_id: str | None = Header(default=None, alias="X-Actor-Id"),
+    actor_id: str = Depends(current_actor),
 ):
     """Move an application to another lifecycle state.
 
@@ -315,7 +313,6 @@ async def transition_application(
     put to the policy engine -- a denial is a 403 -- and otherwise queued for
     approval (202); a second one while the first is still in flight is a 409.
     """
-    actor_id = x_actor_id or _DEFAULT_ACTOR
     card = _card_or_404(services, application_id)
     check_manual_transition(
         card.status, request.to, resume_status=card.resume_status, effect=request.effect

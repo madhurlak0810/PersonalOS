@@ -31,12 +31,27 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
-    # API. Loopback only by default: the API is unauthenticated until Phase L1,
-    # so anything that can reach the port can start workflows and decide
-    # approvals. Bind wider only behind something that authenticates callers.
+    # API. Loopback by default. Every route but `/health` needs a bearer token
+    # (see `apps.api.auth`); the API refuses to bind a non-loopback address
+    # with API_AUTH_ENABLED=false.
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     api_workers: int = 4
+    # API authentication. On by default; turning it off makes every request
+    # the API_ACTOR and is only allowed on a loopback address.
+    api_auth_enabled: bool = True
+    # Where the local API token lives: `file` (a 0600 file at API_TOKEN_FILE)
+    # or `keychain` (the OS keychain under SECRET_STORE_SERVICE). It is created
+    # on first run; `personalos.cli auth token` prints it, `--rotate` replaces it.
+    api_token_store: str = "file"
+    # Empty means $XDG_CONFIG_HOME/personalos/api-token (~/.config/...).
+    api_token_file: str = ""
+    # The actor the local token authenticates as: whose profile, evidence and
+    # approvals a request touches. Matches the CLI's default --actor.
+    api_actor: str = "api"
+    # How long a stream ticket (`POST /v1/auth/stream-tickets`) can be used to
+    # open a workflow's event stream.
+    api_stream_ticket_seconds: int = 60
 
     # Observability
     log_level: str = "INFO"
@@ -119,7 +134,7 @@ class Settings(BaseSettings):
     # expired cursor) searches for in-scope mail. 0 means only new mail.
     gmail_backfill_days: int = 14
     # Whose applications inbound mail is matched against: the same actor the
-    # API reads from X-Actor-Id and the CLI takes as --actor.
+    # API token authenticates as (API_ACTOR) and the CLI takes as --actor.
     gmail_inbox_actor: str = "api"
 
     # File tools. The only directories the files MCP server may read or write,
