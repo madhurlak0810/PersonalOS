@@ -40,7 +40,6 @@ from urllib.parse import urlsplit
 
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from personalos.domain.errors import PayloadTooLarge
@@ -135,19 +134,25 @@ def validate_cors_origins(origins: Iterable[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(checked))
 
 
-class StrictCORSMiddleware(CORSMiddleware):
-    """`CORSMiddleware`, but a refused preflight discloses nothing.
+class StrictCORSMiddleware:
+    """`CORSMiddleware`, but a response to anyone but an allowed origin discloses nothing.
 
     Starlette answers a failed preflight with a 400 that still lists the
-    allowed methods, headers and max-age. A browser would block the request
-    regardless, but there is no reason to tell a disallowed origin what an
-    allowed one may do.
+    allowed methods, headers and max-age, and (depending on the version) adds
+    `Access-Control-Expose-Headers` to responses for any origin. A browser
+    would block the request regardless, but there is no reason to tell a
+    disallowed origin what an allowed one may do.
+
+    It wraps Starlette's middleware rather than subclassing it, filtering at
+    the ASGI boundary, so it depends on nothing but Starlette's constructor:
+    the internals it would otherwise override change between releases.
     """
 
     def __init__(self, app: ASGIApp, *, allow_origins: Sequence[str]) -> None:
-        super().__init__(
+        self.allowed_origins = frozenset(validate_cors_origins(allow_origins))
+        self.cors = CORSMiddleware(
             app,
-            allow_origins=validate_cors_origins(allow_origins),
+            allow_origins=sorted(self.allowed_origins),
             allow_methods=CORS_ALLOWED_METHODS,
             allow_headers=CORS_ALLOWED_HEADERS,
             allow_credentials=False,
@@ -155,27 +160,23 @@ class StrictCORSMiddleware(CORSMiddleware):
             max_age=CORS_MAX_AGE_SECONDS,
         )
 
-    def preflight_response(self, request_headers: Headers) -> Response:
-        response = super().preflight_response(request_headers)
-        if response.status_code != 200:
-            _strip_cors_headers(response.headers)
-        return response
-
-    async def send(self, message: Message, send: Send, request_headers: Headers) -> None:
-        # Starlette adds `Access-Control-Expose-Headers` to every response to a
-        # request with an `Origin`, allowed or not; only an allowed one gets it.
-        if message["type"] == "http.response.start" and not self.is_allowed_origin(
-            origin=request_headers["Origin"]
-        ):
-
-            async def send_stripped(start: Message) -> None:
-                start.setdefault("headers", [])
-                _strip_cors_headers(MutableHeaders(scope=start))
-                await send(start)
-
-            await super().send(message, send_stripped, request_headers)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.cors(scope, receive, send)
             return
-        await super().send(message, send, request_headers)
+        headers = Headers(scope=scope)
+        origin_allowed = headers.get("origin") in self.allowed_origins
+        is_preflight = scope["method"] == "OPTIONS" and "access-control-request-method" in headers
+
+        async def filtered_send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                refused_preflight = is_preflight and message["status"] != 200
+                if not origin_allowed or refused_preflight:
+                    message.setdefault("headers", [])
+                    _strip_cors_headers(MutableHeaders(scope=message))
+            await send(message)
+
+        await self.cors(scope, receive, filtered_send)
 
 
 def _strip_cors_headers(headers: MutableHeaders) -> None:
