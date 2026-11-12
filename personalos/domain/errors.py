@@ -35,6 +35,7 @@ class ErrorCode(str, Enum):
     """
 
     VALIDATION = "validation"
+    PAYLOAD_TOO_LARGE = "payload_too_large"
     UNAUTHENTICATED = "unauthenticated"
     NOT_FOUND = "not_found"
     POLICY_DENIED = "policy_denied"
@@ -145,6 +146,14 @@ class ValidationFailed(PersonalOSError):
     code = ErrorCode.VALIDATION
     http_status = 422
     default_message = "request failed validation"
+
+
+class PayloadTooLarge(PersonalOSError):
+    """The request body is over the API's size cap (`API_MAX_BODY_BYTES`)."""
+
+    code = ErrorCode.PAYLOAD_TOO_LARGE
+    http_status = 413
+    default_message = "request body is too large"
 
 
 class Unauthenticated(PersonalOSError):
@@ -350,6 +359,7 @@ __all__ = [
     "FailureClass",
     "PersonalOSError",
     "ValidationFailed",
+    "PayloadTooLarge",
     "NotFound",
     "PolicyDeniedError",
     "ApprovalRequiredError",

@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     # How long a stream ticket (`POST /v1/auth/stream-tickets`) can be used to
     # open a workflow's event stream.
     api_stream_ticket_seconds: int = 60
+    # Browser origins allowed to call the API cross-origin (CORS), as exact
+    # `scheme://host[:port]` values in a JSON list. The default is only the
+    # local dev UI. A wildcard is refused at startup; see `apps.api.security`.
+    #   API_CORS_ORIGINS=["http://localhost:5173"]
+    api_cors_origins: list[str] = ["http://localhost:5173"]
+    # The largest request body the API reads, in bytes; bigger is a 413.
+    api_max_body_bytes: int = 1024 * 1024
 
     # Observability
     log_level: str = "INFO"
