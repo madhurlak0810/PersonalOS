@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from opentelemetry import baggage
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -16,6 +15,12 @@ from apps.api.auth import (
     require_stream_principal,
 )
 from apps.api.errors import register_error_handlers
+from apps.api.security import (
+    BodySizeLimitMiddleware,
+    SecurityHeadersMiddleware,
+    StrictCORSMiddleware,
+    validate_cors_origins,
+)
 from personalos.bootstrap import initialize_mcp_servers
 from personalos.config import settings
 from personalos.observability import tracing
@@ -101,20 +106,23 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Assigns request.state.correlation_id for every route to see. Added
-    # before CORS so CORS ends up outermost (Starlette runs the most
-    # recently added middleware first) and still wraps every response,
-    # including ones this middleware's own error path might produce.
+    # Starlette runs the most recently added middleware first, so these are
+    # listed innermost to outermost (see `apps.api.security`):
+    #
+    # - the body cap, innermost, so its 413 still gets a correlation id;
+    # - the correlation id, assigned for every route to see;
+    # - CORS, restricted to `API_CORS_ORIGINS`, wrapping every response so an
+    #   allowed UI can read errors too;
+    # - the security headers, outermost, so preflights and CORS refusals
+    #   carry them as well.
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.api_max_body_bytes)
     app.add_middleware(CorrelationIdMiddleware)
-
-    # Add CORS middleware
     app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        StrictCORSMiddleware,
+        # Checked here, not on first request: a bad entry fails startup.
+        allow_origins=validate_cors_origins(settings.api_cors_origins),
     )
+    app.add_middleware(SecurityHeadersMiddleware)
 
     # Include routers. Every router but health and the OAuth callback is
     # mounted behind `require_principal`; `tests/unit/test_api_auth.py` checks every

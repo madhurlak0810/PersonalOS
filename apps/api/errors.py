@@ -18,6 +18,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from apps.api.security import apply_security_headers
 from personalos.domain.errors import (
     InternalError,
     PersonalOSError,
@@ -91,7 +92,11 @@ def register_error_handlers(app: FastAPI) -> None:
             error.context_id,
             _correlation_id(request),
         )
-        return JSONResponse(status_code=error.http_status, content=error.to_envelope())
+        response = JSONResponse(status_code=error.http_status, content=error.to_envelope())
+        # Starlette sends this response from `ServerErrorMiddleware`, outside
+        # every middleware `create_app` adds, so it sets the headers itself.
+        apply_security_headers(response.headers, request.url.path)
+        return response
 
 
 __all__ = ["register_error_handlers"]

@@ -357,6 +357,21 @@ kept outside the repository, in a `0600` file
 - **The API binds to `127.0.0.1` by default.** `API_AUTH_ENABLED=false`
   turns authentication off for local experiments; the API then refuses to
   start on any non-loopback address.
+- **Only the configured UI origin may call the API from a browser.**
+  `API_CORS_ORIGINS` (a JSON list, default `["http://localhost:5173"]`) is
+  the CORS allow-list; a wildcard, a path or a trailing slash is refused at
+  startup. Credentials mode is off (the token is a header, not a cookie),
+  and a preflight passes only for GET, POST and PUT with `Authorization`,
+  `Content-Type` and `Last-Event-ID`. A refused origin gets no
+  `Access-Control-*` header at all (`apps/api/security.py`).
+- **Every response carries security headers**: a `Content-Security-Policy`
+  that loads nothing and forbids framing (`/docs` and `/redoc` get one that
+  admits their CDN), `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`.
+- **Request bodies are capped** at `API_MAX_BODY_BYTES` (1 MiB). A bigger
+  body, declared or chunked, is a 413 `payload_too_large` before
+  authentication runs. `tests/adversarial/test_http_layer.py` covers these
+  three, and malformed JSON.
 - **The quick start's PostgreSQL publishes only on `127.0.0.1`.** Its
   password is a placeholder, so keep it off the network.
 - **Approvals are the only control on outside effects.** The policy engine
@@ -1555,8 +1570,8 @@ These fill in the ports the worker reports as unbound at startup.
 | --- | --- | --- |
 | L1 | Authentication | Done (local token; see [Security Posture](#security-posture)). OIDC replaces `LocalTokenVerifier` behind the same `TokenVerifier` seam |
 | L2 | Actor-scoped authorization | `actor_id` already comes from the token (L1); cross-actor reads are denied, and `POST /v1/chat`'s `user_id` is checked against the actor |
-| L3 | Rate limiting and request limits | Per-actor limits on workflow starts and approvals, and caps on body size |
-| L4 | CORS and security headers | Origins are restricted by config, and the adversarial tests cover the HTTP layer |
+| L3 | Rate limiting and request limits | Per-actor limits on workflow starts and approvals. The body-size cap landed with L4 |
+| L4 | CORS and security headers | Done (`apps/api/security.py`; see [Security Posture](#security-posture)). Body caps are in; per-actor rate limits are still L3 |
 
 ### Phase M: Operator UI
 
