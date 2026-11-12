@@ -88,6 +88,31 @@ def test_well_known_token_shapes_are_redacted_with_no_surrounding_context(
 
 
 @pytest.mark.parametrize(
+    "path",
+    [
+        "/tmp/pytest-of-runner/pytest-4/test_overwriting_an_existing_r0/artifacts/resume.md",
+        "/srv/data/v4/a_long_directory_name_here/file.txt",
+        "backups/2024/4/quarterly_report_final_draft.pdf",
+    ],
+)
+def test_a_path_with_a_4_slash_segment_is_not_an_authorization_code(redactor: Redactor, path: str):
+    """`pytest-4/...` once read as a Google code and mangled a test's tmp path."""
+    assert redactor.redact_text(path) == path
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "code=4/0AfJohXFAKEFAKEFAKEFAKEauthcode_0123456789",
+        '{"code": "4/0AfJohXFAKEFAKEFAKEFAKEauthcode_0123456789"}',
+        "(4/0AfJohXFAKEFAKEFAKEFAKEauthcode_0123456789)",
+    ],
+)
+def test_an_authorization_code_is_still_redacted_where_codes_appear(redactor: Redactor, text: str):
+    assert "authcode_0123456789" not in redactor.redact_text(text)
+
+
+@pytest.mark.parametrize(
     "param",
     [
         "key",
