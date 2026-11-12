@@ -428,6 +428,12 @@ MALFORMED_BODIES = {
 #: `RequestValidationError`. Still a refusal, still not a 500.
 UNDECODABLE = {"not-utf8"}
 
+#: Bodies whose outcome depends on the Python version: the JSON decoder's
+#: recursion limit is lower on older interpreters (3.11 gives up on 1500
+#: levels, 3.14 parses them). Either answer -- FastAPI's 400 or the 422
+#: envelope -- is a clean refusal; what must never happen is a 500.
+DEPTH_DEPENDENT = {"deeply-nested"}
+
 
 @pytest.mark.parametrize("name", MALFORMED_BODIES.keys())
 def test_malformed_json_is_refused_cleanly_not_a_500(client, name):
@@ -439,6 +445,10 @@ def test_malformed_json_is_refused_cleanly_not_a_500(client, name):
     )
 
     _assert_security_headers(response)
+    if name in DEPTH_DEPENDENT:
+        assert response.status_code in (400, 422)
+        assert body.decode() not in response.text
+        return
     if name in UNDECODABLE:
         assert response.status_code == 400
         assert response.json() == {"detail": "There was an error parsing the body"}
