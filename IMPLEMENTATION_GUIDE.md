@@ -6,7 +6,7 @@ built.
 ## Table of Contents
 
 1. [Local Quick Start](#local-quick-start)
-2. [Security Posture (until Phase L1)](#security-posture-until-phase-l1)
+2. [Security Posture](#security-posture)
 3. [Project Overview](#project-overview)
 4. [Project Structure](#project-structure)
 5. [Architecture](#architecture)
@@ -103,9 +103,9 @@ python -m personalos.cli profile create docs/quickstart/profile.json
 ```
 
 The sample profile looks for remote backend roles using Python and Postgres.
-Both commands act as the actor `api`, the same actor the API assumes when a
-request sends no `X-Actor-Id` header. That is how the search in step 8 finds
-this resume and this profile.
+Both commands act as the actor `api`, the same actor the API token
+authenticates as (`API_ACTOR`). That is how the search in step 8 finds this
+resume and this profile.
 
 ### 7. Start the API and the worker
 
@@ -122,13 +122,24 @@ python -m personalos.cli worker
 The worker logs `wired graphs from 'apps.worker.fake_providers:build_worker_graphs'`
 and then a warning listing its unbound ports (`application_store`,
 `application_submitter`, `calendar`, `mailbox`, `reply_drafter`). Those are
-the adapters still to be built (see [Next Steps](#next-steps)). The
-interactive API docs are at http://127.0.0.1:8000/docs.
+the adapters still to be built (see [Next Steps](#next-steps)).
+
+The first `api` run creates the local API token (a `0600` file at
+`~/.config/personalos/api-token`). Every route but `/health` needs it, so
+put it in the shell you run the next steps from:
+
+```bash
+export TOKEN=$(python -m personalos.cli auth token)
+export AUTH="Authorization: Bearer $TOKEN"
+```
+
+The interactive API docs are at http://127.0.0.1:8000/docs; use
+**Authorize** with the token to call routes from there.
 
 ### 8. Start a job search
 
 ```bash
-WORKFLOW_ID=$(curl -s -X POST http://127.0.0.1:8000/v1/chat \
+WORKFLOW_ID=$(curl -s -X POST http://127.0.0.1:8000/v1/chat -H "$AUTH" \
   -H "Content-Type: application/json" \
   -d '{"message": "find me remote python backend jobs"}' | jq -r .workflow_id)
 echo $WORKFLOW_ID
@@ -145,7 +156,7 @@ Within a few seconds the workflow stops before the only step with an outside
 effect, submitting the application:
 
 ```bash
-curl -s http://127.0.0.1:8000/v1/workflows/$WORKFLOW_ID | jq '{status, current_step}'
+curl -s -H "$AUTH" http://127.0.0.1:8000/v1/workflows/$WORKFLOW_ID | jq '{status, current_step}'
 ```
 
 ```json
@@ -162,7 +173,7 @@ The approval queue shows what approving would do: the recipient, a diff of
 the documents, and their evidence citations.
 
 ```bash
-curl -s http://127.0.0.1:8000/v1/approvals | jq '.approvals[] | {id, action_type, summary, action_hash}'
+curl -s -H "$AUTH" http://127.0.0.1:8000/v1/approvals | jq '.approvals[] | {id, action_type, summary, action_hash}'
 python -m personalos.cli approvals    # the same queue, rendered for a terminal
 ```
 
@@ -173,8 +184,8 @@ changes after it was listed, the hash no longer matches and the approval is
 refused with a `409`.
 
 ```bash
-APPROVAL=$(curl -s http://127.0.0.1:8000/v1/approvals | jq -c '.approvals[0]')
-curl -s -X POST "http://127.0.0.1:8000/v1/approvals/$(jq -r .id <<<"$APPROVAL")/decision" \
+APPROVAL=$(curl -s -H "$AUTH" http://127.0.0.1:8000/v1/approvals | jq -c '.approvals[0]')
+curl -s -X POST -H "$AUTH" "http://127.0.0.1:8000/v1/approvals/$(jq -r .id <<<"$APPROVAL")/decision" \
   -H "Content-Type: application/json" \
   -d "{\"approved\": true, \"action_hash\": $(jq .action_hash <<<"$APPROVAL")}" | jq
 ```
@@ -186,9 +197,9 @@ fails as a retryable `PortNotConfigured`, the same way it would in a
 deployment that has not configured one:
 
 ```bash
-curl -s http://127.0.0.1:8000/v1/workflows/$WORKFLOW_ID/failures \
+curl -s -H "$AUTH" http://127.0.0.1:8000/v1/workflows/$WORKFLOW_ID/failures \
   | jq '.failures[] | {step, error_type, last_error}'
-curl -s http://127.0.0.1:8000/v1/workflows/$WORKFLOW_ID/audit | jq   # the decision trail
+curl -s -H "$AUTH" http://127.0.0.1:8000/v1/workflows/$WORKFLOW_ID/audit | jq   # the decision trail
 ```
 
 That is the end of the walkthrough. To start over, drop the database
@@ -320,23 +331,38 @@ status. No response contains token material.
 
 ---
 
-## Security Posture (until Phase L1)
+## Security Posture
 
-**The API has no authentication.** Until Phase L1 adds it, anyone who can
-reach the port can start workflows, read the audit trail, and approve
-pending actions. `X-Actor-Id` decides whose profile and evidence a request
-uses, but nothing checks it. The defaults reflect that:
+**Every API route needs the local API token**, except `/health` and Google's
+OAuth callback (`apps/api/auth.py`). The token is generated on first run and
+kept outside the repository, in a `0600` file
+(`~/.config/personalos/api-token`, or `API_TOKEN_FILE`) or, with
+`API_TOKEN_STORE=keychain`, in the OS keychain.
 
-- **The API binds to `127.0.0.1` by default** (`API_HOST`, and
-  `python -m personalos.cli api --host`). Do not set it to `0.0.0.0` or a LAN
-  address unless something in front of the API authenticates callers.
+- **Send it as a bearer token.** `python -m personalos.cli auth token`
+  prints it; `--rotate` replaces it, and a running API stops accepting the
+  old one within seconds. A file that other users can read is refused.
+- **The actor comes from the token.** Routes record the actor the token
+  verified as (`API_ACTOR`, `api` by default). `X-Actor-Id` is ignored.
+  Which actor may read or change what is Phase L2.
+- **The event stream authenticates too.** A fetch-based SSE client sends the
+  header. A browser `EventSource`, which cannot, first calls
+  `POST /v1/auth/stream-tickets` with `{"workflow_id": ...}` and opens the
+  returned `stream_url`. The ticket names one workflow, expires after
+  `API_STREAM_TICKET_SECONDS` (60), and is voided when the token rotates. The
+  long-lived token is never accepted in a URL.
+- **The token is redacted everywhere.** It is registered with the Phase D
+  redactor when loaded, and its `pos_at_` shape (and the tickets' `pos_st_`)
+  is matched on its own. Logs, spans and audit payloads never carry either.
+- **The API binds to `127.0.0.1` by default.** `API_AUTH_ENABLED=false`
+  turns authentication off for local experiments; the API then refuses to
+  start on any non-loopback address.
 - **The quick start's PostgreSQL publishes only on `127.0.0.1`.** Its
   password is a placeholder, so keep it off the network.
 - **Approvals are the only control on outside effects.** The policy engine
   still denies anything off its allowlist, and every outward-facing action
-  still waits for an approval that quotes its `action_hash`. An
-  unauthenticated caller can approve one, though, so treat API access as
-  equivalent to the user's own.
+  still waits for an approval that quotes its `action_hash`. Anyone holding
+  the token can approve one, so treat it like the user's own password.
 - **Secrets stay out of `.env`.** Refresh tokens, API keys and the OAuth
   client secret live in the OS keychain (`SECRET_STORE_SERVICE`). The
   configuration only holds `cred://` references to them.
@@ -594,10 +620,15 @@ POST   /v1/integrations/google/connect            Begin Google consent (read-onl
 GET    /v1/integrations/google/callback           Google's redirect; stores the refresh token
 POST   /v1/integrations/google/revoke             Revoke at Google, delete the keychain entry
 GET    /v1/failures/events, POST .../{id}/retry   Parked outbox events
+GET    /v1/auth/whoami                            The actor the token authenticates as
+POST   /v1/auth/stream-tickets                    A short-lived ticket for one event stream
+GET    /health                                    Liveness; the only route without a token
 ```
 
-All routes are unauthenticated until Phase L1. See
-[Security Posture](#security-posture-until-phase-l1).
+Every route needs `Authorization: Bearer <token>` except `/health` and
+Google's OAuth callback, whose one-time `state` is its credential. The actor a
+route records is the one the token verified as. See
+[Security Posture](#security-posture).
 
 ### 8. Worker (`apps/worker/`)
 
@@ -1522,8 +1553,8 @@ These fill in the ports the worker reports as unbound at startup.
 
 | # | Issue | Done when |
 | --- | --- | --- |
-| L1 | Authentication | A local token or OIDC dependency on every route except health, with tests for 401. Until then, see [Security Posture](#security-posture-until-phase-l1) |
-| L2 | Actor-scoped authorization | `actor_id` comes from the authenticated identity, not `X-Actor-Id`, and cross-actor reads are denied |
+| L1 | Authentication | Done (local token; see [Security Posture](#security-posture)). OIDC replaces `LocalTokenVerifier` behind the same `TokenVerifier` seam |
+| L2 | Actor-scoped authorization | `actor_id` already comes from the token (L1); cross-actor reads are denied, and `POST /v1/chat`'s `user_id` is checked against the actor |
 | L3 | Rate limiting and request limits | Per-actor limits on workflow starts and approvals, and caps on body size |
 | L4 | CORS and security headers | Origins are restricted by config, and the adversarial tests cover the HTTP layer |
 
@@ -1573,7 +1604,11 @@ Settings come from the environment, then `.env` in the working directory.
 | Setting | Default | Notes |
 | --- | --- | --- |
 | `DATABASE_URL` | `postgresql://user:password@localhost:5432/personalos` | A bare `postgresql://` URL is rewritten to name the installed `psycopg2` driver. |
-| `API_HOST` / `API_PORT` / `API_WORKERS` | `127.0.0.1` / `8000` / `4` | Keep the host on loopback until Phase L1. |
+| `API_HOST` / `API_PORT` / `API_WORKERS` | `127.0.0.1` / `8000` / `4` | A non-loopback host is refused while `API_AUTH_ENABLED=false`. |
+| `API_AUTH_ENABLED` | `true` | `false` makes every request `API_ACTOR`; loopback only. |
+| `API_TOKEN_STORE` / `API_TOKEN_FILE` | `file` / `~/.config/personalos/api-token` | Or `keychain` for the OS keychain. `personalos.cli auth token [--rotate]`. |
+| `API_ACTOR` | `api` | The actor the local token authenticates as. |
+| `API_STREAM_TICKET_SECONDS` | `60` | Lifetime of an event-stream ticket. |
 | `FILES_ALLOWED_ROOTS` | `[]` | JSON list of absolute paths. If empty, every file read and write is refused. |
 | `WORKER_GRAPHS` | `apps.worker.graphs:build_worker_graphs` | `module:callable`. Empty runs no graphs. |
 | `GREENHOUSE_BOARDS` | `{}` | JSON, board token to employer name. |
@@ -1595,7 +1630,7 @@ Settings come from the environment, then `.env` in the working directory.
 | `GMAIL_RECRUITER_LABELS` / `GMAIL_RECRUITER_QUERIES` | `[]` / `[]` | JSON lists: the Gmail labels and searches recruiter mail is found by. The only mail PersonalOS looks at; both empty leaves the inbox off. |
 | `GMAIL_POLL_INTERVAL_SECONDS` | `300` | How often the worker reads the Gmail history. |
 | `GMAIL_BACKFILL_DAYS` | `14` | How far back a first poll, or a resync, searches. `0` means only new mail. |
-| `GMAIL_INBOX_ACTOR` | `api` | Whose applications inbound mail is matched against, as `--actor` / `X-Actor-Id`. |
+| `GMAIL_INBOX_ACTOR` | `api` | Whose applications inbound mail is matched against, as `--actor` / `API_ACTOR`. |
 | `INTEGRATION_HEALTH_CHECK_SECONDS` | `300` | How often the worker health-checks every adapter. Results are at `GET /v1/integrations` and `GET /v1/failures/integrations`. |
 | `INTEGRATION_CIRCUIT_RETRY_SECONDS` | `60` | How long work that needs an integration that is down, or awaiting a reconnect, waits in its queue before it is looked at again. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Optional MCP response cache. |

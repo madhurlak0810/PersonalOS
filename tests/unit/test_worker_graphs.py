@@ -57,6 +57,7 @@ from personalos.persistence.search_profiles import SqlSearchProfileStore
 from personalos.persistence.workflow_commands import WORKFLOW_COMMAND_EVENT
 from tests.fixtures import artifact_prep, evidence_ingestion
 from tests.fixtures import job_search_fakes as fakes
+from tests.fixtures.auth import bearer, install_test_auth
 
 DEFAULT_FACTORY = "apps.worker.graphs:build_worker_graphs"
 
@@ -75,7 +76,7 @@ def _client(factory) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
     app.dependency_overrides[get_failure_services] = lambda: build_failure_services(factory)
-    return TestClient(app)
+    return TestClient(install_test_auth(app), headers=bearer())
 
 
 def _chat(client: TestClient) -> dict:

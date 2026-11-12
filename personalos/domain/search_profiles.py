@@ -10,12 +10,11 @@ Profiles are versioned, never edited in place. `job_matches` record the
 `profile_version` they were scored against, so an update writes version N+1
 and leaves N exactly as it was.
 
-**Scoping.** A profile belongs to the actor that wrote it. Until requests are
-authenticated (Phase L), the actor is whatever the caller puts in `X-Actor-Id`
-(or `--actor` on the CLI), and `actor_user_id` turns it into the candidate id
-the profile and the job search are keyed by. Nothing checks that the caller is
-who that header says: the API is unauthenticated, and this is scoping, not
-access control.
+**Scoping.** A profile belongs to the actor that wrote it. Over the API the
+actor is the one the request's bearer token verified as (`apps.api.auth`); on
+the CLI it is `--actor`. `actor_user_id` turns it into the candidate id the
+profile and the job search are keyed by. This is scoping, not access control:
+which actor may do what is the follow-up authorization phase.
 """
 
 from datetime import datetime

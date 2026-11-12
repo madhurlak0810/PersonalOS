@@ -36,6 +36,7 @@ from personalos.domain.search_profiles import CandidateProfileInput, actor_user_
 from personalos.persistence.models import Base, CandidateProfileModel, UserModel
 from personalos.persistence.search_profiles import SqlSearchProfileStore
 from tests.fixtures import job_search_fakes as fakes
+from tests.fixtures.auth import bearer, install_test_auth
 from tests.unit.test_job_search_nodes import graph
 from tests.unit.test_worker_graphs import _run_worker_until_settled
 
@@ -76,7 +77,7 @@ def client(factory) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
     app.dependency_overrides[get_profile_store] = lambda: SqlSearchProfileStore(factory)
-    return TestClient(app, headers={"X-Actor-Id": ACTOR})
+    return TestClient(install_test_auth(app), headers=bearer(ACTOR))
 
 
 def _profile(**changes) -> CandidateProfileInput:
@@ -187,9 +188,9 @@ def test_the_api_creates_reads_updates_and_lists_versions(client):
 def test_profiles_are_scoped_to_the_actor(client):
     assert client.post("/v1/profile", json=PROFILE).status_code == 201
 
-    other = client.get("/v1/profile", headers={"X-Actor-Id": "someone-else"})
+    other = client.get("/v1/profile", headers=bearer("someone-else"))
     assert other.status_code == 404
-    assert client.put("/v1/profile", json=PROFILE, headers={"X-Actor-Id": "x"}).status_code == 404
+    assert client.put("/v1/profile", json=PROFILE, headers=bearer("x")).status_code == 404
 
 
 @pytest.mark.parametrize(

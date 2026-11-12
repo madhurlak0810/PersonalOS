@@ -178,7 +178,7 @@ class RequestedTransition(BaseModel):
     to_status: ApplicationStatus
     effect: TransitionEffect
     reason: str | None = None
-    #: The actor who asked: `X-Actor-Id` on the request, never a body field.
+    #: The actor who asked: the request's authenticated actor, never a body field.
     requested_by: str
     requested_at: datetime = Field(default_factory=datetime.utcnow)
     company: str

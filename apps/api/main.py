@@ -4,11 +4,17 @@ import logging
 from contextlib import asynccontextmanager
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from opentelemetry import baggage
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from apps.api.auth import (
+    build_api_auth,
+    ensure_safe_bind,
+    require_principal,
+    require_stream_principal,
+)
 from apps.api.errors import register_error_handlers
 from personalos.bootstrap import initialize_mcp_servers
 from personalos.config import settings
@@ -67,6 +73,14 @@ async def lifespan(app: FastAPI):
     """Manage application startup and shutdown."""
     # Startup
     logger.info("Starting PersonalOS API...")
+    # Refuses API_AUTH_ENABLED=false on a non-loopback API_HOST. The CLI checks
+    # its own --host before this; this covers `uvicorn apps.api.main:app`.
+    ensure_safe_bind(settings.api_host, auth_enabled=settings.api_auth_enabled)
+    if getattr(app.state, "api_auth", None) is None:
+        app.state.api_auth = build_api_auth()
+    ensure_token = getattr(app.state.api_auth.verifier, "ensure_token", None)
+    if app.state.api_auth.enabled and ensure_token is not None and ensure_token():
+        logger.info("Created the API token; print it with `python -m personalos.cli auth token`")
     configure_tracing_from_settings("personalos-api")
     init_db()
     logger.info("Database initialized")
@@ -102,28 +116,50 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Include routers
+    # Include routers. Every router but health and the OAuth callback is
+    # mounted behind `require_principal`; `tests/unit/test_api_auth.py` checks every
+    # registered route, so a router added here without it fails the suite.
     from apps.api.routes import (
         applications,
         approvals,
         audit,
+        auth,
         events,
         evidence,
         failures,
+        health,
         integrations,
         profiles,
         workflows,
     )
 
-    app.include_router(workflows.router, prefix="/v1", tags=["workflows"])
-    app.include_router(approvals.router, prefix="/v1", tags=["approvals"])
-    app.include_router(applications.router, prefix="/v1", tags=["applications"])
-    app.include_router(audit.router, prefix="/v1", tags=["audit"])
-    app.include_router(failures.router, prefix="/v1", tags=["failures"])
-    app.include_router(events.router, prefix="/v1", tags=["events"])
-    app.include_router(profiles.router, prefix="/v1", tags=["profiles"])
-    app.include_router(evidence.router, prefix="/v1", tags=["evidence"])
-    app.include_router(integrations.router, prefix="/v1", tags=["integrations"])
+    app.include_router(health.router, tags=["health"])
+    # Google's OAuth redirect: the browser has no bearer token, so the
+    # one-time `state` an authenticated `/connect` minted is its credential.
+    app.include_router(integrations.callback_router, prefix="/v1", tags=["integrations"])
+
+    authenticated = [Depends(require_principal)]
+    for router, tag in (
+        (auth.router, "auth"),
+        (workflows.router, "workflows"),
+        (approvals.router, "approvals"),
+        (applications.router, "applications"),
+        (audit.router, "audit"),
+        (failures.router, "failures"),
+        (profiles.router, "profiles"),
+        (evidence.router, "evidence"),
+        (integrations.router, "integrations"),
+    ):
+        app.include_router(router, prefix="/v1", tags=[tag], dependencies=authenticated)
+
+    # The event stream also takes `?ticket=`, for a browser EventSource that
+    # cannot send Authorization; see `apps.api.auth`.
+    app.include_router(
+        events.router,
+        prefix="/v1",
+        tags=["events"],
+        dependencies=[Depends(require_stream_principal)],
+    )
 
     register_error_handlers(app)
 

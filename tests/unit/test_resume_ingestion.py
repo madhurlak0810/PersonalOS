@@ -24,6 +24,7 @@ from personalos.persistence.evidence import SqlEvidenceIndex, SqlEvidenceSource
 from personalos.persistence.models import EMBEDDING_DIMENSION
 from tests.fixtures import evidence_ingestion as fx
 from tests.fixtures import job_search_fakes as fakes
+from tests.fixtures.auth import bearer, install_test_auth
 from tests.fixtures.job_discovery import session_factory
 
 USER = fakes.USER_ID
@@ -362,7 +363,7 @@ ACTOR = "jane"
 def client(root, factory):
     app = create_app()
     app.dependency_overrides[get_resume_ingestor] = lambda: fx.ingestor(root, factory)
-    return TestClient(app, headers={"X-Actor-Id": ACTOR})
+    return TestClient(install_test_auth(app), headers=bearer(ACTOR))
 
 
 def test_the_api_indexes_then_reports_the_unchanged_file(client, factory):

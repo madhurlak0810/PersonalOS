@@ -11,13 +11,14 @@
 path is resolved against the first root. Anything outside them -- including by
 `..` or a symlink -- is a 403 and nothing is read. Nothing is uploaded.
 
-**Unauthenticated**, like `/v1/profile`: the evidence belongs to the actor in
-`X-Actor-Id` (default `api`), and nothing verifies the header until Phase L.
+Like `/v1/profile`, the evidence belongs to the authenticated actor
+(`apps.api.auth.current_actor`); a caller cannot name another.
 """
 
-from fastapi import APIRouter, Depends, Header, Response
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from apps.api.auth import current_actor
 from personalos.bootstrap import build_resume_ingestor
 from personalos.domain.evidence import IngestionResult, IngestionStatus
 from personalos.domain.search_profiles import actor_user_id
@@ -25,9 +26,6 @@ from personalos.persistence.database import SessionLocal
 from personalos.retrieval.evidence_ingestion import ResumeIngestor
 
 router = APIRouter()
-
-#: Actor recorded when a caller does not declare one, matching the other routes.
-_DEFAULT_ACTOR = "api"
 
 
 class IngestResumeRequest(BaseModel):
@@ -48,10 +46,9 @@ async def ingest_resume(
     body: IngestResumeRequest,
     http_response: Response,
     ingestor: ResumeIngestor = Depends(get_resume_ingestor),
-    x_actor_id: str | None = Header(default=None, alias="X-Actor-Id"),
+    actor_id: str = Depends(current_actor),
 ):
     """Ingest the resume at `path` as the actor's evidence."""
-    actor_id = x_actor_id or _DEFAULT_ACTOR
     result = await ingestor.ingest(actor_user_id(actor_id), body.path, display_name=actor_id)
     http_response.status_code = 201 if result.status == IngestionStatus.INDEXED else 200
     return result

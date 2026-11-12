@@ -71,3 +71,22 @@ def _block_network():
 @pytest.fixture(autouse=True)
 def _fixed_seed():
     random.seed(TEST_SEED)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_api_token(tmp_path_factory, monkeypatch):
+    """Point the local API token at a per-test file, never the user's real one.
+
+    An app whose authentication is built from settings (`build_api_auth`)
+    mints the token on first use; without this, that would be
+    `~/.config/personalos/api-token`.
+    """
+    from personalos.config import settings
+
+    path = tmp_path_factory.mktemp("api-token") / "api-token"
+    monkeypatch.setattr(settings, "api_token_file", str(path))
+    monkeypatch.setattr(settings, "api_token_store", "file")
+    monkeypatch.setattr(settings, "api_auth_enabled", True)
+    monkeypatch.setenv("API_TOKEN_FILE", str(path))
+    monkeypatch.setenv("API_TOKEN_STORE", "file")
+    yield path

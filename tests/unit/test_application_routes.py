@@ -61,6 +61,7 @@ from personalos.persistence.repositories import ApplicationRepository, JobPostin
 from personalos.policy.engine import PolicyEngine
 from personalos.policy.intents import Decision
 from personalos.policy.permissions import PermissionClass
+from tests.fixtures.auth import bearer, install_test_auth
 
 S = ApplicationStatus
 T0 = datetime(2026, 10, 1, 9, 0, 0)
@@ -107,7 +108,7 @@ def api_process(db_path: Path, *, policy: PolicyEngine | None = None) -> TestCli
     app = create_app()
     app.dependency_overrides[get_application_services] = services
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
-    return TestClient(app)
+    return TestClient(install_test_auth(app), headers=bearer())
 
 
 def new_application(
@@ -221,7 +222,7 @@ def test_an_invalid_transition_is_rejected_with_the_valid_next_states(db_path, s
     response = api_process(db_path).post(
         f"/v1/applications/{application_id}/transition",
         json={"to": "offer"},
-        headers={"X-Actor-Id": ACTOR},
+        headers=bearer(ACTOR),
     )
 
     assert response.status_code == 422
@@ -244,7 +245,7 @@ def test_the_board_reflects_a_transition_immediately(db_path, session_factory):
     response = api_process(db_path).post(
         f"/v1/applications/{application_id}/transition",
         json={"to": "saved", "reason": "looks promising"},
-        headers={"X-Actor-Id": ACTOR},
+        headers=bearer(ACTOR),
     )
 
     assert response.status_code == 200
@@ -373,7 +374,7 @@ def test_an_effectful_transition_is_queued_for_approval_not_applied(db_path, ses
     response = api_process(db_path).post(
         f"/v1/applications/{application_id}/transition",
         json={"to": "applied", "effect": "submit_application"},
-        headers={"X-Actor-Id": ACTOR},
+        headers=bearer(ACTOR),
     )
 
     assert response.status_code == 202

@@ -84,7 +84,7 @@ Layer boundaries are enforced in CI by `scripts/check_boundaries.py`. See `docs/
 
 [`IMPLEMENTATION_GUIDE.md#local-quick-start`](IMPLEMENTATION_GUIDE.md#local-quick-start) takes a fresh clone to a job search waiting on your approval, against a fake job board, with no API keys. `python scripts/smoke_quickstart.py` runs the same walkthrough in one command, and CI runs it on every pull request.
 
-The API is unauthenticated until Phase L1 and binds to `127.0.0.1` by default; see [Security posture](IMPLEMENTATION_GUIDE.md#security-posture-until-phase-l1) before exposing it.
+Every API route but `/health` needs the local bearer token (`python -m personalos.cli auth token`), and the API binds to `127.0.0.1` by default; see [Security posture](IMPLEMENTATION_GUIDE.md#security-posture).
 
 Run the checks CI runs:
 

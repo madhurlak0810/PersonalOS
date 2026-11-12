@@ -84,6 +84,7 @@ from personalos.domain.workflow import (
 )
 from personalos.persistence.models import Base
 from tests.fixtures import job_search_fakes as fakes
+from tests.fixtures.auth import bearer, install_test_auth
 
 USER_ID = UUID("6f1e7b3a-0000-4000-8000-0000000000bb")
 WORKFLOW_ID = UUID("6f1e7b3a-0000-4000-8000-0000000000cc")
@@ -398,7 +399,7 @@ def api_process(db_path: Path) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_workflow_services] = lambda: services_for(db_path)
     app.dependency_overrides[get_audit_store] = lambda: build_audit_store(factory_for(db_path))
-    return TestClient(app)
+    return TestClient(install_test_auth(app), headers=bearer())
 
 
 class Mailer:
@@ -535,7 +536,7 @@ def run_mixed(db_path: Path) -> tuple[UUID, dict[str, ActionIntent]]:
         decided = api.post(
             f"/v1/approvals/{item['id']}/decision",
             json={"approved": approved, "action_hash": item["action_hash"]},
-            headers={"X-Actor-Id": ACTOR},
+            headers=bearer(ACTOR),
         )
         assert decided.status_code == 200, decided.text
     assert worker.run_next()
@@ -578,7 +579,7 @@ def test_a_mixed_workflow_through_the_api(db_path):
             api.post(
                 f"/v1/approvals/{item['id']}/decision",
                 json={"approved": approved, "action_hash": item["action_hash"]},
-                headers={"X-Actor-Id": ACTOR},
+                headers=bearer(ACTOR),
             ).status_code
             == 200
         )

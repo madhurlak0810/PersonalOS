@@ -63,6 +63,7 @@ from personalos.persistence.models import Base, OutboxEventModel
 from personalos.persistence.workflow_commands import WorkflowCommandQueue
 from personalos.providers.fake import FakeJobProvider
 from tests.fixtures import job_search_fakes as fakes
+from tests.fixtures.auth import bearer, install_test_auth
 from tests.graph_scenarios.test_pending_checkpoints import AT_TRIGGER, Deployment
 
 SECRET = "ya29.a0AfH6SMBx-live-access-token-0123456789"
@@ -118,7 +119,7 @@ def api(factory) -> TestClient:
     app.dependency_overrides[get_google_connection_reader] = lambda: GoogleConnectionReader(
         factory, IntegrationHealthStore(factory)
     )
-    return TestClient(app)
+    return TestClient(install_test_auth(app), headers=bearer())
 
 
 # --- Acceptance 1: revoked OAuth ---------------------------------------------------

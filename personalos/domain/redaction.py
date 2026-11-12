@@ -172,6 +172,12 @@ _TEXT_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]+"),
         REDACTED,
     ),  # JWT
+    # PersonalOS's own API token and SSE stream tickets
+    # (`personalos.domain.auth`). Matched by shape as well as registered as
+    # known values, so a token minted by another process -- the CLI rotating
+    # it while the API runs -- is still caught.
+    (re.compile(r"\bpos_at_[A-Za-z0-9_-]{20,}"), REDACTED),
+    (re.compile(r"\bpos_st_[A-Za-z0-9_.-]{20,}"), REDACTED),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"), REDACTED),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}"), REDACTED),
     (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), REDACTED),

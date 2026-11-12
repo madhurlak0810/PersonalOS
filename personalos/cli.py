@@ -1,6 +1,7 @@
 """CLI entry points for PersonalOS."""
 
 import logging
+import os
 
 import click
 import uvicorn
@@ -25,7 +26,33 @@ def cli():
 @click.option("--workers", default=settings.api_workers, help="Number of workers")
 @click.option("--reload", is_flag=True, help="Enable auto-reload")
 def api(host: str, port: int, workers: int, reload: bool):
-    """Run the PersonalOS API server."""
+    """Run the PersonalOS API server.
+
+    Every route but /health needs the local API token (`auth token` prints
+    it); it is created here on first run. With API_AUTH_ENABLED=false the API
+    refuses any --host that is not a loopback address.
+    """
+    from apps.api.auth import UnsafeBindAddress, ensure_safe_bind
+
+    try:
+        ensure_safe_bind(host, auth_enabled=settings.api_auth_enabled)
+    except UnsafeBindAddress as exc:
+        raise click.ClickException(str(exc)) from exc
+    if settings.api_auth_enabled:
+        from personalos.bootstrap import build_local_api_token
+
+        token = _profile_call(build_local_api_token)
+        _, created = _profile_call(token.load_or_create)
+        if created:
+            click.echo(
+                f"Created the API token in {token.store.describe()}; "
+                f"print it with `python -m personalos.cli auth token`.",
+                err=True,
+            )
+    # Worker processes re-read settings from the environment; the lifespan
+    # in each re-checks the bind against API_HOST.
+    os.environ["API_HOST"] = host
+    settings.api_host = host
     logger.info(f"Starting PersonalOS API on {host}:{port}")
     init_db()
 
@@ -119,15 +146,16 @@ def approvals(as_json: bool):
 # The same shapes as `/v1/profile`: a create or update reads a
 # `CandidateProfileInput` as JSON, and every read prints the API's response
 # body, so `profile show`'s `profile` can be fed back to `profile update`.
-# Scoped by `--actor` the way the API is scoped by `X-Actor-Id`, and just as
-# unauthenticated until Phase L.
+# Scoped by `--actor`, the way the API is scoped by the actor its token
+# authenticates as (API_ACTOR, `api` by default). The CLI reads the database
+# directly, so it runs as whoever can run it.
 
 _actor_option = click.option(
     "--actor",
     "actor_id",
     default="api",
     show_default=True,
-    help="Whose profile: the same actor the API reads from X-Actor-Id.",
+    help="Whose profile: the API's token authenticates as API_ACTOR.",
 )
 
 
@@ -217,7 +245,7 @@ def profile_versions(actor_id: str):
     "actor_id",
     default="api",
     show_default=True,
-    help="Whose evidence: the same actor the API reads from X-Actor-Id.",
+    help="Whose evidence: the API's token authenticates as API_ACTOR.",
 )
 def ingest_resume(path: str, actor_id: str):
     """Load the resume at PATH (PDF, DOCX, Markdown or text) into the evidence index.
@@ -323,6 +351,31 @@ def mcp_google():
 @cli.group()
 def auth():
     """Connect, inspect and disconnect integrations."""
+
+
+@auth.command("token")
+@click.option("--rotate", is_flag=True, help="Replace the token; the old one stops working.")
+def auth_token(rotate: bool):
+    """Print the local API token, creating it on first use.
+
+    Send it as `Authorization: Bearer <token>`. Only the token goes to stdout,
+    so `TOKEN=$(python -m personalos.cli auth token)` works. --rotate mints a
+    new one; a running API picks it up within seconds, and every stream
+    ticket issued under the old one stops working too.
+    """
+    from personalos.bootstrap import build_local_api_token
+
+    token = _profile_call(build_local_api_token)
+    if rotate:
+        value = _profile_call(token.rotate)
+        click.echo(f"Rotated the API token in {token.store.describe()}.", err=True)
+    else:
+        value, created = _profile_call(token.load_or_create)
+        if created:
+            click.echo(f"Created the API token in {token.store.describe()}.", err=True)
+    if not settings.api_auth_enabled:
+        click.echo("Note: API_AUTH_ENABLED=false, so the API is not checking it.", err=True)
+    click.echo(value.reveal())
 
 
 @auth.command("google")

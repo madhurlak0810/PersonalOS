@@ -137,6 +137,12 @@ from personalos.retrieval.reply_drafting import (
     GroundedReplyDrafter,
     ReplyWriter,
 )
+from personalos.secrets.api_token import (
+    FileApiTokenStore,
+    KeychainApiTokenStore,
+    LocalApiToken,
+    default_token_path,
+)
 from personalos.secrets.exchange import (
     ApiKeyExchanger,
     GoogleOAuthTokenExchanger,
@@ -511,6 +517,24 @@ def build_secret_store() -> SecretStore:
     not start with them somewhere else.
     """
     return KeyringSecretStore(settings.secret_store_service)
+
+
+def build_local_api_token() -> LocalApiToken:
+    """The local API token, in the store `API_TOKEN_STORE` names.
+
+    `file` (the default) works on a headless machine with no keychain daemon;
+    `keychain` refuses to run without a protected backend, like every other
+    secret.
+    """
+    kind = settings.api_token_store.strip().lower()
+    if kind == "keychain":
+        return LocalApiToken(KeychainApiTokenStore(build_secret_store()))
+    if kind != "file":
+        raise ValueError(
+            f"API_TOKEN_STORE must be 'file' or 'keychain', not {settings.api_token_store!r}"
+        )
+    path = settings.api_token_file.strip() or default_token_path()
+    return LocalApiToken(FileApiTokenStore(path))
 
 
 def build_credential_broker(
@@ -1439,6 +1463,7 @@ def build_job_search_subgraph_runner(
 
 
 __all__ = [
+    "build_local_api_token",
     "build_model_gateway",
     "JOB_SEARCH_WORKFLOW",
     "SUPERVISOR_WORKFLOW",

@@ -54,6 +54,8 @@ from personalos.domain.workflow import JOB_SEARCH_THREAD_NAMESPACE, SUPERVISOR_T
 from personalos.graphs.supervisor import SupervisorGraph
 from personalos.models.routing import KeywordIntentClassifier
 from personalos.persistence.models import Base, CheckpointModel
+from personalos.secrets.api_token import FileApiTokenStore, LocalApiToken
+from tests.fixtures.auth import bearer, install_test_auth
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -94,7 +96,7 @@ def api_process(db_path: Path) -> TestClient:
     factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     app = create_app()
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
-    return TestClient(app)
+    return TestClient(install_test_auth(app), headers=bearer())
 
 
 class _JobState(TypedDict, total=False):
@@ -216,9 +218,7 @@ def parked_at_approval(db_path: Path, **headers: str) -> tuple[str, Worker]:
 def test_chat_starts_a_workflow_and_hands_it_to_the_worker(db_path):
     """The request returns at once with ids; the run itself is only queued."""
     client = api_process(db_path)
-    response = client.post(
-        "/v1/chat", json={"message": JOB_MESSAGE}, headers={"X-Actor-Id": "user:alice"}
-    )
+    response = client.post("/v1/chat", json={"message": JOB_MESSAGE}, headers=bearer("user:alice"))
 
     assert response.status_code == 202, response.text
     body = response.json()
@@ -292,14 +292,20 @@ def test_chat_continuing_a_conversation_parked_on_approval_is_a_409(db_path):
 # --- GET /v1/workflows/{id} -----------------------------------------------------
 
 
-def test_status_survives_an_api_process_restart(db_path):
+def test_status_survives_an_api_process_restart(db_path, _isolated_api_token):
     """Acceptance: start in one process, let it exit, read the status from another.
 
     The starting process runs the real wiring (`DATABASE_URL`, default
-    dependency); it is gone by the time this process asks, so the answer can
-    only have come from the database.
+    dependency, the local API token from `API_TOKEN_FILE`); it is gone by the
+    time this process asks, so the answer can only have come from the database.
     """
-    env = {**os.environ, "DATABASE_URL": f"sqlite:///{db_path}"}
+    token, _ = LocalApiToken(FileApiTokenStore(_isolated_api_token)).load_or_create()
+    env = {
+        **os.environ,
+        "DATABASE_URL": f"sqlite:///{db_path}",
+        "API_TOKEN_FILE": str(_isolated_api_token),
+        "API_ACTOR": "user:alice",
+    }
     result = subprocess.run(
         [
             sys.executable,
@@ -308,7 +314,7 @@ def test_status_survives_an_api_process_restart(db_path):
             "POST",
             "/v1/chat",
             json.dumps({"message": JOB_MESSAGE}),
-            "X-Actor-Id=user:alice",
+            f"Authorization=Bearer {token.reveal()}",
         ],
         cwd=REPO_ROOT,
         env=env,
@@ -408,7 +414,7 @@ def test_resume_queues_the_decision_and_the_worker_finishes_the_run(db_path):
     workflow_id, worker = parked_at_approval(db_path)
     client = api_process(db_path)
 
-    response = approve(client, workflow_id, **{"X-Actor-Id": "user:reviewer"})
+    response = approve(client, workflow_id, **bearer("user:reviewer"))
 
     assert response.status_code == 202, response.text
     body = response.json()
@@ -540,7 +546,7 @@ def test_actor_and_correlation_id_reach_the_workers_checkpoints(db_path, session
     correlation_id = "6f1e7b3a-0000-4000-8000-0000000000cc"
     started = start(
         api_process(db_path),
-        **{"X-Actor-Id": "user:alice", "X-Correlation-Id": correlation_id},
+        **{**bearer("user:alice"), "X-Correlation-Id": correlation_id},
     )
     assert started["correlation_id"] == correlation_id
     assert Worker(db_path).run_next(UUID(started["workflow_id"]))
