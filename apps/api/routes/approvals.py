@@ -25,6 +25,7 @@ authenticated actor (`apps.api.auth.current_actor`), never a field of the body.
 
 import logging
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
@@ -65,6 +66,10 @@ class PendingApprovalItem(BaseModel):
     summary: str
     #: Recipient, subject, body diff, attachments, reply or new thread.
     preview: ActionPreview | None = None
+    #: The action's typed payload, exactly as hashed into `action_hash`: a
+    #: calendar write's event details, or any action's full arguments. Omitted
+    #: when the stored payload does not reproduce the hash.
+    payload: dict[str, Any] | None = None
     #: What approving it will do, one sentence each.
     consequences: list[str] = Field(default_factory=list)
     risk_level: str
@@ -88,6 +93,7 @@ class PendingApprovalItem(BaseModel):
             target=approval.target,
             summary=approval.summary,
             preview=approval.preview,
+            payload=approval.payload,
             consequences=list(
                 consequences(ActionKind(approval.action_type), approval.target, approval.preview)
             ),

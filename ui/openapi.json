@@ -1,0 +1,6208 @@
+{
+  "components": {
+    "schemas": {
+      "ActionKind": {
+        "description": "The approval-gated actions this subgraph may propose.\n\nA closed set, for the same reason `RouteDomain` is closed: a node cannot\ninvent a new kind of side effect, and the approval node's handling of each\nkind is reviewable code rather than a generic passthrough.",
+        "enum": [
+          "submit_application",
+          "send_recruiter_message",
+          "send_email",
+          "overwrite_document",
+          "create_calendar_event",
+          "update_calendar_event",
+          "cancel_calendar_event"
+        ],
+        "title": "ActionKind",
+        "type": "string"
+      },
+      "ActionLinks": {
+        "additionalProperties": false,
+        "description": "Where to read more about an action: its execution row and its audit trail.",
+        "properties": {
+          "audit_event_ids": {
+            "default": [],
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Audit Event Ids",
+            "type": "array"
+          },
+          "audit_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audit Url"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Id"
+          },
+          "tool_execution_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Execution Status"
+          }
+        },
+        "title": "ActionLinks",
+        "type": "object"
+      },
+      "ActionPreview": {
+        "additionalProperties": false,
+        "description": "What an outward-facing write would look like from the other side.\n\nThe part of an approval payload a reviewer reads: who receives it, under\nwhat subject, how the body differs from what is there now, and what is\nattached.",
+        "properties": {
+          "attachments": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AttachmentPreview"
+            },
+            "title": "Attachments",
+            "type": "array"
+          },
+          "body_diff": {
+            "default": "",
+            "title": "Body Diff",
+            "type": "string"
+          },
+          "in_reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "In Reply To"
+          },
+          "recipient": {
+            "title": "Recipient",
+            "type": "string"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          }
+        },
+        "required": [
+          "recipient"
+        ],
+        "title": "ActionPreview",
+        "type": "object"
+      },
+      "ActionReceipt": {
+        "additionalProperties": false,
+        "description": "What came back from redeeming one approved `ActionIntent`.\n\nThe analogue of `personalos.tools.gateway.ToolResult` at this level: it\nties an outcome back to the action it settles, so a persisted application\ncan record the external reference the submission returned rather than\nassuming one.",
+        "properties": {
+          "action_id": {
+            "format": "uuid",
+            "title": "Action Id",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "external_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Reference"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "action_id",
+          "ok"
+        ],
+        "title": "ActionReceipt",
+        "type": "object"
+      },
+      "ActionStatus": {
+        "description": "Where one action stands, from the outside world's point of view. Wire-visible.",
+        "enum": [
+          "RECOMMENDED",
+          "AWAITING_APPROVAL",
+          "EXECUTED",
+          "DENIED",
+          "FAILED"
+        ],
+        "title": "ActionStatus",
+        "type": "string"
+      },
+      "ApplicationCard": {
+        "additionalProperties": false,
+        "description": "One application as the board shows it.",
+        "properties": {
+          "application_id": {
+            "format": "uuid",
+            "title": "Application Id",
+            "type": "string"
+          },
+          "applied_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Applied At"
+          },
+          "company": {
+            "title": "Company",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "job_posting_id": {
+            "format": "uuid",
+            "title": "Job Posting Id",
+            "type": "string"
+          },
+          "last_activity_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Activity At"
+          },
+          "last_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Event Id"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "resume_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApplicationStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/ApplicationStatus"
+          },
+          "status_updated_at": {
+            "format": "date-time",
+            "title": "Status Updated At",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_id",
+          "user_id",
+          "job_posting_id",
+          "company",
+          "title",
+          "status",
+          "created_at",
+          "status_updated_at"
+        ],
+        "title": "ApplicationCard",
+        "type": "object"
+      },
+      "ApplicationDetailResponse": {
+        "description": "One application in full.",
+        "properties": {
+          "allowed_next_states": {
+            "items": {
+              "$ref": "#/components/schemas/ApplicationStatus"
+            },
+            "title": "Allowed Next States",
+            "type": "array"
+          },
+          "application": {
+            "$ref": "#/components/schemas/ApplicationCard"
+          },
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactSummary"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "fit_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fit Score"
+          },
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/StatusChange"
+            },
+            "title": "History",
+            "type": "array"
+          },
+          "match": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobMatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "match_recorded_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Match Recorded At"
+          },
+          "pending_approvals": {
+            "items": {
+              "$ref": "#/components/schemas/PendingApprovalItem"
+            },
+            "title": "Pending Approvals",
+            "type": "array"
+          },
+          "pending_checkpoints": {
+            "items": {
+              "$ref": "#/components/schemas/PendingCheckpoint"
+            },
+            "title": "Pending Checkpoints",
+            "type": "array"
+          },
+          "recruiter_events": {
+            "items": {
+              "$ref": "#/components/schemas/RecruiterEventSummary"
+            },
+            "title": "Recruiter Events",
+            "type": "array"
+          }
+        },
+        "required": [
+          "application",
+          "allowed_next_states"
+        ],
+        "title": "ApplicationDetailResponse",
+        "type": "object"
+      },
+      "ApplicationStatus": {
+        "description": "Lifecycle of a tracked job application.\n\nOnly the states an application is allowed to occupy; which moves between\nthem are legal is `ALLOWED_APPLICATION_TRANSITIONS` below. Nothing writes\nto `applications.status` directly \u2014 every change goes through\n`validate_application_status_transition`, so an LLM-driven caller can\nrequest a move but never set the column outright.",
+        "enum": [
+          "discovered",
+          "saved",
+          "preparing",
+          "ready_to_apply",
+          "applied",
+          "response",
+          "interviewing",
+          "offer",
+          "accepted",
+          "declined",
+          "rejected",
+          "withdrawn",
+          "skipped",
+          "follow_up_pending",
+          "stalled"
+        ],
+        "title": "ApplicationStatus",
+        "type": "string"
+      },
+      "ApprovalDecisionInput": {
+        "additionalProperties": false,
+        "description": "A reviewer's answer to one `ApprovalRequest` from a pending approval.\n\n`decided_by` is not here on purpose: it is the request's actor.",
+        "properties": {
+          "action_fingerprint": {
+            "minLength": 1,
+            "title": "Action Fingerprint",
+            "type": "string"
+          },
+          "action_id": {
+            "format": "uuid",
+            "title": "Action Id",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "verdict": {
+            "enum": [
+              "approved",
+              "rejected"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action_id",
+          "action_fingerprint",
+          "verdict"
+        ],
+        "title": "ApprovalDecisionInput",
+        "type": "object"
+      },
+      "ApprovalOutcome": {
+        "description": "What a recorded decision was. Wire-visible, and written to the audit trail.",
+        "enum": [
+          "APPROVED",
+          "DENIED_BY_USER",
+          "EXPIRED"
+        ],
+        "title": "ApprovalOutcome",
+        "type": "string"
+      },
+      "ApprovalState": {
+        "description": "Where one approval stands. Wire-visible.",
+        "enum": [
+          "pending",
+          "expired",
+          "approved",
+          "denied"
+        ],
+        "title": "ApprovalState",
+        "type": "string"
+      },
+      "ArtifactSummary": {
+        "additionalProperties": false,
+        "description": "One tailored document linked to the application. The text itself is not here.",
+        "properties": {
+          "artifact_type": {
+            "title": "Artifact Type",
+            "type": "string"
+          },
+          "artifact_version_id": {
+            "format": "uuid",
+            "title": "Artifact Version Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "doc_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doc Id"
+          },
+          "evidence": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "generated_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generated By"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "artifact_version_id",
+          "artifact_type",
+          "version",
+          "created_at"
+        ],
+        "title": "ArtifactSummary",
+        "type": "object"
+      },
+      "AttachmentPreview": {
+        "additionalProperties": false,
+        "description": "One document an action would send, identified by content rather than name.",
+        "properties": {
+          "artifact_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Type"
+          },
+          "artifact_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Version Id"
+          },
+          "evidence_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sha256"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "AttachmentPreview",
+        "type": "object"
+      },
+      "AuditLinks": {
+        "additionalProperties": false,
+        "description": "The rest of the chain an entry belongs to; any of them may not exist (yet).",
+        "properties": {
+          "approval": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LinkedApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policy_decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LinkedPolicyDecision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tool_execution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LinkedToolExecution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "AuditLinks",
+        "type": "object"
+      },
+      "AuditSearchResponse": {
+        "description": "One page of the audit trail, newest first.",
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/AuditTrailEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "AuditSearchResponse",
+        "type": "object"
+      },
+      "AuditStage": {
+        "description": "Where in an action's life an entry sits. Declared in the order they happen.",
+        "enum": [
+          "intent",
+          "policy_decision",
+          "approval",
+          "execution",
+          "event"
+        ],
+        "title": "AuditStage",
+        "type": "string"
+      },
+      "AuditTrailEntry": {
+        "additionalProperties": false,
+        "description": "One step of what happened, with the rows that explain it.",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "action_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action Hash"
+          },
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "audit_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audit Event Id"
+          },
+          "links": {
+            "$ref": "#/components/schemas/AuditLinks"
+          },
+          "policy_decision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Decision"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/AuditStage"
+          },
+          "target_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Ref"
+          },
+          "workflow_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Id"
+          }
+        },
+        "required": [
+          "stage",
+          "at",
+          "actor",
+          "action"
+        ],
+        "title": "AuditTrailEntry",
+        "type": "object"
+      },
+      "AuthMethod": {
+        "description": "How a principal was established. Recorded, never trusted for scoping.",
+        "enum": [
+          "local_token",
+          "stream_ticket",
+          "disabled"
+        ],
+        "title": "AuthMethod",
+        "type": "string"
+      },
+      "BoardColumnView": {
+        "description": "One lifecycle state: this page's cards in it, and how many match in all.",
+        "properties": {
+          "applications": {
+            "items": {
+              "$ref": "#/components/schemas/ApplicationCard"
+            },
+            "title": "Applications",
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ApplicationStatus"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "total"
+        ],
+        "title": "BoardColumnView",
+        "type": "object"
+      },
+      "BoardResponse": {
+        "description": "The board, one column per state, in lifecycle order.",
+        "properties": {
+          "columns": {
+            "items": {
+              "$ref": "#/components/schemas/BoardColumnView"
+            },
+            "title": "Columns",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "columns",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "BoardResponse",
+        "type": "object"
+      },
+      "CandidateProfileInput": {
+        "additionalProperties": false,
+        "description": "What the candidate is looking for, as they state it.",
+        "properties": {
+          "constraints": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Constraints",
+            "type": "array"
+          },
+          "employment_types": {
+            "items": {
+              "$ref": "#/components/schemas/EmploymentType"
+            },
+            "maxItems": 5,
+            "title": "Employment Types",
+            "type": "array"
+          },
+          "excluded_companies": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Excluded Companies",
+            "type": "array"
+          },
+          "keywords": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Keywords",
+            "type": "array"
+          },
+          "max_shortlist": {
+            "default": 5,
+            "maximum": 25.0,
+            "minimum": 1.0,
+            "title": "Max Shortlist",
+            "type": "integer"
+          },
+          "min_score": {
+            "default": 0.5,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Min Score",
+            "type": "number"
+          },
+          "must_have_skills": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Must Have Skills",
+            "type": "array"
+          },
+          "requires_visa_sponsorship": {
+            "default": false,
+            "title": "Requires Visa Sponsorship",
+            "type": "boolean"
+          },
+          "salary_max": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Salary Max"
+          },
+          "salary_min": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Salary Min"
+          },
+          "seniority_levels": {
+            "items": {
+              "$ref": "#/components/schemas/SeniorityLevel"
+            },
+            "maxItems": 6,
+            "title": "Seniority Levels",
+            "type": "array"
+          },
+          "target_locations": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Target Locations",
+            "type": "array"
+          },
+          "target_roles": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Target Roles",
+            "type": "array"
+          },
+          "work_modes": {
+            "items": {
+              "$ref": "#/components/schemas/WorkMode"
+            },
+            "maxItems": 3,
+            "title": "Work Modes",
+            "type": "array"
+          }
+        },
+        "title": "CandidateProfileInput",
+        "type": "object"
+      },
+      "CandidateProfileVersion": {
+        "description": "One stored version of an actor's profile.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/CandidateProfileInput"
+          },
+          "profile_version": {
+            "title": "Profile Version",
+            "type": "integer"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "profile_version",
+          "created_at",
+          "profile"
+        ],
+        "title": "CandidateProfileVersion",
+        "type": "object"
+      },
+      "CandidateProfileVersions": {
+        "description": "Every stored version of an actor's profile, newest first.",
+        "properties": {
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/CandidateProfileVersion"
+            },
+            "title": "Versions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "user_id",
+          "versions"
+        ],
+        "title": "CandidateProfileVersions",
+        "type": "object"
+      },
+      "ChatRequest": {
+        "additionalProperties": false,
+        "description": "Start a conversation, or continue one by naming its thread.",
+        "properties": {
+          "message": {
+            "maxLength": 10000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "ChatRequest",
+        "type": "object"
+      },
+      "ChatResponse": {
+        "description": "What was queued: where to poll, and which thread to continue on.",
+        "properties": {
+          "actor_id": {
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkflowStatus"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "workflow_id": {
+            "format": "uuid",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "thread_id",
+          "command_id",
+          "status",
+          "correlation_id",
+          "actor_id"
+        ],
+        "title": "ChatResponse",
+        "type": "object"
+      },
+      "CheckpointCondition": {
+        "additionalProperties": false,
+        "description": "The condition a pending checkpoint is re-evaluated against, stored as data.\n\nA value rather than a callable, and that is the load-bearing choice. A\nclosure cannot be written to a row, cannot survive the process that built\nit, and -- worse -- would capture the world as it looked when the wait\nstarted, which is precisely the world the wait exists to let change. Storing\nthe *question* instead means whoever picks the checkpoint up days later asks\nit fresh.\n\n`subject_id` is what the condition is about (an application, here);\n`since` bounds it in time, so \"a recruiter response exists\" means one that\narrived after the checkpoint was created rather than the reply from six\nweeks ago that prompted it.",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ConditionKind"
+          },
+          "params": {
+            "additionalProperties": true,
+            "title": "Params",
+            "type": "object"
+          },
+          "since": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since"
+          },
+          "subject_id": {
+            "format": "uuid",
+            "title": "Subject Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "subject_id"
+        ],
+        "title": "CheckpointCondition",
+        "type": "object"
+      },
+      "Commitment": {
+        "additionalProperties": false,
+        "description": "A commitment tied to the message it was read out of.",
+        "properties": {
+          "action": {
+            "maxLength": 500,
+            "title": "Action",
+            "type": "string"
+          },
+          "actor": {
+            "$ref": "#/components/schemas/CommitmentActor"
+          },
+          "condition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Condition"
+          },
+          "confidence": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "due_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Due At"
+          },
+          "source_message_id": {
+            "title": "Source Message Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actor",
+          "action",
+          "confidence",
+          "source_message_id"
+        ],
+        "title": "Commitment",
+        "type": "object"
+      },
+      "CommitmentActor": {
+        "description": "Who a commitment binds.",
+        "enum": [
+          "user",
+          "external_person"
+        ],
+        "title": "CommitmentActor",
+        "type": "string"
+      },
+      "ConditionKind": {
+        "description": "What would make a pending checkpoint unnecessary.\n\nDeliberately phrased as the *resolution* -- the thing whose existence means\n\"never mind\" -- rather than as the reason the checkpoint was created. That\nis the direction the re-evaluation asks in: at trigger time the question is\n\"has the thing we were waiting for happened yet?\", and a `True` answer\ncloses the checkpoint rather than firing it.\n\nA closed set, for the same reason `ActionKind` is closed: an evaluator has\nto know how to answer every kind, and a condition nothing knows how to\nevaluate is a checkpoint that either never fires or always does.",
+        "enum": [
+          "recruiter_response_received",
+          "candidate_reply_sent",
+          "application_closed"
+        ],
+        "title": "ConditionKind",
+        "type": "string"
+      },
+      "ConsentRequest": {
+        "additionalProperties": false,
+        "description": "A consent flow that has begun and waits for Google's redirect.\n\nHolds nothing secret: the PKCE verifier stays in the secret store, filed\nunder `state`, until the redirect comes back.",
+        "properties": {
+          "authorization_url": {
+            "title": "Authorization Url",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "includes_write": {
+            "title": "Includes Write",
+            "type": "boolean"
+          },
+          "redirect_uri": {
+            "title": "Redirect Uri",
+            "type": "string"
+          },
+          "requested_scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Requested Scopes",
+            "type": "array"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_url",
+          "state",
+          "redirect_uri",
+          "requested_scopes",
+          "includes_write",
+          "expires_at"
+        ],
+        "title": "ConsentRequest",
+        "type": "object"
+      },
+      "ConstraintEffect": {
+        "description": "What a failed hard constraint does to the posting's score.",
+        "enum": [
+          "none",
+          "cap",
+          "reject"
+        ],
+        "title": "ConstraintEffect",
+        "type": "string"
+      },
+      "ConstraintResult": {
+        "additionalProperties": false,
+        "description": "The outcome of one hard-constraint check, with the effect it carries.",
+        "properties": {
+          "cap": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cap"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "effect": {
+            "$ref": "#/components/schemas/ConstraintEffect",
+            "default": "none"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ConstraintStatus"
+          }
+        },
+        "required": [
+          "name",
+          "status",
+          "detail"
+        ],
+        "title": "ConstraintResult",
+        "type": "object"
+      },
+      "ConstraintStatus": {
+        "description": "Whether a posting satisfies one of the candidate's hard constraints.",
+        "enum": [
+          "passed",
+          "failed",
+          "unknown"
+        ],
+        "title": "ConstraintStatus",
+        "type": "string"
+      },
+      "Decision": {
+        "description": "Outcome of evaluating an intent against policy.",
+        "enum": [
+          "allow",
+          "deny",
+          "require_approval"
+        ],
+        "title": "Decision",
+        "type": "string"
+      },
+      "DecisionRequest": {
+        "additionalProperties": false,
+        "description": "A reviewer's answer to one approval.",
+        "properties": {
+          "action_hash": {
+            "minLength": 1,
+            "title": "Action Hash",
+            "type": "string"
+          },
+          "approved": {
+            "title": "Approved",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "approved",
+          "action_hash"
+        ],
+        "title": "DecisionRequest",
+        "type": "object"
+      },
+      "DecisionResponse": {
+        "description": "The decision on record -- the same body for the first submission and any repeat.",
+        "properties": {
+          "action_hash": {
+            "title": "Action Hash",
+            "type": "string"
+          },
+          "decided_at": {
+            "format": "date-time",
+            "title": "Decided At",
+            "type": "string"
+          },
+          "decided_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided By"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ApprovalOutcome"
+          },
+          "resumed": {
+            "title": "Resumed",
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ApprovalState"
+          },
+          "workflow_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Id"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "outcome",
+          "action_hash",
+          "decided_at",
+          "resumed"
+        ],
+        "title": "DecisionResponse",
+        "type": "object"
+      },
+      "DismissResponse": {
+        "description": "The failure, closed.",
+        "properties": {
+          "dismissed_at": {
+            "format": "date-time",
+            "title": "Dismissed At",
+            "type": "string"
+          },
+          "dismissed_by": {
+            "title": "Dismissed By",
+            "type": "string"
+          },
+          "failure_id": {
+            "format": "uuid",
+            "title": "Failure Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/FailureStatus"
+          },
+          "workflow_id": {
+            "format": "uuid",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "failure_id",
+          "status",
+          "dismissed_by",
+          "dismissed_at"
+        ],
+        "title": "DismissResponse",
+        "type": "object"
+      },
+      "DocumentKind": {
+        "description": "The formats a resume can be ingested from.",
+        "enum": [
+          "pdf",
+          "docx",
+          "markdown",
+          "text"
+        ],
+        "title": "DocumentKind",
+        "type": "string"
+      },
+      "EmploymentType": {
+        "description": "The kind of engagement a posting offers.",
+        "enum": [
+          "full_time",
+          "part_time",
+          "contract",
+          "internship",
+          "temporary"
+        ],
+        "title": "EmploymentType",
+        "type": "string"
+      },
+      "EventDisposition": {
+        "description": "Why an outbox event stopped being delivered. Wire-visible.",
+        "enum": [
+          "dead_letter",
+          "quarantined"
+        ],
+        "title": "EventDisposition",
+        "type": "string"
+      },
+      "EventFailure": {
+        "additionalProperties": false,
+        "description": "An outbox event the worker gave up delivering, and what may be done about it.\n\nRecoverable by an operator: a retry puts the event back in line with a\nfresh attempt budget, for after the handler -- or, for a quarantined\nevent, whatever produced it -- has been fixed. Delivery is idempotent on\nthe event's `dedupe_key`, so a retry of an event that was in fact applied\napplies nothing twice.",
+        "properties": {
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/RecoveryAction"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "dedupe_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dedupe Key"
+          },
+          "disposition": {
+            "$ref": "#/components/schemas/EventDisposition"
+          },
+          "event_id": {
+            "format": "uuid",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "title": "Event Type",
+            "type": "string"
+          },
+          "failed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed At"
+          },
+          "failure_id": {
+            "format": "uuid",
+            "title": "Failure Id",
+            "type": "string"
+          },
+          "last_error": {
+            "title": "Last Error",
+            "type": "string"
+          },
+          "retryable": {
+            "default": true,
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/components/schemas/FailureStatus",
+            "default": "failed"
+          },
+          "workflow_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Id"
+          }
+        },
+        "required": [
+          "failure_id",
+          "event_id",
+          "event_type",
+          "disposition",
+          "last_error",
+          "attempts"
+        ],
+        "title": "EventFailure",
+        "type": "object"
+      },
+      "EventFailuresResponse": {
+        "description": "Every outbox event the worker gave up delivering, newest first.",
+        "properties": {
+          "failures": {
+            "items": {
+              "$ref": "#/components/schemas/EventFailure"
+            },
+            "title": "Failures",
+            "type": "array"
+          }
+        },
+        "title": "EventFailuresResponse",
+        "type": "object"
+      },
+      "EventRetryResponse": {
+        "description": "A parked event, back in line.",
+        "properties": {
+          "actor_id": {
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "event_type": {
+            "title": "Event Type",
+            "type": "string"
+          },
+          "failure_id": {
+            "format": "uuid",
+            "title": "Failure Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/FailureStatus"
+          },
+          "workflow_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Id"
+          }
+        },
+        "required": [
+          "failure_id",
+          "event_type",
+          "status",
+          "actor_id"
+        ],
+        "title": "EventRetryResponse",
+        "type": "object"
+      },
+      "EvidenceSourceType": {
+        "description": "What kind of candidate material an `evidence_chunks` row was cut from.\n\nDistinguishes resume content from project write-ups so a retrieval query\ncan restrict to one kind of evidence when grounding a generated claim\n(see `personalos.persistence.models.EvidenceChunkModel`).",
+        "enum": [
+          "resume",
+          "project"
+        ],
+        "title": "EvidenceSourceType",
+        "type": "string"
+      },
+      "FailedOperation": {
+        "additionalProperties": false,
+        "description": "A side effect the failed step started, from its `tool_executions` row.",
+        "properties": {
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation_id": {
+            "format": "uuid",
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "receipt": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Receipt"
+          },
+          "recovery": {
+            "$ref": "#/components/schemas/OperationRecovery"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "tool_name": {
+            "title": "Tool Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "tool_name",
+          "idempotency_key",
+          "status",
+          "attempts",
+          "recovery"
+        ],
+        "title": "FailedOperation",
+        "type": "object"
+      },
+      "FailureClass": {
+        "description": "Why a workflow step failed, in terms of how it may be recovered.\n\nWire-visible on `GET /v1/workflows/{id}/failures`. Which of these a user\nmay retry is `personalos.domain.failures`'s rule, not a property of the\nexception: `PersonalOSError.retryable` is about *automatic* retries.",
+        "enum": [
+          "model_transient",
+          "model_semantic",
+          "provider_transient",
+          "provider_permanent",
+          "concurrency",
+          "partial_side_effect",
+          "policy_denial",
+          "human_timeout",
+          "unclassified"
+        ],
+        "title": "FailureClass",
+        "type": "string"
+      },
+      "FailureSelection": {
+        "additionalProperties": false,
+        "description": "Which failure to act on. Optional while the workflow has only one open.",
+        "properties": {
+          "failure_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Id"
+          }
+        },
+        "title": "FailureSelection",
+        "type": "object"
+      },
+      "FailureStatus": {
+        "description": "Where a failure stands. Wire-visible.",
+        "enum": [
+          "failed",
+          "denied",
+          "retry_queued",
+          "dismissed"
+        ],
+        "title": "FailureStatus",
+        "type": "string"
+      },
+      "FollowUpKind": {
+        "description": "Why a follow-up checkpoint was created.",
+        "enum": [
+          "no_response",
+          "awaiting_candidate_reply",
+          "interview_prep"
+        ],
+        "title": "FollowUpKind",
+        "type": "string"
+      },
+      "GapSeverity": {
+        "description": "How much a missing requirement costs the application.",
+        "enum": [
+          "blocking",
+          "major",
+          "minor"
+        ],
+        "title": "GapSeverity",
+        "type": "string"
+      },
+      "GoogleCapability": {
+        "description": "Something PersonalOS may do with a connected Google account. Wire-visible.",
+        "enum": [
+          "gmail.read",
+          "calendar.read",
+          "gmail.compose",
+          "gmail.send",
+          "calendar.write"
+        ],
+        "title": "GoogleCapability",
+        "type": "string"
+      },
+      "GoogleConnectRequest": {
+        "additionalProperties": false,
+        "description": "Which capabilities beyond read-only to ask consent for. Empty is read-only.",
+        "properties": {
+          "enable": {
+            "items": {
+              "$ref": "#/components/schemas/GoogleCapability"
+            },
+            "title": "Enable",
+            "type": "array"
+          }
+        },
+        "title": "GoogleConnectRequest",
+        "type": "object"
+      },
+      "GoogleConnection": {
+        "additionalProperties": false,
+        "description": "One connected Google account, as the CLI and `GET /v1/integrations` show it.",
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/GoogleCapability"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "consent_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consent Expires At"
+          },
+          "credential_ref": {
+            "title": "Credential Ref",
+            "type": "string"
+          },
+          "granted_scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Granted Scopes",
+            "type": "array"
+          },
+          "last_exchanged_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Exchanged At"
+          },
+          "provider": {
+            "default": "google",
+            "title": "Provider",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "account",
+          "credential_ref",
+          "status"
+        ],
+        "title": "GoogleConnection",
+        "type": "object"
+      },
+      "GoogleRevokeRequest": {
+        "additionalProperties": false,
+        "description": "Which account to disconnect; every connected one when absent.",
+        "properties": {
+          "account": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account"
+          }
+        },
+        "title": "GoogleRevokeRequest",
+        "type": "object"
+      },
+      "GoogleRevokeResponse": {
+        "description": "What was disconnected.",
+        "properties": {
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/RevokeResult"
+            },
+            "title": "Results",
+            "type": "array"
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "title": "GoogleRevokeResponse",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "description": "The process is up.",
+        "properties": {
+          "status": {
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "IndexedDocument": {
+        "additionalProperties": false,
+        "description": "A `documents` row and the evidence currently cut from it.",
+        "properties": {
+          "document_id": {
+            "format": "uuid",
+            "title": "Document Id",
+            "type": "string"
+          },
+          "embedding_model": {
+            "title": "Embedding Model",
+            "type": "string"
+          },
+          "embedding_version": {
+            "title": "Embedding Version",
+            "type": "string"
+          },
+          "evidence": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/IndexedEvidence"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "indexed_at": {
+            "format": "date-time",
+            "title": "Indexed At",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DocumentKind"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_id",
+          "user_id",
+          "path",
+          "sha256",
+          "kind",
+          "embedding_model",
+          "embedding_version",
+          "indexed_at"
+        ],
+        "title": "IndexedDocument",
+        "type": "object"
+      },
+      "IndexedEvidence": {
+        "additionalProperties": false,
+        "description": "One active evidence record of an ingested document.",
+        "properties": {
+          "chunk_index": {
+            "title": "Chunk Index",
+            "type": "integer"
+          },
+          "embedding_model": {
+            "title": "Embedding Model",
+            "type": "string"
+          },
+          "embedding_version": {
+            "title": "Embedding Version",
+            "type": "string"
+          },
+          "evidence_id": {
+            "format": "uuid",
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Ref"
+          },
+          "source_type": {
+            "$ref": "#/components/schemas/EvidenceSourceType"
+          }
+        },
+        "required": [
+          "evidence_id",
+          "source_type",
+          "source_ref",
+          "chunk_index",
+          "embedding_model",
+          "embedding_version"
+        ],
+        "title": "IndexedEvidence",
+        "type": "object"
+      },
+      "IngestResumeRequest": {
+        "additionalProperties": false,
+        "description": "Which file to ingest.",
+        "properties": {
+          "path": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "IngestResumeRequest",
+        "type": "object"
+      },
+      "IngestionResult": {
+        "additionalProperties": false,
+        "description": "What one ingest of one document did.",
+        "properties": {
+          "added": {
+            "default": 0,
+            "title": "Added",
+            "type": "integer"
+          },
+          "deleted": {
+            "default": 0,
+            "title": "Deleted",
+            "type": "integer"
+          },
+          "document": {
+            "$ref": "#/components/schemas/IndexedDocument"
+          },
+          "kept": {
+            "default": 0,
+            "title": "Kept",
+            "type": "integer"
+          },
+          "retired": {
+            "default": 0,
+            "title": "Retired",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/IngestionStatus"
+          }
+        },
+        "required": [
+          "status",
+          "document"
+        ],
+        "title": "IngestionResult",
+        "type": "object"
+      },
+      "IngestionStatus": {
+        "description": "What an ingest did to the index.",
+        "enum": [
+          "indexed",
+          "updated",
+          "unchanged"
+        ],
+        "title": "IngestionStatus",
+        "type": "string"
+      },
+      "IntegrationFailuresResponse": {
+        "description": "Every integration that is degraded or down.",
+        "properties": {
+          "integrations": {
+            "items": {
+              "$ref": "#/components/schemas/IntegrationHealth"
+            },
+            "title": "Integrations",
+            "type": "array"
+          }
+        },
+        "title": "IntegrationFailuresResponse",
+        "type": "object"
+      },
+      "IntegrationHealth": {
+        "additionalProperties": false,
+        "description": "One integration's health, as its `integration_health` row records it.\n\nShown on a failure the integration caused, under `GET /v1/integrations`\nand at `GET /v1/failures/integrations`. See `personalos.domain.health`.",
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action"
+          },
+          "consecutive_failures": {
+            "default": 0,
+            "title": "Consecutive Failures",
+            "type": "integer"
+          },
+          "degraded_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Degraded At"
+          },
+          "last_checked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Checked At"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "last_success_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success At"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "reconnect_required": {
+            "default": false,
+            "title": "Reconnect Required",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "workflow_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Id"
+          }
+        },
+        "required": [
+          "provider",
+          "status"
+        ],
+        "title": "IntegrationHealth",
+        "type": "object"
+      },
+      "IntegrationStatus": {
+        "additionalProperties": false,
+        "description": "One integration's connection and health state, for `GET /v1/integrations`.",
+        "properties": {
+          "accounts": {
+            "items": {
+              "$ref": "#/components/schemas/GoogleConnection"
+            },
+            "title": "Accounts",
+            "type": "array"
+          },
+          "action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action"
+          },
+          "connected": {
+            "title": "Connected",
+            "type": "boolean"
+          },
+          "health": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Health"
+          },
+          "health_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Health Reason"
+          },
+          "last_checked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Checked At"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "last_success_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success At"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "reconnect_required": {
+            "default": false,
+            "title": "Reconnect Required",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "provider",
+          "connected"
+        ],
+        "title": "IntegrationStatus",
+        "type": "object"
+      },
+      "IntegrationsResponse": {
+        "description": "Every integration's connection state.",
+        "properties": {
+          "integrations": {
+            "items": {
+              "$ref": "#/components/schemas/IntegrationStatus"
+            },
+            "title": "Integrations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "integrations"
+        ],
+        "title": "IntegrationsResponse",
+        "type": "object"
+      },
+      "JobMatch": {
+        "additionalProperties": false,
+        "description": "The scored, explained verdict on one posting for one candidate.\n\n`components` and `weights` are the arithmetic behind `weighted_score`;\n`constraints` is what may then have lowered it to `score`. The validator\nholds the two together, so a match that claims a high score past a failed\nhard constraint cannot be constructed at all.",
+        "properties": {
+          "components": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Components",
+            "type": "object"
+          },
+          "constraints": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ConstraintResult"
+            },
+            "title": "Constraints",
+            "type": "array"
+          },
+          "dedupe_key": {
+            "title": "Dedupe Key",
+            "type": "string"
+          },
+          "matched_requirements": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/MatchedRequirement"
+            },
+            "title": "Matched Requirements",
+            "type": "array"
+          },
+          "missing_requirements": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/MissingRequirement"
+            },
+            "title": "Missing Requirements",
+            "type": "array"
+          },
+          "reasons": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "recommendation": {
+            "$ref": "#/components/schemas/Recommendation"
+          },
+          "risks": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Risks",
+            "type": "array"
+          },
+          "score": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Score",
+            "type": "number"
+          },
+          "tailoring_suggestions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TailoringSuggestion"
+            },
+            "title": "Tailoring Suggestions",
+            "type": "array"
+          },
+          "ungrounded_claims": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Ungrounded Claims",
+            "type": "array"
+          },
+          "weighted_score": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Weighted Score",
+            "type": "number"
+          },
+          "weights": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Weights",
+            "type": "object"
+          }
+        },
+        "required": [
+          "dedupe_key",
+          "score",
+          "recommendation",
+          "weighted_score"
+        ],
+        "title": "JobMatch",
+        "type": "object"
+      },
+      "LinkedApproval": {
+        "additionalProperties": false,
+        "description": "The `approvals` row an entry belongs to.",
+        "properties": {
+          "action_hash": {
+            "title": "Action Hash",
+            "type": "string"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "decided_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided By"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "requested_at": {
+            "format": "date-time",
+            "title": "Requested At",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "action_hash",
+          "requested_at"
+        ],
+        "title": "LinkedApproval",
+        "type": "object"
+      },
+      "LinkedPolicyDecision": {
+        "additionalProperties": false,
+        "description": "The `policy_decisions` row an entry was decided under.",
+        "properties": {
+          "args_hash": {
+            "title": "Args Hash",
+            "type": "string"
+          },
+          "decided_at": {
+            "format": "date-time",
+            "title": "Decided At",
+            "type": "string"
+          },
+          "decision": {
+            "title": "Decision",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "principal": {
+            "title": "Principal",
+            "type": "string"
+          },
+          "requested_scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Requested Scopes",
+            "type": "array"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "principal",
+          "tool",
+          "args_hash",
+          "decision",
+          "decided_at"
+        ],
+        "title": "LinkedPolicyDecision",
+        "type": "object"
+      },
+      "LinkedToolExecution": {
+        "additionalProperties": false,
+        "description": "The `tool_executions` row an entry belongs to, receipt included.",
+        "properties": {
+          "approval_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Ref"
+          },
+          "approved_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved By"
+          },
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation_id": {
+            "format": "uuid",
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "policy_decision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Decision Id"
+          },
+          "receipt": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Receipt"
+          },
+          "request_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Fingerprint"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "tool_name": {
+            "title": "Tool Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "tool_name",
+          "idempotency_key",
+          "status",
+          "attempts",
+          "created_at"
+        ],
+        "title": "LinkedToolExecution",
+        "type": "object"
+      },
+      "MatchStrength": {
+        "description": "How well a cited piece of evidence supports a requirement.",
+        "enum": [
+          "strong",
+          "partial",
+          "weak"
+        ],
+        "title": "MatchStrength",
+        "type": "string"
+      },
+      "MatchedRequirement": {
+        "additionalProperties": false,
+        "description": "A posting requirement the candidate meets, and the record that proves it.\n\n`evidence_id` is required and non-blank: a match that cites nothing is a\nclaim about the candidate with no source, which is exactly what gap\nanalysis must not produce.",
+        "properties": {
+          "evidence_id": {
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "evidence_type": {
+            "$ref": "#/components/schemas/EvidenceSourceType"
+          },
+          "rationale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rationale"
+          },
+          "requirement": {
+            "title": "Requirement",
+            "type": "string"
+          },
+          "strength": {
+            "$ref": "#/components/schemas/MatchStrength"
+          }
+        },
+        "required": [
+          "requirement",
+          "evidence_id",
+          "evidence_type",
+          "strength"
+        ],
+        "title": "MatchedRequirement",
+        "type": "object"
+      },
+      "MissingRequirement": {
+        "additionalProperties": false,
+        "description": "A posting requirement nothing in the candidate's record supports.",
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "requirement": {
+            "title": "Requirement",
+            "type": "string"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/GapSeverity"
+          }
+        },
+        "required": [
+          "requirement",
+          "severity"
+        ],
+        "title": "MissingRequirement",
+        "type": "object"
+      },
+      "OperationRecovery": {
+        "description": "What a retry does about one side effect of the failed step.",
+        "enum": [
+          "replay_stored_receipt",
+          "reconcile_before_send"
+        ],
+        "title": "OperationRecovery",
+        "type": "string"
+      },
+      "PendingApprovalItem": {
+        "description": "One request a reviewer is being asked to decide.",
+        "properties": {
+          "action_hash": {
+            "title": "Action Hash",
+            "type": "string"
+          },
+          "action_id": {
+            "format": "uuid",
+            "title": "Action Id",
+            "type": "string"
+          },
+          "action_status": {
+            "$ref": "#/components/schemas/ActionStatus"
+          },
+          "action_type": {
+            "title": "Action Type",
+            "type": "string"
+          },
+          "consequences": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Consequences",
+            "type": "array"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "payload": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payload"
+          },
+          "preview": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ActionPreview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requested_at": {
+            "format": "date-time",
+            "title": "Requested At",
+            "type": "string"
+          },
+          "requested_scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Requested Scopes",
+            "type": "array"
+          },
+          "risk_level": {
+            "title": "Risk Level",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ApprovalState"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "workflow_id": {
+            "format": "uuid",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_id",
+          "thread_id",
+          "status",
+          "action_id",
+          "action_status",
+          "action_type",
+          "target",
+          "summary",
+          "risk_level",
+          "action_hash",
+          "requested_at",
+          "expires_at"
+        ],
+        "title": "PendingApprovalItem",
+        "type": "object"
+      },
+      "PendingApprovalView": {
+        "description": "The question a workflow is parked on.",
+        "properties": {
+          "interrupt_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interrupt Id"
+          },
+          "payload": {
+            "title": "Payload"
+          },
+          "step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id"
+        ],
+        "title": "PendingApprovalView",
+        "type": "object"
+      },
+      "PendingApprovalsResponse": {
+        "description": "The approval queue as of the last checkpoint any process wrote.",
+        "properties": {
+          "approvals": {
+            "items": {
+              "$ref": "#/components/schemas/PendingApprovalItem"
+            },
+            "title": "Approvals",
+            "type": "array"
+          }
+        },
+        "title": "PendingApprovalsResponse",
+        "type": "object"
+      },
+      "PendingCheckpoint": {
+        "additionalProperties": false,
+        "description": "One durable, conditional wait, independent of any open process.\n\nImmutable, like every other value crossing a layer here: a sweeper that\ncould mutate the checkpoint it is deciding about could decide against a\ncheckpoint different from the one it then records. Closing one produces a\nnew value (`closed_as`), and the store's guarded `UPDATE` is what makes that\nclose exclusive between two sweepers.\n\nThe three fields that make this survivable are `condition`, `trigger_at`\nand `expires_at`, and they are independent on purpose -- see the module\ndocstring. `thread_id` (with `workflow_id`) is how the checkpoint names the\ngraph path to start when it fires: a *lookup key*, resolved by\n`personalos.persistence.checkpointer.WorkflowThreadRegistry` at trigger\ntime, never a live handle.",
+        "properties": {
+          "application_id": {
+            "format": "uuid",
+            "title": "Application Id",
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "format": "uuid",
+            "title": "Checkpoint Id",
+            "type": "string"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At"
+          },
+          "closed_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed Reason"
+          },
+          "condition": {
+            "$ref": "#/components/schemas/CheckpointCondition"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "dedupe_key": {
+            "title": "Dedupe Key",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/FollowUpKind"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PendingCheckpointStatus",
+            "default": "pending"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "trigger_at": {
+            "format": "date-time",
+            "title": "Trigger At",
+            "type": "string"
+          },
+          "workflow_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Id"
+          }
+        },
+        "required": [
+          "application_id",
+          "kind",
+          "condition",
+          "reason",
+          "thread_id",
+          "trigger_at",
+          "expires_at",
+          "dedupe_key"
+        ],
+        "title": "PendingCheckpoint",
+        "type": "object"
+      },
+      "PendingCheckpointStatus": {
+        "description": "Where a pending checkpoint is in its life.\n\nFour terminal states rather than one, because \"why did this never fire?\" is\nthe question an operator actually asks, and collapsing them into `closed`\nwould throw away the answer.",
+        "enum": [
+          "pending",
+          "resolved",
+          "fired",
+          "expired",
+          "cancelled"
+        ],
+        "title": "PendingCheckpointStatus",
+        "type": "string"
+      },
+      "Recommendation": {
+        "description": "What the run advises doing with one posting.",
+        "enum": [
+          "APPLY",
+          "MAYBE",
+          "SKIP"
+        ],
+        "title": "Recommendation",
+        "type": "string"
+      },
+      "RecoverableFailureView": {
+        "description": "A node failure whose checkpoint is intact, so a resume can retry it.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "message"
+        ],
+        "title": "RecoverableFailureView",
+        "type": "object"
+      },
+      "RecoveryAction": {
+        "description": "What a user is offered for a failure.",
+        "enum": [
+          "retry",
+          "dismiss",
+          "reconnect"
+        ],
+        "title": "RecoveryAction",
+        "type": "string"
+      },
+      "RecruiterEventSummary": {
+        "additionalProperties": false,
+        "description": "One recruiter-side signal recorded against the application.",
+        "properties": {
+          "classification": {
+            "title": "Classification",
+            "type": "string"
+          },
+          "commitments": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/Commitment"
+            },
+            "title": "Commitments",
+            "type": "array"
+          },
+          "communication_event_id": {
+            "format": "uuid",
+            "title": "Communication Event Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "provider_message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Message Id"
+          }
+        },
+        "required": [
+          "communication_event_id",
+          "classification",
+          "occurred_at"
+        ],
+        "title": "RecruiterEventSummary",
+        "type": "object"
+      },
+      "RefusalReason": {
+        "description": "Why an approved-looking action was not executed after all.\n\nA closed set so a refusal is classifiable rather than a string an operator\nhas to read: `HASH_MISMATCH` and `EXPIRED` mean something went wrong\nbetween the request and the resume and want investigating, while\n`DENIED_BY_USER` is the ordinary outcome of a reviewer saying no.",
+        "enum": [
+          "no_approval_request",
+          "not_approved",
+          "denied_by_user",
+          "misdirected_decision",
+          "action_hash_mismatch",
+          "approval_expired"
+        ],
+        "title": "RefusalReason",
+        "type": "string"
+      },
+      "ResumeRequest": {
+        "additionalProperties": false,
+        "description": "The answer to whatever the workflow is waiting on.\n\nExactly one of `decisions` (for an approval) or `event` (for anything else\nan interrupt waits on) must be given.",
+        "properties": {
+          "decisions": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ApprovalDecisionInput"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decisions"
+          },
+          "event": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event"
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id"
+          }
+        },
+        "title": "ResumeRequest",
+        "type": "object"
+      },
+      "ResumeResponse": {
+        "description": "What was queued in answer to the interrupt.",
+        "properties": {
+          "actor_id": {
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkflowStatus"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "workflow_id": {
+            "format": "uuid",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "thread_id",
+          "command_id",
+          "status",
+          "correlation_id",
+          "actor_id"
+        ],
+        "title": "ResumeResponse",
+        "type": "object"
+      },
+      "RetryResponse": {
+        "description": "What was queued, and what the re-run will do about each side effect.",
+        "properties": {
+          "actor_id": {
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "failure_id": {
+            "format": "uuid",
+            "title": "Failure Id",
+            "type": "string"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/FailedOperation"
+            },
+            "title": "Operations",
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/FailureStatus"
+          },
+          "step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "workflow_id": {
+            "format": "uuid",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "failure_id",
+          "thread_id",
+          "command_id",
+          "attempt",
+          "status",
+          "correlation_id",
+          "actor_id"
+        ],
+        "title": "RetryResponse",
+        "type": "object"
+      },
+      "RevokeResult": {
+        "additionalProperties": false,
+        "description": "What disconnecting an account did.",
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "credential_ref": {
+            "title": "Credential Ref",
+            "type": "string"
+          },
+          "provider_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Error"
+          },
+          "revoked_at_provider": {
+            "title": "Revoked At Provider",
+            "type": "boolean"
+          },
+          "secret_deleted": {
+            "title": "Secret Deleted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "account",
+          "credential_ref",
+          "revoked_at_provider",
+          "secret_deleted"
+        ],
+        "title": "RevokeResult",
+        "type": "object"
+      },
+      "SeniorityLevel": {
+        "description": "Career level of a role, in ascending order.\n\nOrdered so \"how far is this posting from what the candidate wants\" is a\nsubtraction (see `rank`) rather than a table of pairs.",
+        "enum": [
+          "intern",
+          "junior",
+          "mid",
+          "senior",
+          "staff",
+          "principal"
+        ],
+        "title": "SeniorityLevel",
+        "type": "string"
+      },
+      "ShortlistItem": {
+        "additionalProperties": false,
+        "description": "One posting a run recommended, and whether anything was done about it.",
+        "properties": {
+          "action_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action Id"
+          },
+          "action_status": {
+            "$ref": "#/components/schemas/ActionStatus"
+          },
+          "company": {
+            "title": "Company",
+            "type": "string"
+          },
+          "dedupe_key": {
+            "title": "Dedupe Key",
+            "type": "string"
+          },
+          "rank": {
+            "title": "Rank",
+            "type": "integer"
+          },
+          "reasons": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "rank",
+          "action_status",
+          "dedupe_key",
+          "title",
+          "company",
+          "score"
+        ],
+        "title": "ShortlistItem",
+        "type": "object"
+      },
+      "StatusChange": {
+        "additionalProperties": false,
+        "description": "One `application.status_changed` event, as history.",
+        "properties": {
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor"
+          },
+          "event_id": {
+            "format": "uuid",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "from_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApplicationStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "to_status": {
+            "$ref": "#/components/schemas/ApplicationStatus"
+          }
+        },
+        "required": [
+          "event_id",
+          "to_status",
+          "occurred_at"
+        ],
+        "title": "StatusChange",
+        "type": "object"
+      },
+      "StepView": {
+        "description": "One graph node, on the thread it belongs to.",
+        "properties": {
+          "step": {
+            "title": "Step",
+            "type": "string"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "step"
+        ],
+        "title": "StepView",
+        "type": "object"
+      },
+      "StreamTicketRequest": {
+        "description": "Which workflow's event stream the ticket opens.",
+        "properties": {
+          "workflow_id": {
+            "format": "uuid",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id"
+        ],
+        "title": "StreamTicketRequest",
+        "type": "object"
+      },
+      "StreamTicketResponse": {
+        "description": "A ticket, when it expires, and the URL to open with it.",
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "stream_url": {
+            "title": "Stream Url",
+            "type": "string"
+          },
+          "ticket": {
+            "title": "Ticket",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticket",
+          "expires_at",
+          "stream_url"
+        ],
+        "title": "StreamTicketResponse",
+        "type": "object"
+      },
+      "TailoringSuggestion": {
+        "additionalProperties": false,
+        "description": "One way to present the candidate's existing record for this posting.\n\n`evidence_id` is optional because some advice is about a gap (\"address the\nmissing Go experience up front\") rather than about a record. When it is\nset it must resolve, like any other citation.",
+        "properties": {
+          "evidence_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Id"
+          },
+          "suggestion": {
+            "title": "Suggestion",
+            "type": "string"
+          }
+        },
+        "required": [
+          "suggestion"
+        ],
+        "title": "TailoringSuggestion",
+        "type": "object"
+      },
+      "ThreadView": {
+        "description": "One thread of the workflow.",
+        "properties": {
+          "checkpoint_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checkpoint Id"
+          },
+          "completed_steps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Completed Steps",
+            "type": "array"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "next_steps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Next Steps",
+            "type": "array"
+          },
+          "run_status": {
+            "title": "Run Status",
+            "type": "string"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "waiting": {
+            "default": false,
+            "title": "Waiting",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "thread_id",
+          "run_status"
+        ],
+        "title": "ThreadView",
+        "type": "object"
+      },
+      "TransitionEffect": {
+        "description": "Something outside this system a manual transition asks to have done.\n\nA closed set, like `ActionKind`, and each member maps onto exactly one of\nthose kinds: a transition cannot invent a side effect the graph has no\nreviewed handling for.",
+        "enum": [
+          "submit_application",
+          "notify_recruiter"
+        ],
+        "title": "TransitionEffect",
+        "type": "string"
+      },
+      "TransitionOutcomeKind": {
+        "description": "What the request did.",
+        "enum": [
+          "applied",
+          "queued"
+        ],
+        "title": "TransitionOutcomeKind",
+        "type": "string"
+      },
+      "TransitionRequest": {
+        "additionalProperties": false,
+        "description": "A status change, and optionally something to do outside the system with it.",
+        "properties": {
+          "effect": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TransitionEffect"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "message": {
+            "anyOf": [
+              {
+                "maxLength": 10000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "recipient": {
+            "anyOf": [
+              {
+                "maxLength": 320,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recipient"
+          },
+          "to": {
+            "$ref": "#/components/schemas/ApplicationStatus"
+          }
+        },
+        "required": [
+          "to"
+        ],
+        "title": "TransitionRequest",
+        "type": "object"
+      },
+      "TransitionResponse": {
+        "description": "The answer to a move: the card as it now stands, and what happened.",
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "application": {
+            "$ref": "#/components/schemas/ApplicationCard"
+          },
+          "command_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command Id"
+          },
+          "effect": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TransitionEffect"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_id": {
+            "format": "uuid",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "from_status": {
+            "$ref": "#/components/schemas/ApplicationStatus"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/TransitionOutcomeKind"
+          },
+          "policy_decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id"
+          },
+          "to_status": {
+            "$ref": "#/components/schemas/ApplicationStatus"
+          },
+          "workflow_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Id"
+          }
+        },
+        "required": [
+          "outcome",
+          "from_status",
+          "to_status",
+          "application",
+          "event_id"
+        ],
+        "title": "TransitionResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "WhoAmIResponse": {
+        "description": "The verified caller.",
+        "properties": {
+          "actor_id": {
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "method": {
+            "$ref": "#/components/schemas/AuthMethod"
+          }
+        },
+        "required": [
+          "actor_id",
+          "method"
+        ],
+        "title": "WhoAmIResponse",
+        "type": "object"
+      },
+      "WorkMode": {
+        "description": "Where the candidate is willing to do the work.",
+        "enum": [
+          "remote",
+          "hybrid",
+          "onsite"
+        ],
+        "title": "WorkMode",
+        "type": "string"
+      },
+      "WorkflowAction": {
+        "additionalProperties": false,
+        "description": "One outward-facing action, labelled with what actually became of it.\n\nThe shape every surface lists an action in. `action_status` is required --\nthere is no default -- so an action object that does not say whether it\nhappened is not a valid one.",
+        "properties": {
+          "action_id": {
+            "format": "uuid",
+            "title": "Action Id",
+            "type": "string"
+          },
+          "action_status": {
+            "$ref": "#/components/schemas/ActionStatus"
+          },
+          "approval_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Expires At"
+          },
+          "approval_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Id"
+          },
+          "approval_state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "consequences": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Consequences",
+            "type": "array"
+          },
+          "decided_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided By"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ActionKind"
+          },
+          "links": {
+            "$ref": "#/components/schemas/ActionLinks"
+          },
+          "preview": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ActionPreview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "proposed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposed At"
+          },
+          "receipt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ActionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "refusal_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RefusalReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "risk_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Risk Level"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id"
+          },
+          "workflow_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Id"
+          }
+        },
+        "required": [
+          "action_id",
+          "action_status",
+          "kind",
+          "target",
+          "summary"
+        ],
+        "title": "WorkflowAction",
+        "type": "object"
+      },
+      "WorkflowAuditResponse": {
+        "description": "One workflow's trail, oldest first.",
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/AuditTrailEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "workflow_id": {
+            "format": "uuid",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id"
+        ],
+        "title": "WorkflowAuditResponse",
+        "type": "object"
+      },
+      "WorkflowFailure": {
+        "additionalProperties": false,
+        "description": "One failed step of a workflow, and what may be done about it.",
+        "properties": {
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/RecoveryAction"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "cause_class": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FailureClass"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dismissed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dismissed At"
+          },
+          "dismissed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dismissed By"
+          },
+          "error_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Type"
+          },
+          "failed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed At"
+          },
+          "failure_class": {
+            "$ref": "#/components/schemas/FailureClass"
+          },
+          "failure_id": {
+            "format": "uuid",
+            "title": "Failure Id",
+            "type": "string"
+          },
+          "integration": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IntegrationHealth"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_error": {
+            "title": "Last Error",
+            "type": "string"
+          },
+          "max_attempts": {
+            "default": 5,
+            "title": "Max Attempts",
+            "type": "integer"
+          },
+          "not_retryable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Not Retryable Reason"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/FailedOperation"
+            },
+            "title": "Operations",
+            "type": "array"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/components/schemas/FailureStatus"
+          },
+          "step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "workflow_id": {
+            "format": "uuid",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "failure_id",
+          "workflow_id",
+          "thread_id",
+          "failure_class",
+          "status",
+          "retryable",
+          "last_error",
+          "attempts"
+        ],
+        "title": "WorkflowFailure",
+        "type": "object"
+      },
+      "WorkflowFailuresResponse": {
+        "description": "A workflow's failed steps.",
+        "properties": {
+          "event_failures": {
+            "items": {
+              "$ref": "#/components/schemas/EventFailure"
+            },
+            "title": "Event Failures",
+            "type": "array"
+          },
+          "failures": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowFailure"
+            },
+            "title": "Failures",
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkflowStatus"
+          },
+          "workflow_id": {
+            "format": "uuid",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "status"
+        ],
+        "title": "WorkflowFailuresResponse",
+        "type": "object"
+      },
+      "WorkflowStatus": {
+        "description": "Where one workflow stands, across all of its threads.\n\nWire-visible: a client matches on these strings.",
+        "enum": [
+          "pending",
+          "queued",
+          "running",
+          "waiting",
+          "failed",
+          "completed"
+        ],
+        "title": "WorkflowStatus",
+        "type": "string"
+      },
+      "WorkflowStatusResponse": {
+        "description": "Where a workflow stands, as of the last row any process wrote.\n\n`actions` is what was suggested and what was done, in one list: each item's\n`action_status` says which. Only `EXECUTED` means something happened\noutside this system, and every `EXECUTED` item carries its receipt and its\naudit links. `pending_approval` is the raw interrupt, kept for the resume\nendpoint; read the `AWAITING_APPROVAL` actions for what it asks.",
+        "properties": {
+          "action_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/ActionStatus"
+            },
+            "title": "Action Counts",
+            "type": "object"
+          },
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowAction"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "actor_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor Id"
+          },
+          "audit_url": {
+            "title": "Audit Url",
+            "type": "string"
+          },
+          "completed_steps": {
+            "items": {
+              "$ref": "#/components/schemas/StepView"
+            },
+            "title": "Completed Steps",
+            "type": "array"
+          },
+          "correlation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correlation Id"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "current_step": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StepView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "pending_approval": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PendingApprovalView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plan": {
+            "items": {
+              "$ref": "#/components/schemas/StepView"
+            },
+            "title": "Plan",
+            "type": "array"
+          },
+          "queued_commands": {
+            "default": 0,
+            "title": "Queued Commands",
+            "type": "integer"
+          },
+          "recoverable_failures": {
+            "items": {
+              "$ref": "#/components/schemas/RecoverableFailureView"
+            },
+            "title": "Recoverable Failures",
+            "type": "array"
+          },
+          "shortlist": {
+            "items": {
+              "$ref": "#/components/schemas/ShortlistItem"
+            },
+            "title": "Shortlist",
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkflowStatus"
+          },
+          "threads": {
+            "items": {
+              "$ref": "#/components/schemas/ThreadView"
+            },
+            "title": "Threads",
+            "type": "array"
+          },
+          "workflow_id": {
+            "format": "uuid",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "status",
+          "audit_url"
+        ],
+        "title": "WorkflowStatusResponse",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "description": "The local API token: `python -m personalos.cli auth token`.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "PersonalOS - Local-first agentic assistant",
+    "title": "PersonalOS",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/health": {
+      "get": {
+        "description": "Liveness: 200 while the API process can serve a request.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/v1/applications": {
+      "get": {
+        "description": "The board: applications grouped by lifecycle state, a page at a time.\n\n`state` may be repeated to show several columns. Pages run through the\nboard in column order, most recently active first within a column.",
+        "operationId": "list_applications_v1_applications_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/components/schemas/ApplicationStatus"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          },
+          {
+            "in": "query",
+            "name": "company",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Company"
+            }
+          },
+          {
+            "in": "query",
+            "name": "created_from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Created From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "created_to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Created To"
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "User Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoardResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Applications",
+        "tags": [
+          "applications"
+        ]
+      }
+    },
+    "/v1/applications/{application_id}": {
+      "get": {
+        "description": "One application: fit, evidence, documents, recruiter events and open waits.",
+        "operationId": "get_application_v1_applications__application_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "application_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Application Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Application",
+        "tags": [
+          "applications"
+        ]
+      }
+    },
+    "/v1/applications/{application_id}/transition": {
+      "post": {
+        "description": "Move an application to another lifecycle state.\n\nAn illegal move is a 422 whose body lists `allowed_next_states`. A move\nwith no `effect` is applied at once (200). A move with an `effect` is\nput to the policy engine -- a denial is a 403 -- and otherwise queued for\napproval (202); a second one while the first is still in flight is a 409.",
+        "operationId": "transition_application_v1_applications__application_id__transition_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "application_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Application Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransitionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransitionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Transition Application",
+        "tags": [
+          "applications"
+        ]
+      }
+    },
+    "/v1/approvals": {
+      "get": {
+        "description": "Every approval still owed an answer, oldest first; expired ones are marked.",
+        "operationId": "list_approvals_v1_approvals_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingApprovalsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Approvals",
+        "tags": [
+          "approvals"
+        ]
+      }
+    },
+    "/v1/approvals/{approval_id}/decision": {
+      "post": {
+        "description": "Approve or reject one pending approval.\n\nApproving resumes the workflow through the worker; rejecting records\n`DENIED_BY_USER` and resumes it down its declined branch. A mismatched\n`action_hash`, approving an expired approval, and reversing a recorded\ndecision are each a 409. Repeating a recorded decision returns it\nunchanged and resumes nothing a second time.",
+        "operationId": "decide_approval_v1_approvals__approval_id__decision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "approval_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Approval Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Decide Approval",
+        "tags": [
+          "approvals"
+        ]
+      }
+    },
+    "/v1/audit": {
+      "get": {
+        "description": "Audit events matching every filter given, newest first.\n\n`application_id` matches the workflows run on that application's own\nthread -- the board moves made on it. `since` and `until` are inclusive.",
+        "operationId": "search_audit_v1_audit_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "workflow_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workflow Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "application_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Application Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "actor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Actor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Action"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since"
+            }
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Until"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditSearchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Search Audit",
+        "tags": [
+          "audit"
+        ]
+      }
+    },
+    "/v1/auth/stream-tickets": {
+      "post": {
+        "description": "A short-lived ticket for one workflow's event stream.",
+        "operationId": "create_stream_ticket_v1_auth_stream_tickets_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StreamTicketRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamTicketResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Stream Ticket",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/whoami": {
+      "get": {
+        "description": "The actor this caller's credential verified as.",
+        "operationId": "whoami_v1_auth_whoami_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmIResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Whoami",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/chat": {
+      "post": {
+        "description": "Start a Supervisor conversation, or continue one, by queuing a run of it.\n\nContinuing a conversation whose workflow is parked on an approval is a\n409: a new message would start the thread over and strand the question it\nis waiting on. Answer it through the resume endpoint first.",
+        "operationId": "chat_v1_chat_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Chat",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/v1/evidence/documents": {
+      "post": {
+        "description": "Ingest the resume at `path` as the actor's evidence.",
+        "operationId": "ingest_resume_v1_evidence_documents_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestResumeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Ingest Resume",
+        "tags": [
+          "evidence"
+        ]
+      }
+    },
+    "/v1/failures/events": {
+      "get": {
+        "description": "Every dead-lettered or quarantined event, with its last error, newest first.",
+        "operationId": "list_event_failures_v1_failures_events_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventFailuresResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Event Failures",
+        "tags": [
+          "failures"
+        ]
+      }
+    },
+    "/v1/failures/events/{failure_id}/retry": {
+      "post": {
+        "description": "Put a dead-lettered or quarantined event back in line, with a fresh attempt budget.\n\nA 404 when there is no such event, and a 409 when it is not parked --\npending, being delivered, or delivered.",
+        "operationId": "retry_event_failure_v1_failures_events__failure_id__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "failure_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Failure Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventRetryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Retry Event Failure",
+        "tags": [
+          "failures"
+        ]
+      }
+    },
+    "/v1/failures/integrations": {
+      "get": {
+        "description": "Every degraded or down integration, with its reason and what fixes it.",
+        "operationId": "list_integration_failures_v1_failures_integrations_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationFailuresResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Integration Failures",
+        "tags": [
+          "failures"
+        ]
+      }
+    },
+    "/v1/integrations": {
+      "get": {
+        "description": "Every integration's connection and health state. Never includes token material.",
+        "operationId": "list_integrations_v1_integrations_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Integrations",
+        "tags": [
+          "integrations"
+        ]
+      }
+    },
+    "/v1/integrations/google/callback": {
+      "get": {
+        "description": "Google's redirect: finish the consent and store the refresh token.",
+        "operationId": "google_oauth_callback_v1_integrations_google_callback_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          },
+          {
+            "in": "query",
+            "name": "code",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code"
+            }
+          },
+          {
+            "in": "query",
+            "name": "error",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleConnection"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Google Oauth Callback",
+        "tags": [
+          "integrations"
+        ]
+      }
+    },
+    "/v1/integrations/google/connect": {
+      "post": {
+        "description": "Begin Google consent; open the returned `authorization_url` in a browser.",
+        "operationId": "begin_google_connect_v1_integrations_google_connect_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/GoogleConnectRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentRequest"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Begin Google Connect",
+        "tags": [
+          "integrations"
+        ]
+      }
+    },
+    "/v1/integrations/google/revoke": {
+      "post": {
+        "description": "Revoke at Google and delete the keychain entry.",
+        "operationId": "revoke_google_v1_integrations_google_revoke_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/GoogleRevokeRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleRevokeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Revoke Google",
+        "tags": [
+          "integrations"
+        ]
+      }
+    },
+    "/v1/profile": {
+      "get": {
+        "description": "The actor's latest profile version -- the one a job search loads.",
+        "operationId": "get_profile_v1_profile_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CandidateProfileVersion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Profile",
+        "tags": [
+          "profiles"
+        ]
+      },
+      "post": {
+        "description": "Write the first version of the actor's profile.",
+        "operationId": "create_profile_v1_profile_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CandidateProfileInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CandidateProfileVersion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Profile",
+        "tags": [
+          "profiles"
+        ]
+      },
+      "put": {
+        "description": "Write the next version of the actor's profile; earlier versions stay as they were.",
+        "operationId": "update_profile_v1_profile_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CandidateProfileInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CandidateProfileVersion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Profile",
+        "tags": [
+          "profiles"
+        ]
+      }
+    },
+    "/v1/profile/versions": {
+      "get": {
+        "description": "Every version of the actor's profile, newest first.",
+        "operationId": "list_profile_versions_v1_profile_versions_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CandidateProfileVersions"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Profile Versions",
+        "tags": [
+          "profiles"
+        ]
+      }
+    },
+    "/v1/profile/versions/{profile_version}": {
+      "get": {
+        "description": "One numbered version of the actor's profile.",
+        "operationId": "get_profile_version_v1_profile_versions__profile_version__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_version",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Profile Version",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CandidateProfileVersion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Profile Version",
+        "tags": [
+          "profiles"
+        ]
+      }
+    },
+    "/v1/workflows/{workflow_id}": {
+      "get": {
+        "description": "Plan, completed steps, labelled actions, pending approval, failures, audit link.",
+        "operationId": "get_workflow_v1_workflows__workflow_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Workflow",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/v1/workflows/{workflow_id}/audit": {
+      "get": {
+        "description": "Everything recorded for one workflow, in the order it happened.",
+        "operationId": "get_workflow_audit_v1_workflows__workflow_id__audit_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowAuditResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Workflow Audit",
+        "tags": [
+          "audit"
+        ]
+      }
+    },
+    "/v1/workflows/{workflow_id}/dismiss": {
+      "post": {
+        "description": "Acknowledge a failure and close it, without retrying it.\n\nNothing is re-run and nothing is undone: the step stays failed, and the\ndismissal is an audit event naming who closed it. A 409 for a failure\nalready dismissed, or one with a retry queued -- let the retry finish.",
+        "operationId": "dismiss_failure_v1_workflows__workflow_id__dismiss_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/FailureSelection"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DismissResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Dismiss Failure",
+        "tags": [
+          "failures"
+        ]
+      }
+    },
+    "/v1/workflows/{workflow_id}/events": {
+      "get": {
+        "description": "Stream the workflow's progress events, resuming after `Last-Event-ID` if given.\n\nThe header wins over `?last_event_id=` when both are sent: it is what a\nreconnecting `EventSource` sets, and it is the newer of the two.",
+        "operationId": "stream_workflow_events_v1_workflows__workflow_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "follow",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Follow",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "last_event_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last Event Id"
+            }
+          },
+          {
+            "description": "A stream ticket from `POST /v1/auth/stream-tickets`, for `EventSource`.",
+            "in": "query",
+            "name": "ticket",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A stream ticket from `POST /v1/auth/stream-tickets`, for `EventSource`.",
+              "title": "Ticket"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Stream Workflow Events",
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/v1/workflows/{workflow_id}/failures": {
+      "get": {
+        "description": "Every failed step, with its class, whether it can be retried, and why not.",
+        "operationId": "list_failures_v1_workflows__workflow_id__failures_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_dismissed",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Dismissed",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowFailuresResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Failures",
+        "tags": [
+          "failures"
+        ]
+      }
+    },
+    "/v1/workflows/{workflow_id}/resume": {
+      "post": {
+        "description": "Queue the answer to the interrupt a workflow is parked on.\n\nA workflow that is not parked on anything -- still queued, running,\nfinished, or already answered and waiting for the worker -- is a 409\nnaming its actual status, never a silently accepted no-op. So is an answer\nracing another answer to the same interrupt: the queue refuses the second.",
+        "operationId": "resume_workflow_v1_workflows__workflow_id__resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResumeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResumeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Resume Workflow",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/v1/workflows/{workflow_id}/retry": {
+      "post": {
+        "description": "Queue a re-run of a failed step, from the checkpoint before it.\n\nA 409 when the failure is not retryable -- a policy denial, a provider\nthat needs reconnecting, a step out of attempts, one already dismissed or\nalready being retried -- naming the reason.",
+        "operationId": "retry_failure_v1_workflows__workflow_id__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/FailureSelection"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Retry Failure",
+        "tags": [
+          "failures"
+        ]
+      }
+    }
+  }
+}

@@ -1115,6 +1115,11 @@ class ApprovalRequest(_Value):
     #: Recipient, subject, body diff and attachments, as of the same moment
     #: `action_hash` was taken.
     preview: ActionPreview | None = None
+    #: The intent's typed payload, exactly as hashed into `action_hash`: what
+    #: a reviewer reads for an action `preview` does not describe (a calendar
+    #: write's event details, say). `None` on requests raised before it was
+    #: recorded; `payload_matches_hash` says whether it can be shown.
+    payload: dict[str, Any] | None = None
 
     @field_validator("expires_at")
     @classmethod
@@ -1156,11 +1161,27 @@ class ApprovalRequest(_Value):
             requested_at=raised_at,
             expires_at=raised_at + (ttl or profile.approval_ttl),
             preview=ActionPreview.for_intent(intent),
+            payload=dict(intent.payload),
         )
 
     def is_expired(self, now: datetime) -> bool:
         """True once this request may no longer be answered."""
         return now >= self.expires_at
+
+    def payload_matches_hash(self) -> bool:
+        """True when `payload` is the one `action_hash` was taken over.
+
+        The check a surface makes before showing the payload: a reviewer must
+        never read one action's details and approve another's hash.
+        """
+        if self.payload is None:
+            return False
+        return (
+            _canonical_hash(
+                {"kind": self.kind.value, "target": self.target, "payload": self.payload}
+            )
+            == self.action_hash
+        )
 
     def describes(self, intent: ActionIntent) -> bool:
         """True when this request was raised for that intent, whatever it now says."""

@@ -163,12 +163,16 @@ class Worker:
 
 
 def park(
-    db_path: Path, *companies: str, requested_at: datetime | None = None
+    db_path: Path,
+    *companies: str,
+    requested_at: datetime | None = None,
+    payload_override: dict[str, Any] | None = None,
 ) -> tuple[Worker, str, str, list[ApprovalRequest]]:
     """Run a job-search thread to its approval, with one request per company.
 
     Returns the worker, the workflow id, the thread id and the requests the
-    thread is parked on.
+    thread is parked on. `payload_override` replaces each request's recorded
+    payload without touching its hash, as a tampered checkpoint would.
     """
     worker = Worker(db_path)
     intents = [fakes.submit_intent(fakes.posting(company=company)) for company in companies]
@@ -176,6 +180,8 @@ def park(
         ApprovalRequest.for_intent(intent, now=requested_at or datetime.utcnow())
         for intent in intents
     ]
+    if payload_override is not None:
+        requests = [r.model_copy(update={"payload": payload_override}) for r in requests]
     workflow_id = worker.registry.create_workflow(JOB_SEARCH_WORKFLOW)
     thread = register_job_search_thread(
         user_id=USER_ID,
@@ -255,6 +261,28 @@ def test_list_reports_what_a_reviewer_needs_to_decide(db_path):
     assert item["requested_scopes"] == list(request.requested_scopes)
     assert item["action_hash"] == request.action_hash
     assert datetime.fromisoformat(item["expires_at"]) == request.expires_at
+
+
+def test_list_carries_the_typed_payload_the_hash_covers(db_path):
+    _, _, _, [request] = park(db_path, "Acme")
+
+    [item] = api_process(db_path).get("/v1/approvals").json()["approvals"]
+
+    assert request.payload
+    assert item["payload"] == request.payload
+    assert request.payload_matches_hash()
+
+
+def test_a_payload_that_does_not_reproduce_the_hash_is_withheld(db_path):
+    _, _, _, [request] = park(db_path, "Acme", payload_override={"url": "https://evil.example"})
+
+    [item] = api_process(db_path).get("/v1/approvals").json()["approvals"]
+
+    # The request is still listed -- and decidable -- under its own hash, but a
+    # payload that is not the hashed one is never shown beside it.
+    assert item["id"] == str(request.request_id)
+    assert item["action_hash"] == request.action_hash
+    assert item["payload"] is None
 
 
 def test_list_spans_workflows_and_drops_what_has_been_decided(db_path):

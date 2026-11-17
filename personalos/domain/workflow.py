@@ -573,6 +573,9 @@ class PendingApproval(BaseModel):
     state: ApprovalState = ApprovalState.PENDING
     #: What the action would look like from the other side, as of the hash.
     preview: ActionPreview | None = None
+    #: The action's typed payload, present only when it is verifiably the one
+    #: `action_hash` covers (`ApprovalRequest.payload_matches_hash`).
+    payload: dict[str, Any] | None = None
 
 
 class RecordedApprovalDecision(BaseModel):
