@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import { App } from "../src/App";
-import { API, TOKEN, emailApproval, fakeApi, json } from "./fixtures";
+import { API, TOKEN, applicationCard, board, emailApproval, fakeApi, json } from "./fixtures";
 
 const unauthenticated = () =>
   json({ error_code: "unauthenticated", message: "not authenticated", context_id: "c" }, 401);
@@ -53,5 +53,25 @@ describe("token handling", () => {
     expect(screen.getByLabelText("API token")).toBeVisible();
     expect(api.requests.map((r) => r.url)).toEqual(["/v1/auth/whoami", "/v1/approvals"]);
     await waitFor(() => expect(window.sessionStorage.getItem("personalos.api-token")).toBeNull());
+  });
+});
+
+describe("navigation", () => {
+  it("switches between the approvals inbox and the board", async () => {
+    window.sessionStorage.setItem("personalos.api-token", TOKEN);
+    window.location.hash = "";
+    const api = fakeApi({
+      "GET /v1/auth/whoami": () => json({ actor_id: "local", method: "local_token" }),
+      "GET /v1/approvals": () => json({ approvals: [] }),
+      "GET /v1/applications": () => json(board([applicationCard()])),
+    });
+    render(<App apiBaseUrl={API} fetch={api.fetch} />);
+
+    expect(await screen.findByRole("heading", { name: "Approvals inbox" })).toBeVisible();
+    await userEvent.click(screen.getByRole("link", { name: "Applications" }));
+    expect(await screen.findByRole("heading", { name: "Applications" })).toBeVisible();
+    expect(await screen.findByTestId("board-card")).toHaveTextContent("Acme");
+    expect(screen.getByRole("link", { name: "Applications" })).toHaveAttribute("aria-current", "page");
+    window.location.hash = "";
   });
 });

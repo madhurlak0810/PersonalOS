@@ -28,7 +28,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import case, func
+from sqlalchemy import String, case, cast, func
 from sqlalchemy.orm import Session
 
 from personalos.domain.applications import (
@@ -68,8 +68,10 @@ from personalos.persistence.pending_checkpoints import PendingCheckpointStore
 from personalos.persistence.repositories import EventLogRepository
 
 #: An application's status as the board reads it: the projection, or the
-#: column it was created with until the projection has a row for it.
-_STATUS = func.coalesce(ApplicationStatusViewModel.status, ApplicationModel.status)
+#: column it was created with until the projection has a row for it. The
+#: column is a PostgreSQL enum and the projection a VARCHAR, which COALESCE will
+#: not mix, so the column is read as text.
+_STATUS = func.coalesce(ApplicationStatusViewModel.status, cast(ApplicationModel.status, String))
 
 #: Column position, so a page runs through the board left to right.
 _COLUMN_RANK = case(

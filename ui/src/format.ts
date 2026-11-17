@@ -1,5 +1,5 @@
 /** Display helpers. Pure, so the components stay about layout. */
-import type { ActionStatus, PendingApproval } from "./api/client";
+import type { ActionStatus, ApplicationStatus, PendingApproval } from "./api/client";
 
 /**
  * Parse an API timestamp. The API writes UTC times without an offset
@@ -72,3 +72,37 @@ export const STATUS_DESCRIPTIONS: Record<ActionStatus, string> = {
   DENIED: "Denied — nothing was done",
   FAILED: "Failed — did not happen",
 };
+
+const APPLICATION_STATUS_LABELS: Record<ApplicationStatus, string> = {
+  discovered: "Discovered",
+  saved: "Saved",
+  preparing: "Preparing",
+  ready_to_apply: "Ready to apply",
+  applied: "Applied",
+  response: "Response",
+  interviewing: "Interviewing",
+  offer: "Offer",
+  accepted: "Accepted",
+  declined: "Declined",
+  rejected: "Rejected",
+  withdrawn: "Withdrawn",
+  skipped: "Skipped",
+  follow_up_pending: "Follow-up pending",
+  stalled: "Stalled",
+};
+
+/** "Ready to apply" for `ready_to_apply`; the raw value for anything unknown. */
+export function applicationStatusLabel(status: string): string {
+  return APPLICATION_STATUS_LABELS[status as ApplicationStatus] ?? status;
+}
+
+/** A 0..1 score as a whole percentage. */
+export function formatScore(score: number): string {
+  return `${Math.round(score * 100)}%`;
+}
+
+/** A `<input type="date">` value as the API's naive-UTC timestamp at that day's start or end. */
+export function dateInputToApi(value: string, edge: "start" | "end"): string | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
+  return edge === "start" ? `${value}T00:00:00` : `${value}T23:59:59.999999`;
+}

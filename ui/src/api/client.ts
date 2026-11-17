@@ -22,6 +22,96 @@ export type AttachmentPreview = components["schemas"]["AttachmentPreview"];
 export type ApprovalState = components["schemas"]["ApprovalState"];
 export type DecisionResponse = components["schemas"]["DecisionResponse"];
 export type WhoAmI = components["schemas"]["WhoAmIResponse"];
+export type ApplicationStatus = components["schemas"]["ApplicationStatus"];
+export type ApplicationCard = components["schemas"]["ApplicationCard"];
+export type BoardResponse = components["schemas"]["BoardResponse"];
+export type BoardColumn = components["schemas"]["BoardColumnView"];
+export type ApplicationDetail = components["schemas"]["ApplicationDetailResponse"];
+export type TransitionEffect = components["schemas"]["TransitionEffect"];
+export type TransitionRequest = components["schemas"]["TransitionRequest"];
+export type TransitionResponse = components["schemas"]["TransitionResponse"];
+export type MatchedRequirement = components["schemas"]["MatchedRequirement"];
+export type MissingRequirement = components["schemas"]["MissingRequirement"];
+export type ArtifactSummary = components["schemas"]["ArtifactSummary"];
+export type RecruiterEventSummary = components["schemas"]["RecruiterEventSummary"];
+export type PendingCheckpoint = components["schemas"]["PendingCheckpoint"];
+
+/**
+ * Every `ApplicationStatus`, in the order the API declares them: lifecycle
+ * order, holding states last. This is also the board's column order.
+ */
+export const APPLICATION_STATUSES: readonly ApplicationStatus[] = [
+  "discovered",
+  "saved",
+  "preparing",
+  "ready_to_apply",
+  "applied",
+  "response",
+  "interviewing",
+  "offer",
+  "accepted",
+  "declined",
+  "rejected",
+  "withdrawn",
+  "skipped",
+  "follow_up_pending",
+  "stalled",
+];
+
+/**
+ * The statuses a move may carry an external effect to
+ * (`personalos.domain.applications.EFFECT_TARGETS`). A move to one of these is
+ * never sent without the user choosing, explicitly, whether the effect should
+ * happen (through the approval flow) or the move only records what already did.
+ */
+export const EFFECT_TARGETS: Readonly<Record<TransitionEffect, readonly ApplicationStatus[]>> = {
+  submit_application: ["applied"],
+  notify_recruiter: ["withdrawn", "declined", "accepted"],
+};
+
+export function effectFor(status: ApplicationStatus): TransitionEffect | null {
+  for (const [effect, targets] of Object.entries(EFFECT_TARGETS) as [
+    TransitionEffect,
+    readonly ApplicationStatus[],
+  ][]) {
+    if (targets.includes(status)) return effect;
+  }
+  return null;
+}
+
+/** `GET /v1/applications` filters. Dates are API timestamps (UTC, no offset). */
+export interface BoardQuery {
+  states?: ApplicationStatus[];
+  company?: string;
+  createdFrom?: string;
+  createdTo?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** The kinds `GET /v1/workflows/{id}/events` streams (`ProgressEventType`). */
+export type ProgressEventType =
+  | "step_started"
+  | "step_completed"
+  | "approval_requested"
+  | "approval_resolved"
+  | "failure"
+  | "workflow_completed";
+
+/**
+ * One progress event (`personalos.domain.progress.WorkflowProgressEvent`).
+ * The stream is `text/event-stream`, so OpenAPI has no schema for its frames;
+ * this mirrors the Python model by hand.
+ */
+export interface WorkflowProgressEvent {
+  event_id: string;
+  type: ProgressEventType;
+  workflow_id: string;
+  correlation_id?: string | null;
+  thread_id?: string | null;
+  at: string;
+  data: Record<string, unknown>;
+}
 
 /** Every `ActionStatus`, in the order the API's enum declares them. */
 export const ACTION_STATUSES: readonly ActionStatus[] = [
@@ -37,6 +127,8 @@ export interface ErrorEnvelope {
   error_code: string;
   message: string;
   context_id: string;
+  /** On a refused application move (422): the states it may move to instead. */
+  allowed_next_states?: ApplicationStatus[];
 }
 
 export class ApiError extends Error {
@@ -64,6 +156,15 @@ export class ApiError extends Error {
 
   get isNotFound(): boolean {
     return this.status === 404;
+  }
+
+  /**
+   * The states the API said an application may move to, when it refused a
+   * move off the lifecycle. `null` when the error was something else.
+   */
+  get allowedNextStates(): ApplicationStatus[] | null {
+    const states = this.envelope?.allowed_next_states;
+    return this.status === 422 && Array.isArray(states) ? states : null;
   }
 }
 
@@ -153,6 +254,74 @@ export function createApiClient({ baseUrl, token, fetch: fetchImpl }: ApiClientO
       );
       if (data === undefined) throw toApiError(response, error);
       return data;
+    },
+
+    /** The board: one column per lifecycle state, a page at a time. */
+    async listApplications(query: BoardQuery = {}): Promise<BoardResponse> {
+      const { data, error, response } = await client.GET("/v1/applications", {
+        params: {
+          query: {
+            state: query.states?.length ? query.states : undefined,
+            company: query.company || undefined,
+            created_from: query.createdFrom || undefined,
+            created_to: query.createdTo || undefined,
+            limit: query.limit,
+            offset: query.offset,
+          },
+        },
+      });
+      if (data === undefined) throw toApiError(response, error);
+      return data;
+    },
+
+    /** One application in full: fit, evidence, documents, recruiter events, open waits. */
+    async getApplication(applicationId: string): Promise<ApplicationDetail> {
+      const { data, error, response } = await client.GET("/v1/applications/{application_id}", {
+        params: { path: { application_id: applicationId } },
+      });
+      if (data === undefined) throw toApiError(response, error);
+      return data;
+    },
+
+    /**
+     * Ask for a lifecycle move. Resolves on 200 (`outcome: "applied"`, the card
+     * as it now stands) and 202 (`outcome: "queued"`: the effect waits for
+     * approval and the status has not changed). A move off the lifecycle is an
+     * `ApiError` with `allowedNextStates`; nothing here retries.
+     */
+    async transition(applicationId: string, body: TransitionRequest): Promise<TransitionResponse> {
+      const { data, error, response } = await client.POST(
+        "/v1/applications/{application_id}/transition",
+        { params: { path: { application_id: applicationId } }, body },
+      );
+      if (data === undefined) throw toApiError(response, error);
+      return data;
+    },
+
+    /**
+     * Open a workflow's progress stream, resuming after `lastEventId`.
+     *
+     * Sent with `fetch`, not `EventSource`, so the bearer token travels in its
+     * header (never in a URL) and `Last-Event-ID` is set by us, exactly. With
+     * `follow: false` the API sends the backlog and closes: one poll.
+     * The caller reads, and cancels, the returned body.
+     */
+    async openWorkflowEvents(
+      workflowId: string,
+      { lastEventId, follow }: { lastEventId: string | null; follow: boolean },
+    ): Promise<ReadableStream<Uint8Array>> {
+      const { data, error, response } = await client.GET("/v1/workflows/{workflow_id}/events", {
+        params: {
+          path: { workflow_id: workflowId },
+          query: { follow },
+          header: lastEventId ? { "Last-Event-ID": lastEventId } : undefined,
+        },
+        headers: { Accept: "text/event-stream" },
+        parseAs: "stream",
+      });
+      if (!response.ok) throw toApiError(response, error);
+      if (!data) throw new NetworkError(new Error("the event stream had no body"));
+      return data as ReadableStream<Uint8Array>;
     },
   };
 }
