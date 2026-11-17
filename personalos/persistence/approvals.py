@@ -35,6 +35,7 @@ import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
@@ -525,7 +526,26 @@ def _pending(item: _OpenRequest, now: datetime) -> PendingApproval:
         expires_at=request.expires_at,
         state=ApprovalState.EXPIRED if request.is_expired(now) else ApprovalState.PENDING,
         preview=request.preview,
+        payload=_verified_payload(request),
     )
+
+
+def _verified_payload(request: ApprovalRequest) -> dict[str, Any] | None:
+    """The request's payload if it reproduces the request's hash; otherwise none.
+
+    A payload that does not hash to `action_hash` is not the action being
+    approved, so it is withheld rather than shown beside that hash.
+    """
+    if request.payload is None:
+        return None
+    if not request.payload_matches_hash():
+        logger.warning(
+            "approval %s carries a payload that does not reproduce its action_hash; "
+            "it is not listed",
+            request.request_id,
+        )
+        return None
+    return request.payload
 
 
 def _outcome(row: ApprovalModel) -> ApprovalOutcome:

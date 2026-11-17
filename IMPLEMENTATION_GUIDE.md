@@ -207,6 +207,31 @@ That is the end of the walkthrough. To start over, drop the database
 the same database stops at an `IdempotencyConflict` instead, because the
 submission's idempotency key is derived from the posting.
 
+### Optional: review it in the browser
+
+Steps 9 and 10 can be done from the approvals inbox in `ui/` instead of with
+`curl`. It needs Node.js 20.19 or newer. With the API and worker from step 7
+still running and the workflow parked at step 9:
+
+```bash
+cd ui
+npm ci
+npm run dev                         # serves on http://localhost:5173
+```
+
+Open http://localhost:5173 and paste the token from
+`python -m personalos.cli auth token`. The inbox lists the pending
+`submit_application` approval labelled `AWAITING_APPROVAL`, with its target,
+risk level, requested scopes, expiry, the documents it would send and the
+action's full payload. **Approve** sends the `action_hash` the approval was
+listed with; if the action changed or expired since the page loaded, the API
+answers `409` and the UI asks you to refresh and review it again rather than
+resubmitting.
+
+The API's CORS allow-list (`API_CORS_ORIGINS`) admits `http://localhost:5173`
+by default. To point the UI at another API, set `VITE_API_BASE_URL` (see
+`ui/.env.example`) and add the UI's origin to `API_CORS_ORIGINS`.
+
 ### The same thing in one command
 
 ```bash
@@ -460,6 +485,11 @@ PersonalOS/
 │       ├── health_monitor.py      # scheduled integration health checks, circuit breakers
 │       └── unconfigured.py        # stand-ins for ports with no adapter yet
 │
+├── ui/                            # operator UI: Vite + React + TypeScript (npm run dev)
+│   ├── openapi.json               # the API schema, written by scripts/export_openapi.py
+│   ├── src/                       # approvals inbox; src/api/schema.d.ts is generated from openapi.json
+│   └── tests/                     # Vitest + Testing Library component tests
+│
 ├── mcp_servers/
 │   ├── files/                     # sandboxed read_file / write_file
 │   └── google/                    # Gmail and Calendar tools, in-process or over stdio
@@ -479,6 +509,7 @@ PersonalOS/
 ├── scripts/
 │   ├── check_boundaries.py        # layer import check (CI)
 │   ├── check_guide_tree.py        # this tree against the repository (CI)
+│   ├── export_openapi.py          # ui/openapi.json from the FastAPI app (--check in CI)
 │   └── smoke_quickstart.py        # the quick start, end to end (CI)
 │
 └── tests/
@@ -1500,8 +1531,16 @@ pytest tests                              # everything; Postgres-backed tests ne
 pytest tests/adversarial                  # the security boundary on its own
 python -m evals.harness                   # golden-set quality gate on the rules config
 python scripts/smoke_quickstart.py        # the quick start, end to end (needs a fresh database)
+python scripts/export_openapi.py --check  # ui/openapi.json against the API
 ruff check personalos apps mcp_servers tests scripts
+(cd ui && npm ci && npm run typecheck && npm test && npm run build)   # the UI
 ```
+
+The UI's typed client is generated, in two steps, from the API itself:
+`scripts/export_openapi.py` writes `ui/openapi.json` from `create_app()`, and
+`npm run api:generate` (in `ui/`) turns it into `ui/src/api/schema.d.ts`.
+After changing a route or a response model, run both and commit the results;
+CI fails if either file is stale.
 
 | Suite | What it pins down |
 | --- | --- |
@@ -1511,6 +1550,7 @@ ruff check personalos apps mcp_servers tests scripts
 | `tests/graph_scenarios` | Whole-graph runs: approval interrupts, durable resume, recovery, idempotent mutations, tracing |
 | `tests/adversarial` | Prompt injection in postings, approval tampering, path traversal, permission escalation, hostile tool payloads |
 | `tests/migrations` | `alembic upgrade head` and downgrade against PostgreSQL |
+| `ui/tests` | The approvals inbox: the intent diff, decisions bound to `action_hash`, 409 handling without resubmission, inert rendering of untrusted text, token handling |
 
 CI (`.github/workflows/ci.yml`) runs on pull requests and on `main`. It runs
 the boundary and guide-tree checks first, then the quick-start smoke test on a
@@ -1577,7 +1617,7 @@ These fill in the ports the worker reports as unbound at startup.
 
 | # | Issue | Done when |
 | --- | --- | --- |
-| M1 | Approvals inbox | A web view lists pending approvals with the intent diff, and approve and reject call the API |
+| M1 | Approvals inbox | Done (`ui/`; see [Review it in the browser](#optional-review-it-in-the-browser)). Lists pending approvals with the intent diff; approve and reject call the API with the listed `action_hash` |
 | M2 | Application board and workflow progress | A kanban of applications, with live progress from the SSE stream |
 | M3 | Audit and failure views | An audit trail per workflow, with retry controls for recoverable failures |
 
@@ -1605,8 +1645,6 @@ them:
 
 ### Open questions
 
-- Is the web UI (Phase M) in scope, or are the CLI and API the intended
-  interface?
 - Is a second event transport (N4) still wanted, or can it be closed?
 
 ---
