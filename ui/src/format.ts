@@ -1,5 +1,11 @@
 /** Display helpers. Pure, so the components stay about layout. */
-import type { ActionStatus, ApplicationStatus, PendingApproval } from "./api/client";
+import type {
+  ActionStatus,
+  ApplicationStatus,
+  FailureClass,
+  FailureStatus,
+  PendingApproval,
+} from "./api/client";
 
 /**
  * Parse an API timestamp. The API writes UTC times without an offset
@@ -105,4 +111,46 @@ export function formatScore(score: number): string {
 export function dateInputToApi(value: string, edge: "start" | "end"): string | undefined {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
   return edge === "start" ? `${value}T00:00:00` : `${value}T23:59:59.999999`;
+}
+
+const FAILURE_CLASS_LABELS: Record<FailureClass, string> = {
+  model_transient: "Model unavailable (transient)",
+  model_semantic: "Model output did not meet its contract",
+  provider_transient: "Provider unavailable (transient)",
+  provider_permanent: "Provider refused permanently",
+  concurrency: "Conflict with another writer",
+  partial_side_effect: "Failed after a side effect",
+  policy_denial: "Denied by policy",
+  human_timeout: "No answer in time",
+  unclassified: "Unclassified",
+};
+
+/** "Provider refused permanently" for `provider_permanent`; the raw value for anything unknown. */
+export function failureClassLabel(value: string): string {
+  return FAILURE_CLASS_LABELS[value as FailureClass] ?? value;
+}
+
+/**
+ * A failure's status as shown. A policy denial is `denied`, never "failed":
+ * it is an answer, and nothing about it can be retried.
+ */
+export const FAILURE_STATUS_TEXT: Record<FailureStatus, { label: string; detail: string }> = {
+  failed: { label: "FAILED", detail: "The step did not complete" },
+  denied: { label: "DENIED", detail: "Policy refused this action — nothing was done" },
+  retry_queued: { label: "RETRY QUEUED", detail: "Waiting for the worker to re-run the step" },
+  dismissed: { label: "DISMISSED", detail: "Closed without a retry" },
+};
+
+export const AUDIT_STEP_LABELS: Record<string, string> = {
+  intent: "Intent",
+  policy_decision: "Policy decision",
+  approval: "Approval",
+  execution: "Execution",
+  receipt: "Receipt",
+  event: "Event",
+};
+
+/** A policy verdict as the policy engine names it: `REQUIRE_APPROVAL`. */
+export function policyDecisionLabel(value: string): string {
+  return value.toUpperCase();
 }

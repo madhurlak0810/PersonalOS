@@ -171,6 +171,36 @@ h4 { margin: 0.9rem 0 0.35rem; font-size: 0.9rem; }
 .progress-failure { color: var(--failed); }
 .progress-approval_requested { color: var(--awaiting); }
 
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.75rem 1rem; margin: 1rem 0; }
+.panel-header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.panel-header h2, .panel-header h3 { margin: 0; font-size: 1rem; }
+.panel .card { background: var(--bg); }
+
+.audit-chain { margin-top: 0.75rem; }
+.audit-steps { margin: 0.25rem 0 0; padding-left: 1.4rem; display: grid; gap: 0.5rem; }
+.audit-step { border-left: 3px solid var(--border); padding: 0.25rem 0 0.25rem 0.6rem; }
+.audit-step-header { display: flex; gap: 0.6rem; align-items: baseline; flex-wrap: wrap; }
+.audit-policy_decision { border-left-color: var(--awaiting); }
+.audit-approval { border-left-color: var(--recommended); }
+.audit-execution, .audit-receipt { border-left-color: var(--executed); }
+.audit-result { font-size: 0.75rem; border: 1px solid currentColor; border-radius: 999px; padding: 0 0.4rem; }
+.audit-result-success { color: var(--executed); }
+.audit-result-failure { color: var(--failed); }
+.receipt pre { border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem; background: var(--bg); }
+.receipt { margin: 0.25rem 0 0; }
+
+.failure-denied { border-color: var(--border); }
+.failure-failed { border-color: var(--error-border); }
+.error-text { border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem; background: var(--surface); }
+.operations, .event-failures, .accounts { margin: 0; padding-left: 1.1rem; }
+
+.health { font-size: 0.8rem; border: 1px solid currentColor; border-radius: 999px; padding: 0 0.5rem; }
+.health-healthy { color: var(--executed); }
+.health-degraded { color: var(--awaiting); }
+.health-down { color: var(--failed); }
+.health-unknown { color: var(--muted); }
+.integrations { margin-top: 0.75rem; }
+
 @media (max-width: 560px) {
   .fields { grid-template-columns: 1fr; }
   .fields dt { margin-top: 0.4rem; }

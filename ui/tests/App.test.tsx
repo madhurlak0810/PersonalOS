@@ -3,7 +3,19 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import { App } from "../src/App";
-import { API, TOKEN, applicationCard, board, emailApproval, fakeApi, json } from "./fixtures";
+import {
+  API,
+  FAILED_WORKFLOW_ID,
+  TOKEN,
+  applicationCard,
+  approvedSendTrail,
+  board,
+  emailApproval,
+  failures,
+  fakeApi,
+  json,
+  policyDenial,
+} from "./fixtures";
 
 const unauthenticated = () =>
   json({ error_code: "unauthenticated", message: "not authenticated", context_id: "c" }, 401);
@@ -72,6 +84,43 @@ describe("navigation", () => {
     expect(await screen.findByRole("heading", { name: "Applications" })).toBeVisible();
     expect(await screen.findByTestId("board-card")).toHaveTextContent("Acme");
     expect(screen.getByRole("link", { name: "Applications" })).toHaveAttribute("aria-current", "page");
+    window.location.hash = "";
+  });
+});
+
+describe("a workflow's page", () => {
+  it("shows its failures and audit trail under its progress", async () => {
+    window.sessionStorage.setItem("personalos.api-token", TOKEN);
+    window.location.hash = `#/workflows/${FAILED_WORKFLOW_ID}`;
+    const api = fakeApi({
+      "GET /v1/auth/whoami": () => json({ actor_id: "local", method: "local_token" }),
+      [`GET /v1/workflows/${FAILED_WORKFLOW_ID}/failures`]: () => json(failures([policyDenial()])),
+      [`GET /v1/workflows/${FAILED_WORKFLOW_ID}/audit`]: () =>
+        json({ workflow_id: FAILED_WORKFLOW_ID, entries: approvedSendTrail() }),
+    });
+    render(<App apiBaseUrl={API} fetch={api.fetch} />);
+
+    expect(await screen.findByTestId("failure")).toHaveAttribute("data-status", "denied");
+    expect(await screen.findByTestId("audit-chain")).toBeVisible();
+    expect(screen.getByRole("region", { name: "Workflow progress" })).toBeVisible();
+    window.location.hash = "";
+  });
+
+  it("links to the audit search and integration health", async () => {
+    window.sessionStorage.setItem("personalos.api-token", TOKEN);
+    window.location.hash = "";
+    const api = fakeApi({
+      "GET /v1/auth/whoami": () => json({ actor_id: "local", method: "local_token" }),
+      "GET /v1/approvals": () => json({ approvals: [] }),
+      "GET /v1/audit": () => json({ entries: [], total: 0, limit: 50, offset: 0, next_offset: null }),
+      "GET /v1/integrations": () => json({ integrations: [] }),
+    });
+    render(<App apiBaseUrl={API} fetch={api.fetch} />);
+
+    await userEvent.click(await screen.findByRole("link", { name: "Audit" }));
+    expect(await screen.findByText("No audit events match.")).toBeVisible();
+    await userEvent.click(screen.getByRole("link", { name: "Integrations" }));
+    expect(await screen.findByText("No integrations reported.")).toBeVisible();
     window.location.hash = "";
   });
 });

@@ -5,6 +5,11 @@
 import { vi } from "vitest";
 
 import type {
+  AuditTrailEntry,
+  IntegrationStatus,
+  RetryResponse,
+  WorkflowFailure,
+  WorkflowFailuresResponse,
   ApplicationCard,
   ApplicationDetail,
   ApplicationStatus,
@@ -360,4 +365,202 @@ export function sseStream() {
       open = false;
     },
   };
+}
+
+// --- Audit trail ----------------------------------------------------------------
+
+export const AUDIT_WORKFLOW_ID = "0f000000-0000-4000-8000-0000000000a1";
+const ACTION_HASH = "f".repeat(64);
+const DECISION_ID = "0d000000-0000-4000-8000-0000000000d1";
+const APPROVAL_ID = "0d000000-0000-4000-8000-0000000000a1";
+const OPERATION_ID = "0d000000-0000-4000-8000-0000000000e1";
+
+/**
+ * A completed workflow with one approved send, as `GET /v1/workflows/{id}/audit`
+ * returns it (compare `tests/unit/test_audit_routes.py`): intent, the
+ * REQUIRE_APPROVAL verdict, the approval, the executor's own re-check, and the
+ * execution carrying the provider's receipt.
+ */
+export function approvedSendTrail(receipt: Record<string, unknown> = {}): AuditTrailEntry[] {
+  const decision = {
+    id: DECISION_ID,
+    principal: "local",
+    tool: "google.gmail_send_message",
+    args_hash: ACTION_HASH,
+    decision: "require_approval",
+    requested_scopes: ["gmail.send"],
+    decided_at: "2026-11-17T10:00:00",
+  };
+  const approval = {
+    id: APPROVAL_ID,
+    status: "approved",
+    action_hash: ACTION_HASH,
+    decided_by: "local",
+    requested_at: "2026-11-17T10:00:00",
+    decided_at: "2026-11-17T10:01:00",
+  };
+  const execution = {
+    operation_id: OPERATION_ID,
+    tool_name: "google.gmail_send_message",
+    idempotency_key: "send-1",
+    status: "completed",
+    request_fingerprint: ACTION_HASH,
+    policy_decision_id: DECISION_ID,
+    approval_ref: APPROVAL_ID,
+    approved_by: "local",
+    attempts: 1,
+    receipt: { ok: true, external_reference: "gmail-1", ...receipt },
+    created_at: "2026-11-17T10:02:00",
+    completed_at: "2026-11-17T10:02:01",
+  };
+  const links = { policy_decision: decision, approval, tool_execution: execution };
+  const base = {
+    action_hash: ACTION_HASH,
+    workflow_id: AUDIT_WORKFLOW_ID,
+    links,
+  };
+  return [
+    { ...base, stage: "intent", at: "2026-11-17T10:00:00", actor: "local", action: "google.gmail_send_message", target_ref: "recruiter@acme.example" },
+    { ...base, stage: "policy_decision", at: "2026-11-17T10:00:00", actor: "local", action: "google.gmail_send_message", policy_decision: "require_approval" },
+    { ...base, stage: "approval", at: "2026-11-17T10:01:00", actor: "local", action: "approval.APPROVED", result: "success", policy_decision: "require_approval", audit_event_id: "0a0d0000-0000-4000-8000-000000000001" },
+    { ...base, stage: "policy_decision", at: "2026-11-17T10:02:00", actor: "local", action: "google.gmail_send_message", policy_decision: "allow" },
+    { ...base, stage: "execution", at: "2026-11-17T10:02:01", actor: "local", action: "google.gmail_send_message", result: "success", policy_decision: "require_approval", audit_event_id: "0a0d0000-0000-4000-8000-000000000002" },
+  ];
+}
+
+// --- Failures -------------------------------------------------------------------
+
+export const FAILED_WORKFLOW_ID = "0f000000-0000-4000-8000-0000000000f1";
+
+export function failure(overrides: Partial<WorkflowFailure> = {}): WorkflowFailure {
+  return {
+    failure_id: "0fa10000-0000-4000-8000-000000000001",
+    workflow_id: FAILED_WORKFLOW_ID,
+    thread_id: "job_search:abc",
+    step: "fetch_postings",
+    failure_class: "provider_transient",
+    status: "failed",
+    retryable: true,
+    actions: ["retry", "dismiss"],
+    last_error: "Greenhouse timed out after 30s",
+    error_type: "ToolFailure",
+    attempts: 1,
+    max_attempts: 5,
+    operations: [],
+    failed_at: "2026-11-17T09:00:00",
+    ...overrides,
+  };
+}
+
+export function policyDenial(overrides: Partial<WorkflowFailure> = {}): WorkflowFailure {
+  return failure({
+    failure_id: "0fa10000-0000-4000-8000-0000000000d1",
+    step: "send_reply",
+    failure_class: "policy_denial",
+    status: "denied",
+    retryable: false,
+    not_retryable_reason: "policy denied this action; asking again gets the same answer",
+    actions: ["dismiss"],
+    last_error: "send_email to an unverified recipient is denied",
+    ...overrides,
+  });
+}
+
+export function revokedOAuth(overrides: Partial<WorkflowFailure> = {}): WorkflowFailure {
+  return failure({
+    failure_id: "0fa10000-0000-4000-8000-0000000000e1",
+    step: "send_reply",
+    failure_class: "provider_permanent",
+    retryable: false,
+    not_retryable_reason: "google rejected the request permanently; reconnect it instead of retrying",
+    actions: ["reconnect", "dismiss"],
+    last_error: "invalid_grant: Token has been expired or revoked.",
+    integration: {
+      provider: "google",
+      status: "degraded",
+      reason: "the refresh token was revoked",
+      reconnect_required: true,
+      action: "reconnect",
+      consecutive_failures: 1,
+    },
+    ...overrides,
+  });
+}
+
+export function failures(
+  items: WorkflowFailure[],
+  overrides: Partial<WorkflowFailuresResponse> = {},
+): WorkflowFailuresResponse {
+  return {
+    workflow_id: FAILED_WORKFLOW_ID,
+    status: "failed",
+    failures: items,
+    event_failures: [],
+    ...overrides,
+  };
+}
+
+export function retried(item: WorkflowFailure): RetryResponse {
+  return {
+    workflow_id: item.workflow_id,
+    failure_id: item.failure_id,
+    thread_id: item.thread_id,
+    step: item.step,
+    command_id: "0c000000-0000-4000-8000-0000000000c1",
+    attempt: item.attempts + 1,
+    status: "retry_queued",
+    operations: [],
+    correlation_id: "0c000000-0000-4000-8000-0000000000c2",
+    actor_id: "local",
+  };
+}
+
+// --- Integrations ---------------------------------------------------------------
+
+export function integrations(): IntegrationStatus[] {
+  return [
+    {
+      provider: "google",
+      connected: true,
+      reconnect_required: false,
+      accounts: [
+        {
+          provider: "google",
+          account: "me@example.com",
+          status: "active",
+          credential_ref: "cred://personalos/google/me@example.com",
+          capabilities: ["gmail.read"],
+          granted_scopes: [],
+        },
+      ],
+    },
+    {
+      provider: "gmail",
+      connected: true,
+      reconnect_required: true,
+      health: "degraded",
+      health_reason: "the refresh token was revoked",
+      action: "reconnect",
+      last_error: "invalid_grant: Token has been expired or revoked.",
+      last_success_at: "2026-11-16T08:00:00",
+      last_checked_at: "2026-11-17T09:00:00",
+    },
+    {
+      provider: "greenhouse",
+      connected: true,
+      reconnect_required: false,
+      health: "down",
+      health_reason: "timed out",
+      action: "retry",
+      last_checked_at: "2026-11-17T09:00:00",
+    },
+    {
+      provider: "ollama",
+      connected: true,
+      reconnect_required: false,
+      health: "healthy",
+      last_success_at: "2026-11-17T09:00:00",
+      last_checked_at: "2026-11-17T09:00:00",
+    },
+  ];
 }

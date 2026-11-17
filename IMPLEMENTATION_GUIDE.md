@@ -487,7 +487,7 @@ PersonalOS/
 │
 ├── ui/                            # operator UI: Vite + React + TypeScript (npm run dev)
 │   ├── openapi.json               # the API schema, written by scripts/export_openapi.py
-│   ├── src/                       # approvals inbox, application board, workflow progress; src/api/schema.d.ts is generated
+│   ├── src/                       # approvals, board, workflow progress, failures, audit; src/api/schema.d.ts is generated
 │   └── tests/                     # Vitest + Testing Library component tests
 │
 ├── mcp_servers/
@@ -1550,7 +1550,7 @@ CI fails if either file is stale.
 | `tests/graph_scenarios` | Whole-graph runs: approval interrupts, durable resume, recovery, idempotent mutations, tracing |
 | `tests/adversarial` | Prompt injection in postings, approval tampering, path traversal, permission escalation, hostile tool payloads |
 | `tests/migrations` | `alembic upgrade head` and downgrade against PostgreSQL |
-| `ui/tests` | The approvals inbox: the intent diff, decisions bound to `action_hash`, 409 handling without resubmission, inert rendering of untrusted text, token handling. The application board: refused moves show the allowed states and leave the card in place, effectful moves go through approval. Workflow progress: live step events, `Last-Event-ID` resumption without duplicates, the polling fallback, the approval prompt |
+| `ui/tests` | The approvals inbox: the intent diff, decisions bound to `action_hash`, 409 handling without resubmission, inert rendering of untrusted text, token handling. The application board: refused moves show the allowed states and leave the card in place, effectful moves go through approval. Workflow progress: live step events, `Last-Event-ID` resumption without duplicates, the polling fallback, the approval prompt. Audit and failures: the approved-send chain in order, no retry on a policy denial, a reconnect prompt for provider-permanent failures, one retry call updating the card, unredacted credentials withheld |
 
 CI (`.github/workflows/ci.yml`) runs on pull requests and on `main`. It runs
 the boundary and guide-tree checks first, then the quick-start smoke test on a
@@ -1619,7 +1619,7 @@ These fill in the ports the worker reports as unbound at startup.
 | --- | --- | --- |
 | M1 | Approvals inbox | Done (`ui/`; see [Review it in the browser](#optional-review-it-in-the-browser)). Lists pending approvals with the intent diff; approve and reject call the API with the listed `action_hash` |
 | M2 | Application board and workflow progress | Done (`ui/`, `#/board`). A kanban of `GET /v1/applications` with filters and pages, an application detail view, moves through `POST .../transition` (effectful ones only via approval), and live progress from the SSE stream with `Last-Event-ID` resumption and a polling fallback |
-| M3 | Audit and failure views | An audit trail per workflow, with retry controls for recoverable failures |
+| M3 | Audit and failure views | Done (`ui/`, `#/workflows/{id}`, `#/audit`, `#/integrations`). The per-workflow audit chain and `GET /v1/audit` search with filters and pages, failures with Retry and Dismiss (denials shown as denied with no retry, a reconnect prompt for provider-permanent ones), integration health, and a client-side guard that withholds any unredacted credential |
 
 ### Phase N: Packaging and operations
 
