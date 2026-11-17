@@ -1,8 +1,15 @@
 # PersonalOS UI
 
-The operator UI: Vite, React and TypeScript. Its first screen is the approvals inbox
-(Phase M1), which lists `GET /v1/approvals` and records decisions through
-`POST /v1/approvals/{id}/decision`.
+The operator UI: Vite, React and TypeScript. Three screens, routed by the URL hash:
+
+- `#/approvals` (the default): the approvals inbox (Phase M1), which lists
+  `GET /v1/approvals` and records decisions through `POST /v1/approvals/{id}/decision`.
+- `#/board`: the application board (Phase M2), a kanban of `GET /v1/applications`
+  with state, company and date filters and pages. `#/applications/{id}` is one
+  application (`GET /v1/applications/{id}`): fit score, matched and missing
+  requirements with their evidence, documents, recruiter events, open waits and
+  pending approvals.
+- `#/workflows/{id}`: a workflow's live progress from `GET /v1/workflows/{id}/events`.
 
 ```bash
 npm ci
@@ -44,3 +51,32 @@ through `openapi-fetch` in `src/api/client.ts`.
 - **Untrusted text is inert.** Email bodies, summaries and payloads render only as React
   text nodes. `tests/no-html-sinks.test.ts` fails the build if any source file uses an
   HTML-parsing API.
+
+## Rules the board keeps
+
+- **A move is the API's to allow.** Cards move by drag and drop or the "Move to" menu,
+  both through `POST /v1/applications/{id}/transition`. A refused move (422) shows the
+  API's message and the `allowed_next_states` it returned, and the card stays put.
+- **An applied move shows at once.** The card is placed from the `application` the
+  API returned, without re-reading the board.
+- **Nothing outside PersonalOS happens silently.** A move to `applied`, `withdrawn`,
+  `declined` or `accepted` could carry an effect (submitting, telling the recruiter).
+  It is not sent until the user picks, explicitly, between having PersonalOS do it,
+  which is queued for approval (202) and leaves the card where it is, or recording
+  only what already happened. The queued answer links to the approvals inbox and
+  the run's progress.
+
+## Following a workflow
+
+`src/progress/feed.ts` reads the event stream with `fetch`, not `EventSource`, so the
+bearer token travels in its header and `Last-Event-ID` is set exactly:
+
+- every reconnect resumes after the last event delivered, and events are also
+  de-duplicated by id, so nothing is missed or shown twice;
+- a dropped stream is reopened after the server's `retry:` delay; after three drops
+  in a row with nothing new, it polls `?follow=false` with the same cursor instead,
+  and tries a live stream again every so often;
+- 401, 404 and 422 (a cursor the API does not know) stop the feed and say so.
+
+An `approval_requested` event shows a prompt linking to the approvals inbox until
+the matching `approval_resolved` arrives.

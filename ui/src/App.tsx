@@ -2,8 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ApiError, NetworkError, createApiClient, type ApiClient } from "./api/client";
 import { clearToken, loadToken, saveToken } from "./auth/token";
+import { ApplicationBoard } from "./components/ApplicationBoard";
+import { ApplicationDetail } from "./components/ApplicationDetail";
 import { ApprovalsInbox } from "./components/ApprovalsInbox";
 import { TokenForm } from "./components/TokenForm";
+import { WorkflowProgress } from "./components/WorkflowProgress";
+import { href, useRoute, type Route } from "./router";
 
 interface Props {
   apiBaseUrl: string;
@@ -17,6 +21,7 @@ type Session =
   | { kind: "ready"; token: string; actorId: string };
 
 export function App({ apiBaseUrl, fetch }: Props) {
+  const route = useRoute();
   const [session, setSession] = useState<Session>(() => {
     const stored = loadToken();
     return stored ? { kind: "checking", token: stored } : { kind: "signed-out", error: null };
@@ -80,9 +85,22 @@ export function App({ apiBaseUrl, fetch }: Props) {
           </div>
         )}
       </header>
+      {session.kind === "ready" && (
+        <nav className="app-nav" aria-label="Sections">
+          <a href={href.approvals()} aria-current={route.name === "approvals" ? "page" : undefined}>
+            Approvals
+          </a>
+          <a
+            href={href.board()}
+            aria-current={route.name === "board" || route.name === "application" ? "page" : undefined}
+          >
+            Applications
+          </a>
+        </nav>
+      )}
       <main>
         {session.kind === "ready" && client ? (
-          <ApprovalsInbox client={client} onUnauthenticated={onUnauthenticated} />
+          <Screen route={route} client={client} onUnauthenticated={onUnauthenticated} />
         ) : (
           <TokenForm
             apiBaseUrl={apiBaseUrl}
@@ -94,4 +112,44 @@ export function App({ apiBaseUrl, fetch }: Props) {
       </main>
     </div>
   );
+}
+
+function Screen({
+  route,
+  client,
+  onUnauthenticated,
+}: {
+  route: Route;
+  client: ApiClient;
+  onUnauthenticated: () => void;
+}) {
+  switch (route.name) {
+    case "board":
+      return <ApplicationBoard client={client} onUnauthenticated={onUnauthenticated} />;
+    case "application":
+      return (
+        <ApplicationDetail
+          key={route.id}
+          client={client}
+          applicationId={route.id}
+          onUnauthenticated={onUnauthenticated}
+        />
+      );
+    case "workflow":
+      return (
+        <section>
+          <a href={href.board()} className="small">
+            ← Board
+          </a>
+          <WorkflowProgress
+            key={route.id}
+            client={client}
+            workflowId={route.id}
+            onUnauthenticated={onUnauthenticated}
+          />
+        </section>
+      );
+    case "approvals":
+      return <ApprovalsInbox client={client} onUnauthenticated={onUnauthenticated} />;
+  }
 }

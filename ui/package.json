@@ -2,7 +2,7 @@
   "name": "personalos-ui",
   "private": true,
   "version": "0.1.0",
-  "description": "PersonalOS operator UI: the approvals inbox.",
+  "description": "PersonalOS operator UI: the approvals inbox, application board and workflow progress.",
   "type": "module",
   "engines": {
     "node": ">=20.19"
