@@ -1,6 +1,6 @@
 # PersonalOS UI
 
-The operator UI: Vite, React and TypeScript. Three screens, routed by the URL hash:
+The operator UI: Vite, React and TypeScript. Screens, routed by the URL hash:
 
 - `#/approvals` (the default): the approvals inbox (Phase M1), which lists
   `GET /v1/approvals` and records decisions through `POST /v1/approvals/{id}/decision`.
@@ -9,7 +9,13 @@ The operator UI: Vite, React and TypeScript. Three screens, routed by the URL ha
   application (`GET /v1/applications/{id}`): fit score, matched and missing
   requirements with their evidence, documents, recruiter events, open waits and
   pending approvals.
-- `#/workflows/{id}`: a workflow's live progress from `GET /v1/workflows/{id}/events`.
+- `#/workflows/{id}`: one workflow (Phase M2, M3): its live progress from
+  `GET /v1/workflows/{id}/events`, its failures from `GET /v1/workflows/{id}/failures`
+  with Retry and Dismiss, and its audit trail from `GET /v1/workflows/{id}/audit`.
+- `#/audit`: the audit trail searched (`GET /v1/audit`) by workflow, application,
+  actor, action and time range, a page at a time, newest first.
+- `#/integrations`: integration health from `GET /v1/integrations` (Phase J checks),
+  `healthy`, `degraded` or `down`, with the reason and what fixes it.
 
 ```bash
 npm ci
@@ -80,3 +86,27 @@ bearer token travels in its header and `Last-Event-ID` is set exactly:
 
 An `approval_requested` event shows a prompt linking to the approvals inbox until
 the matching `approval_resolved` arrives.
+
+## Rules the audit and failure views keep
+
+- **The audit trail is read-only.** Each action's steps are grouped by `action_hash`
+  and shown in the API's order: intent, policy decision (`REQUIRE_APPROVAL`, …),
+  approval, execution, then the provider's receipt as its own step. No audit view has
+  a control that writes.
+- **A denial is denied, not failed.** A `policy_denial` shows as `DENIED` and never
+  gets a Retry, even if the response offered one. It can only be dismissed.
+- **A provider-permanent failure asks for a reconnect.** Revoked OAuth or a missing
+  scope shows how to reconnect and links to integration health, with no Retry, so it
+  cannot loop.
+- **Retry is the API's to allow, and is sent once.** It is shown only for a `failed`
+  step that is `retryable` with a `retry` action. The button is disabled while the
+  request is in flight, and the card is updated from the `RetryResponse` (attempt,
+  `retry_queued`). A 409 is shown and locks the card until a refresh. It is never
+  resent.
+- **Credentials are never rendered.** The API redacts these payloads. As a second
+  line, `src/secrets.ts` checks every audit, failure and integration response before
+  a component sees it. A value under a credential key (`access_token`,
+  `Authorization`, …) or a token-shaped string (bearer, `ya29.`, `pos_at_`, PEM, …)
+  that is not already `[REDACTED]` is replaced with `[withheld]`. The screen then
+  reports an API bug, naming the field but not the value. A Google account's
+  `credential_ref` is never shown.

@@ -13,6 +13,7 @@
  */
 import createClient from "openapi-fetch";
 
+import { withholdSecrets, type Guarded } from "../secrets";
 import type { components, paths } from "./schema";
 
 export type PendingApproval = components["schemas"]["PendingApprovalItem"];
@@ -35,6 +36,33 @@ export type MissingRequirement = components["schemas"]["MissingRequirement"];
 export type ArtifactSummary = components["schemas"]["ArtifactSummary"];
 export type RecruiterEventSummary = components["schemas"]["RecruiterEventSummary"];
 export type PendingCheckpoint = components["schemas"]["PendingCheckpoint"];
+export type AuditTrailEntry = components["schemas"]["AuditTrailEntry"];
+export type AuditStage = components["schemas"]["AuditStage"];
+export type AuditSearchResponse = components["schemas"]["AuditSearchResponse"];
+export type WorkflowAuditResponse = components["schemas"]["WorkflowAuditResponse"];
+export type WorkflowFailure = components["schemas"]["WorkflowFailure"];
+export type WorkflowFailuresResponse = components["schemas"]["WorkflowFailuresResponse"];
+export type EventFailure = components["schemas"]["EventFailure"];
+export type FailureClass = components["schemas"]["FailureClass"];
+export type FailureStatus = components["schemas"]["FailureStatus"];
+export type FailedOperation = components["schemas"]["FailedOperation"];
+export type RetryResponse = components["schemas"]["RetryResponse"];
+export type DismissResponse = components["schemas"]["DismissResponse"];
+export type IntegrationStatus = components["schemas"]["IntegrationStatus"];
+export type IntegrationHealth = components["schemas"]["IntegrationHealth"];
+export type { Guarded };
+
+/** `GET /v1/audit` filters. Times are API timestamps (UTC, no offset). */
+export interface AuditQuery {
+  workflowId?: string;
+  applicationId?: string;
+  actor?: string;
+  action?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
+}
 
 /**
  * Every `ApplicationStatus`, in the order the API declares them: lifecycle
@@ -296,6 +324,87 @@ export function createApiClient({ baseUrl, token, fetch: fetchImpl }: ApiClientO
       );
       if (data === undefined) throw toApiError(response, error);
       return data;
+    },
+
+    // --- Audit, failures and integrations -------------------------------------
+    //
+    // Every one of these responses is passed through `withholdSecrets` before
+    // it is returned: the API redacts them, so a credential that survives is an
+    // API bug, and it is replaced rather than handed to a component. `withheld`
+    // says where, so the screen can say so.
+
+    /** One workflow's whole audit trail, oldest first. Read-only. */
+    async getWorkflowAudit(workflowId: string): Promise<Guarded<WorkflowAuditResponse>> {
+      const { data, error, response } = await client.GET("/v1/workflows/{workflow_id}/audit", {
+        params: { path: { workflow_id: workflowId } },
+      });
+      if (data === undefined) throw toApiError(response, error);
+      return withholdSecrets(data);
+    },
+
+    /** A page of the audit trail matching every filter given, newest first. Read-only. */
+    async searchAudit(query: AuditQuery = {}): Promise<Guarded<AuditSearchResponse>> {
+      const { data, error, response } = await client.GET("/v1/audit", {
+        params: {
+          query: {
+            workflow_id: query.workflowId || undefined,
+            application_id: query.applicationId || undefined,
+            actor: query.actor || undefined,
+            action: query.action || undefined,
+            since: query.since || undefined,
+            until: query.until || undefined,
+            limit: query.limit,
+            offset: query.offset,
+          },
+        },
+      });
+      if (data === undefined) throw toApiError(response, error);
+      return withholdSecrets(data);
+    },
+
+    /** A workflow's failed steps, and the events the worker gave up delivering. */
+    async listFailures(
+      workflowId: string,
+      { includeDismissed = false }: { includeDismissed?: boolean } = {},
+    ): Promise<Guarded<WorkflowFailuresResponse>> {
+      const { data, error, response } = await client.GET("/v1/workflows/{workflow_id}/failures", {
+        params: {
+          path: { workflow_id: workflowId },
+          query: { include_dismissed: includeDismissed || undefined },
+        },
+      });
+      if (data === undefined) throw toApiError(response, error);
+      return withholdSecrets(data);
+    },
+
+    /**
+     * Queue one re-run of `failure`'s step. Sent once: a 409 (not retryable, or
+     * already being retried) is thrown as an `ApiError` and never resent.
+     */
+    async retryFailure(failure: WorkflowFailure): Promise<Guarded<RetryResponse>> {
+      const { data, error, response } = await client.POST("/v1/workflows/{workflow_id}/retry", {
+        params: { path: { workflow_id: failure.workflow_id } },
+        body: { failure_id: failure.failure_id },
+      });
+      if (data === undefined) throw toApiError(response, error);
+      return withholdSecrets(data);
+    },
+
+    /** Close `failure` without retrying it. */
+    async dismissFailure(failure: WorkflowFailure): Promise<DismissResponse> {
+      const { data, error, response } = await client.POST("/v1/workflows/{workflow_id}/dismiss", {
+        params: { path: { workflow_id: failure.workflow_id } },
+        body: { failure_id: failure.failure_id },
+      });
+      if (data === undefined) throw toApiError(response, error);
+      return withholdSecrets(data).value;
+    },
+
+    /** Every integration's connection and health state (Phase J health checks). */
+    async listIntegrations(): Promise<Guarded<IntegrationStatus[]>> {
+      const { data, error, response } = await client.GET("/v1/integrations");
+      if (data === undefined) throw toApiError(response, error);
+      return withholdSecrets(data.integrations ?? []);
     },
 
     /**

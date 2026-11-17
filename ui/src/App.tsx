@@ -5,7 +5,11 @@ import { clearToken, loadToken, saveToken } from "./auth/token";
 import { ApplicationBoard } from "./components/ApplicationBoard";
 import { ApplicationDetail } from "./components/ApplicationDetail";
 import { ApprovalsInbox } from "./components/ApprovalsInbox";
+import { AuditSearch } from "./components/AuditSearch";
+import { WorkflowAudit } from "./components/AuditTrail";
+import { IntegrationsHealth } from "./components/IntegrationsHealth";
 import { TokenForm } from "./components/TokenForm";
+import { WorkflowFailures } from "./components/WorkflowFailures";
 import { WorkflowProgress } from "./components/WorkflowProgress";
 import { href, useRoute, type Route } from "./router";
 
@@ -96,6 +100,12 @@ export function App({ apiBaseUrl, fetch }: Props) {
           >
             Applications
           </a>
+          <a href={href.audit()} aria-current={route.name === "audit" ? "page" : undefined}>
+            Audit
+          </a>
+          <a href={href.integrations()} aria-current={route.name === "integrations" ? "page" : undefined}>
+            Integrations
+          </a>
         </nav>
       )}
       <main>
@@ -147,8 +157,24 @@ function Screen({
             workflowId={route.id}
             onUnauthenticated={onUnauthenticated}
           />
+          <WorkflowFailures
+            key={`failures-${route.id}`}
+            client={client}
+            workflowId={route.id}
+            onUnauthenticated={onUnauthenticated}
+          />
+          <WorkflowAudit
+            key={`audit-${route.id}`}
+            client={client}
+            workflowId={route.id}
+            onUnauthenticated={onUnauthenticated}
+          />
         </section>
       );
+    case "audit":
+      return <AuditSearch client={client} onUnauthenticated={onUnauthenticated} />;
+    case "integrations":
+      return <IntegrationsHealth client={client} onUnauthenticated={onUnauthenticated} />;
     case "approvals":
       return <ApprovalsInbox client={client} onUnauthenticated={onUnauthenticated} />;
   }
