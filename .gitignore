@@ -18,3 +18,4 @@ evals/model_benchmarks/results/
 # UI build output and dependencies
 ui/node_modules/
 ui/dist/
+ui/.vite/
