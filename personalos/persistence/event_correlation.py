@@ -16,6 +16,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from personalos.domain.ownership import SYSTEM_ACCESS
 from personalos.persistence.models import WorkflowRunModel
 from personalos.persistence.workflow_status import WorkflowStatusReader
 
@@ -57,7 +58,8 @@ class CorrelatedWaitLookup:
             if workflow_id in seen:
                 continue
             seen.add(workflow_id)
-            snapshot = self.status_reader.read(workflow_id)
+            # The worker's own lookup, for an event no request is behind.
+            snapshot = self.status_reader.read(workflow_id, access=SYSTEM_ACCESS)
             if snapshot is None or not snapshot.pending_interrupts:
                 continue
             thread_id = snapshot.pending_interrupts[0].thread_id

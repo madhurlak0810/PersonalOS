@@ -16,6 +16,12 @@ on the action's fingerprint, which every one of them stores
 (`args_hash`, `action_hash`, `request_fingerprint`) and which is, by design,
 the one value that identifies an action across all four tables.
 
+**Scoping.** Both reads take the caller's `access`. A scoped caller sees the
+events of the workflows it owns, and the events filed under no workflow that
+name it as the actor -- its own authorization denials among them. Rows of
+another actor's workflows are filtered in the query, and so are the linked
+executions, decisions and approvals: a link never reaches across owners.
+
 **Redaction.** Every value is passed through the redactor before it leaves
 here. Rows are redacted on the way in too, but the redactor learns secrets at
 runtime and a row may predate the rule that would have caught it; the trail
@@ -27,7 +33,7 @@ from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from personalos.domain.audit import (
@@ -43,6 +49,7 @@ from personalos.domain.audit import (
     WorkflowAuditTrail,
 )
 from personalos.domain.models import AuditEventResult
+from personalos.domain.ownership import Access, owner_of
 from personalos.domain.redaction import redact
 from personalos.domain.workflow import application_transition_thread_id
 from personalos.persistence.approvals import AUDIT_DECISION_PREFIX
@@ -55,6 +62,12 @@ from personalos.persistence.models import (
     WorkflowModel,
     WorkflowRunModel,
 )
+from personalos.persistence.ownership import (
+    ObjectType,
+    deny_if_not_visible,
+    owned_workflow_ids,
+    workflow_visible,
+)
 
 
 class AuditTrailStore:
@@ -64,11 +77,11 @@ class AuditTrailStore:
         """Take the factory each read opens its session from."""
         self.session_factory = session_factory
 
-    def search(self, query: AuditQuery) -> AuditPage:
-        """Audit events matching `query`, newest first, a page at a time."""
+    def search(self, query: AuditQuery, *, access: Access) -> AuditPage:
+        """Audit events `access` may see matching `query`, newest first, a page at a time."""
         session = self.session_factory()
         try:
-            q = session.query(AuditEventModel)
+            q = _visible_events(session.query(AuditEventModel), access)
             if query.workflow_id is not None:
                 q = q.filter(AuditEventModel.workflow_id == query.workflow_id)
             if query.application_id is not None:
@@ -93,7 +106,7 @@ class AuditTrailStore:
                 .limit(query.limit)
                 .all()
             )
-            chains = _Chains.load(session, events)
+            chains = _Chains.load(session, events, access=access)
             return AuditPage(
                 entries=tuple(chains.entry(event) for event in events),
                 total=total,
@@ -103,8 +116,8 @@ class AuditTrailStore:
         finally:
             session.close()
 
-    def workflow_trail(self, workflow_id: UUID) -> WorkflowAuditTrail | None:
-        """Everything recorded for one workflow, oldest first; `None` if no such workflow.
+    def workflow_trail(self, workflow_id: UUID, *, access: Access) -> WorkflowAuditTrail | None:
+        """Everything recorded for one workflow, oldest first; `None` if `access` cannot see it.
 
         Each action appears as intent, then its policy decisions, approval and
         execution, interleaved with the workflow's other audit events in the
@@ -112,7 +125,17 @@ class AuditTrailStore:
         """
         session = self.session_factory()
         try:
-            if session.get(WorkflowModel, workflow_id) is None:
+            if session.get(WorkflowModel, workflow_id) is None or not workflow_visible(
+                session, workflow_id, access
+            ):
+                session.close()
+                deny_if_not_visible(
+                    self.session_factory,
+                    access,
+                    visible=False,
+                    object_type=ObjectType.AUDIT,
+                    object_id=workflow_id,
+                )
                 return None
             events = (
                 session.query(AuditEventModel)
@@ -126,7 +149,9 @@ class AuditTrailStore:
                 .order_by(PolicyDecisionModel.decided_at, PolicyDecisionModel.id)
                 .all()
             )
-            chains = _Chains.load(session, events, workflow_ids={workflow_id}, decisions=decisions)
+            chains = _Chains.load(
+                session, events, workflow_ids={workflow_id}, decisions=decisions, access=access
+            )
 
             entries: list[AuditTrailEntry] = []
             proposed: set[str] = set()
@@ -183,8 +208,13 @@ class _Chains:
         *,
         workflow_ids: set[UUID] | None = None,
         decisions: Sequence[PolicyDecisionModel] = (),
+        access: Access,
     ) -> "_Chains":
-        """Fetch every row `events` (and `decisions`) cite, or share an action hash with."""
+        """Fetch every row `events` (and `decisions`) cite, or share an action hash with.
+
+        Rows filed under a workflow `access` cannot see are left out, so a
+        shared action hash never links one actor's trail to another's.
+        """
         workflow_ids = set(workflow_ids or ()) | {e.workflow_id for e in events if e.workflow_id}
         operation_ids = {e.operation_id for e in events if e.operation_id}
         approval_refs = {e.approval_ref for e in events if e.approval_ref}
@@ -202,6 +232,8 @@ class _Chains:
         executions = (
             session.query(ToolExecutionModel).filter(or_(*conditions)).all() if conditions else []
         )
+        visible = _visible_workflow_filter(session, access)
+        executions = [x for x in executions if visible(x.workflow_id)]
 
         approval_ids = _uuids(
             approval_refs | {x.approval_ref for x in executions if x.approval_ref}
@@ -216,6 +248,7 @@ class _Chains:
             if approval_conditions
             else []
         )
+        approvals = [a for a in approvals if visible(_approval_workflow_id(session, a))]
 
         decision_ids = {e.policy_decision_id for e in events if e.policy_decision_id} | {
             x.policy_decision_id for x in executions if x.policy_decision_id
@@ -236,6 +269,7 @@ class _Chains:
             if decision_conditions
             else []
         )
+        linked_decisions = [d for d in linked_decisions if visible(d.workflow_id)]
 
         return cls(
             [*decisions, *linked_decisions],
@@ -432,6 +466,38 @@ def _linked_execution(row: ToolExecutionModel) -> LinkedToolExecution:
 
 
 # --- Lookups ----------------------------------------------------------------------
+
+
+def _visible_events(q, access: Access):
+    """Limit an `audit_events` query to what `access` may see."""
+    owner = owner_of(access)
+    if owner is None:
+        return q
+    return q.filter(
+        or_(
+            AuditEventModel.workflow_id.in_(owned_workflow_ids(access)),
+            and_(
+                AuditEventModel.workflow_id.is_(None),
+                AuditEventModel.actor == access.actor_id,  # type: ignore[union-attr]
+            ),
+        )
+    )
+
+
+def _visible_workflow_filter(session: Session, access: Access) -> Callable[[UUID | None], bool]:
+    """A predicate: may `access` see a row filed under this workflow (or under none)?"""
+    owned = owned_workflow_ids(access)
+    if owned is None:
+        return lambda _workflow_id: True
+    ids = {row for (row,) in session.execute(owned).all()}
+    return lambda workflow_id: workflow_id is None or workflow_id in ids
+
+
+def _approval_workflow_id(session: Session, approval: ApprovalModel) -> UUID | None:
+    if approval.workflow_run_id is None:
+        return None
+    run = session.get(WorkflowRunModel, approval.workflow_run_id)
+    return run.workflow_id if run else None
 
 
 def _application_workflow_ids(session: Session, application_id: UUID) -> list[UUID]:

@@ -34,6 +34,11 @@ redacted, and are listed:
   event belongs to that workflow;
 - all together at `GET /v1/failures/events`.
 
+Every list and action is the caller's own (`apps.api.auth.current_access`):
+another actor's workflow is a 404, and its parked events are not listed.
+Events that belong to no workflow are install-wide, listed and retried only
+with an `admin` token.
+
 `POST /v1/failures/events/{failure_id}/retry` puts one back in line with a
 fresh attempt budget. Delivery is idempotent on the event's `dedupe_key`, so
 retrying an event that was in fact applied applies nothing twice.
@@ -55,7 +60,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from apps.api.auth import current_actor
+from apps.api.auth import current_access, current_actor, current_principal
 from personalos.bootstrap import (
     build_event_failure_store,
     build_integration_health_store,
@@ -63,6 +68,7 @@ from personalos.bootstrap import (
     build_workflow_failure_store,
     build_workflow_thread_registry,
 )
+from personalos.domain.auth import Principal, Scope
 from personalos.domain.errors import Conflict, NotFound
 from personalos.domain.failures import (
     EventFailure,
@@ -71,6 +77,7 @@ from personalos.domain.failures import (
     IntegrationHealth,
     WorkflowFailure,
 )
+from personalos.domain.ownership import ActorScope
 from personalos.domain.workflow import (
     WorkflowCommand,
     WorkflowCommandKind,
@@ -190,8 +197,10 @@ class DismissResponse(BaseModel):
 # --- Routes ---------------------------------------------------------------------
 
 
-def _snapshot_or_404(services: FailureServices, workflow_id: UUID) -> WorkflowSnapshot:
-    snapshot = services.store.snapshot(workflow_id)
+def _snapshot_or_404(
+    services: FailureServices, workflow_id: UUID, access: ActorScope
+) -> WorkflowSnapshot:
+    snapshot = services.store.snapshot(workflow_id, access=access)
     if snapshot is None:
         raise NotFound(
             f"workflow '{workflow_id}' not found", details={"workflow_id": str(workflow_id)}
@@ -232,14 +241,15 @@ async def list_failures(
     workflow_id: UUID,
     include_dismissed: bool = Query(default=False),
     services: FailureServices = Depends(get_failure_services),
+    access: ActorScope = Depends(current_access),
 ):
     """Every failed step, with its class, whether it can be retried, and why not."""
-    snapshot = _snapshot_or_404(services, workflow_id)
+    snapshot = _snapshot_or_404(services, workflow_id, access)
     return WorkflowFailuresResponse(
         workflow_id=workflow_id,
         status=snapshot.status,
         failures=services.store.failures(snapshot, include_dismissed=include_dismissed),
-        event_failures=services.events.failures(workflow_id=workflow_id),
+        event_failures=services.events.failures(access=access, workflow_id=workflow_id),
     )
 
 
@@ -247,9 +257,15 @@ async def list_failures(
 async def list_event_failures(
     limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=500),
     services: FailureServices = Depends(get_failure_services),
+    principal: Principal = Depends(current_principal),
+    access: ActorScope = Depends(current_access),
 ):
-    """Every dead-lettered or quarantined event, with its last error, newest first."""
-    return EventFailuresResponse(failures=services.events.failures(limit=limit))
+    """Every dead-lettered or quarantined event the caller may see, newest first."""
+    return EventFailuresResponse(
+        failures=services.events.failures(
+            access=access, include_unowned=principal.has(Scope.ADMIN), limit=limit
+        )
+    )
 
 
 class IntegrationFailuresResponse(BaseModel):
@@ -270,16 +286,21 @@ async def list_integration_failures(services: FailureServices = Depends(get_fail
 async def retry_event_failure(
     failure_id: UUID,
     services: FailureServices = Depends(get_failure_services),
-    actor_id: str = Depends(current_actor),
+    principal: Principal = Depends(current_principal),
+    access: ActorScope = Depends(current_access),
 ):
     """Put a dead-lettered or quarantined event back in line, with a fresh attempt budget.
 
-    A 404 when there is no such event, and a 409 when it is not parked --
-    pending, being delivered, or delivered.
+    A 404 when there is no such event the caller may see, and a 409 when it
+    is not parked -- pending, being delivered, or delivered.
     """
-    row = services.events.retry(failure_id, actor=actor_id)
+    actor_id = principal.actor_id
+    include_unowned = principal.has(Scope.ADMIN)
+    row = services.events.retry(
+        failure_id, actor=actor_id, access=access, include_unowned=include_unowned
+    )
     if row is None:
-        if services.events.exists(failure_id):
+        if services.events.exists(failure_id, access=access, include_unowned=include_unowned):
             raise Conflict(
                 f"event {failure_id} is not dead-lettered or quarantined; only a parked "
                 f"event can be retried",
@@ -309,6 +330,7 @@ async def retry_failure(
     request: FailureSelection | None = None,
     services: FailureServices = Depends(get_failure_services),
     actor_id: str = Depends(current_actor),
+    access: ActorScope = Depends(current_access),
 ):
     """Queue a re-run of a failed step, from the checkpoint before it.
 
@@ -317,7 +339,7 @@ async def retry_failure(
     already being retried -- naming the reason.
     """
     correlation_id = _correlation_id(http_request)
-    snapshot = _snapshot_or_404(services, workflow_id)
+    snapshot = _snapshot_or_404(services, workflow_id, access)
     failure = _select(services, snapshot, (request or FailureSelection()).failure_id)
 
     if not failure.retryable:
@@ -375,6 +397,7 @@ async def dismiss_failure(
     request: FailureSelection | None = None,
     services: FailureServices = Depends(get_failure_services),
     actor_id: str = Depends(current_actor),
+    access: ActorScope = Depends(current_access),
 ):
     """Acknowledge a failure and close it, without retrying it.
 
@@ -382,7 +405,7 @@ async def dismiss_failure(
     dismissal is an audit event naming who closed it. A 409 for a failure
     already dismissed, or one with a retry queued -- let the retry finish.
     """
-    snapshot = _snapshot_or_404(services, workflow_id)
+    snapshot = _snapshot_or_404(services, workflow_id, access)
     failure = _select(services, snapshot, (request or FailureSelection()).failure_id)
 
     if failure.status == FailureStatus.DISMISSED:

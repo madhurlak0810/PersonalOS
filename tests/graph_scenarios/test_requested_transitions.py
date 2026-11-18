@@ -28,6 +28,7 @@ from personalos.domain.job_search import (
     JobSearchContractError,
 )
 from personalos.domain.models import APPLICATION_STATUS_CHANGED_EVENT, ApplicationStatus
+from personalos.domain.ownership import SYSTEM_ACCESS
 from personalos.graphs.job_search import (
     APPROVAL_CHECKPOINT,
     STAGE_LIFECYCLE_TRANSITION,
@@ -77,7 +78,7 @@ def applied_application(lifecycle: ApplicationLifecycleStore) -> UUID:
     finally:
         session.close()
     for status in (S.SAVED, S.PREPARING, S.READY_TO_APPLY, S.APPLIED):
-        lifecycle.transition(application_id, status, actor="setup")
+        lifecycle.transition(application_id, status, access=SYSTEM_ACCESS, actor="setup")
     return application_id
 
 
@@ -202,7 +203,7 @@ async def test_a_move_made_illegal_while_parked_is_refused_not_forced(lifecycle)
     graph, _ = build(lifecycle)
     config = await start(graph, withdrawal(application_id))
     # While the run waits for a reviewer, the application is rejected.
-    lifecycle.transition(application_id, S.REJECTED, actor="recruiter_events")
+    lifecycle.transition(application_id, S.REJECTED, access=SYSTEM_ACCESS, actor="recruiter_events")
 
     final = await answer(graph, config, ApprovalVerdict.APPROVED)
 

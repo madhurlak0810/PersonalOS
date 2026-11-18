@@ -82,9 +82,11 @@ from personalos.persistence.leases import WorkflowLeaseUnavailable
 from personalos.persistence.models import AuditEventModel, Base, ToolExecutionModel
 from personalos.policy import Decision, PermissionClass, PolicyEngine
 from personalos.providers.base import ProviderUnavailable
-from tests.fixtures.auth import bearer, install_test_auth
+from tests.fixtures.auth import bearer, install_test_auth, owner_id
 
-USER_ID = UUID("6f1e7b3a-0000-4000-8000-0000000000cc")
+#: The candidate is the actor: an actor sees and retries only its own failures.
+ACTOR = "user:alice"
+USER_ID = owner_id(ACTOR)
 SECRET = "sk-live-4f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c"
 
 
@@ -107,7 +109,7 @@ def api_process(db_path: Path) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_failure_services] = lambda: build_failure_services(factory)
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
-    return TestClient(install_test_auth(app), headers=bearer())
+    return TestClient(install_test_auth(app), headers=bearer(ACTOR))
 
 
 class SpyProvider:
@@ -489,13 +491,13 @@ def test_retry_and_dismiss_are_recorded_in_the_audit_trail(db_path):
     client = api_process(db_path)
     failure_id = only_failure(client, harness.workflow_id)["failure_id"]
 
-    client.post(f"/v1/workflows/{harness.workflow_id}/retry", headers=bearer("user:a"))
+    client.post(f"/v1/workflows/{harness.workflow_id}/retry", headers=bearer(ACTOR))
     actions = [
         (row["actor"], row["action"], row["target_ref"])
         for row in harness.rows(AuditEventModel)
         if row["action"].startswith("workflow.failure.")
     ]
-    assert actions == [("user:a", "workflow.failure.retry_requested", f"failure:{failure_id}")]
+    assert actions == [(ACTOR, "workflow.failure.retry_requested", f"failure:{failure_id}")]
 
 
 def test_failure_errors_are_redacted_in_the_status_endpoint_too(db_path):

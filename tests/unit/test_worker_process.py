@@ -50,6 +50,7 @@ from personalos.domain.job_search import (
     RefusalReason,
 )
 from personalos.domain.models import OutboxEventStatus
+from personalos.domain.ownership import ActorScope
 from personalos.domain.progress import ProgressEventType
 from personalos.domain.workflow import ApprovalOutcome, WorkflowStatus
 from personalos.graphs.job_search import APPROVAL_CHECKPOINT
@@ -87,11 +88,13 @@ def _database(tmp_path) -> tuple[Path, sessionmaker]:
 def _client(factory) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
-    return TestClient(install_test_auth(app), headers=bearer())
+    # The candidate's own actor: a UUID actor is its own candidate id, so the
+    # chat searches for `fakes.USER_ID` without naming anyone in the body.
+    return TestClient(install_test_auth(app), headers=bearer(str(fakes.USER_ID)))
 
 
 def _chat(client: TestClient, message: str = "find me a python job") -> dict:
-    response = client.post("/v1/chat", json={"message": message, "user_id": str(fakes.USER_ID)})
+    response = client.post("/v1/chat", json={"message": message})
     assert response.status_code == 202, response.text
     return response.json()
 
@@ -161,7 +164,9 @@ async def test_a_chat_request_is_accepted_before_discovery_runs_and_the_worker_c
     assert log.count(durable.EVENT_EXTERNAL_SUBMISSION) == 1
 
     # The worker reported as it went, where `GET .../events` streams from.
-    events = build_workflow_progress_log(factory).events_after(UUID(accepted["workflow_id"]))
+    events = build_workflow_progress_log(factory).events_after(
+        UUID(accepted["workflow_id"]), access=ActorScope.of(str(fakes.USER_ID))
+    )
     kinds = {event.type for event in events}
     assert ProgressEventType.STEP_STARTED in kinds
     assert ProgressEventType.WORKFLOW_COMPLETED in kinds

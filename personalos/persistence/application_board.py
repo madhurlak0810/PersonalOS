@@ -21,6 +21,12 @@ Nothing here changes a status. The two writes are appends to `event_log`:
 
 Sessions come from an injected factory and each call is its own short
 transaction, as in `ApplicationLifecycleStore`.
+
+**Every read is scoped.** Each method that reads or writes one application, or
+lists them, takes the caller's `access` and filters on `applications.user_id`
+in its own query: another actor's application -- its card, its artifact
+versions, its recruiter events, its history -- is not there for a scoped
+caller, exactly as if it did not exist (`personalos.domain.ownership`).
 """
 
 from collections.abc import Callable, Sequence
@@ -54,6 +60,7 @@ from personalos.domain.models import (
     APPLICATION_STATUS_CHANGED_EVENT,
     ApplicationStatus,
 )
+from personalos.domain.ownership import SYSTEM_ACCESS, Access, can_see, owner_of
 from personalos.domain.recruiter_events import Commitment
 from personalos.persistence.models import (
     ApplicationModel,
@@ -64,6 +71,7 @@ from personalos.persistence.models import (
     EventLogModel,
     JobPostingModel,
 )
+from personalos.persistence.ownership import ObjectType, deny_if_not_visible
 from personalos.persistence.pending_checkpoints import PendingCheckpointStore
 from personalos.persistence.repositories import EventLogRepository
 
@@ -93,7 +101,7 @@ class ApplicationBoardStore:
     # Reading
     # ------------------------------------------------------------------
 
-    def board(self, query: BoardQuery) -> ApplicationBoard:
+    def board(self, query: BoardQuery, *, access: Access) -> ApplicationBoard:
         """One page of cards, grouped into lifecycle columns.
 
         Columns are every state, or the states the query asked for, in
@@ -103,7 +111,7 @@ class ApplicationBoardStore:
         """
         session = self.session_factory()
         try:
-            base = self._filtered(session, query)
+            base = self._filtered(session, query, access)
             counts = dict(
                 base.with_entities(_STATUS, func.count(ApplicationModel.id)).group_by(_STATUS).all()
             )
@@ -146,21 +154,26 @@ class ApplicationBoardStore:
             next_offset=end if end < total else None,
         )
 
-    def card(self, application_id: UUID) -> ApplicationCard | None:
-        """One application as the board shows it, or `None` if it does not exist."""
+    def card(self, application_id: UUID, *, access: Access) -> ApplicationCard | None:
+        """One application as the board shows it, or `None` if `access` cannot see it."""
         session = self.session_factory()
         try:
-            row = self._one(session, application_id)
-            return _card(*row) if row is not None else None
+            row = self._one(session, application_id, access)
         finally:
             session.close()
+        if row is None:
+            self._deny(access, application_id)
+            return None
+        return _card(*row)
 
-    def detail(self, application_id: UUID) -> ApplicationDetail | None:
-        """Everything on one application, or `None` if it does not exist."""
+    def detail(self, application_id: UUID, *, access: Access) -> ApplicationDetail | None:
+        """Everything on one application, or `None` if `access` cannot see it."""
         session = self.session_factory()
         try:
-            row = self._one(session, application_id)
+            row = self._one(session, application_id, access)
             if row is None:
+                session.close()
+                self._deny(access, application_id)
                 return None
             card = _card(*row)
             events = EventLogRepository(session).get_by_aggregate_id(application_id)
@@ -193,7 +206,9 @@ class ApplicationBoardStore:
             ),
         )
 
-    def submission_attachments(self, application_id: UUID) -> list[dict[str, Any]]:
+    def submission_attachments(
+        self, application_id: UUID, *, access: Access
+    ) -> list[dict[str, Any]]:
         """The latest version of each tailored document, as submission attachments.
 
         The same shape `prepare_application_packet` attaches, so a submission
@@ -204,7 +219,7 @@ class ApplicationBoardStore:
         session = self.session_factory()
         try:
             rows = (
-                session.query(ArtifactVersionModel)
+                self._artifacts(session, access)
                 .filter(ArtifactVersionModel.application_id == application_id)
                 .order_by(ArtifactVersionModel.artifact_type, ArtifactVersionModel.version.desc())
                 .all()
@@ -227,12 +242,12 @@ class ApplicationBoardStore:
             for row in latest.values()
         ]
 
-    def cover_note(self, application_id: UUID) -> str:
-        """The latest cover letter's text, or empty if there is none."""
+    def cover_note(self, application_id: UUID, *, access: Access) -> str:
+        """The latest cover letter's text, or empty if there is none `access` may see."""
         session = self.session_factory()
         try:
             row = (
-                session.query(ArtifactVersionModel)
+                self._artifacts(session, access)
                 .filter(
                     ArtifactVersionModel.application_id == application_id,
                     ArtifactVersionModel.artifact_type == "cover_letter",
@@ -264,13 +279,14 @@ class ApplicationBoardStore:
             now,
         )
 
-    def record_transition_request(self, request: RequestedTransition) -> UUID:
+    def record_transition_request(self, request: RequestedTransition, *, access: Access) -> UUID:
         """Append the fact that a transition with an external effect was asked for."""
         return self._append(
             request.application_id,
             APPLICATION_TRANSITION_REQUESTED_EVENT,
             request.model_dump(mode="json"),
             request.requested_at,
+            access=access,
         )
 
     # ------------------------------------------------------------------
@@ -283,10 +299,13 @@ class ApplicationBoardStore:
         event_type: str,
         payload: dict[str, Any],
         now: datetime | None,
+        *,
+        access: Access = SYSTEM_ACCESS,
     ) -> UUID:
         session = self.session_factory()
         try:
-            if session.get(ApplicationModel, application_id) is None:
+            application = session.get(ApplicationModel, application_id)
+            if application is None or not can_see(access, application.user_id):
                 raise ValueError(f"Application {application_id} not found")
             event = EventLogRepository(session).append(
                 aggregate_type=APPLICATION_AGGREGATE_TYPE,
@@ -313,8 +332,32 @@ class ApplicationBoardStore:
             )
         )
 
-    def _filtered(self, session: Session, query: BoardQuery):
-        q = self._joined(session)
+    def _deny(self, access: Access, application_id: UUID) -> None:
+        deny_if_not_visible(
+            self.session_factory,
+            access,
+            visible=False,
+            object_type=ObjectType.APPLICATION,
+            object_id=application_id,
+        )
+
+    @staticmethod
+    def _owned(q, access: Access):
+        owner = owner_of(access)
+        return q if owner is None else q.filter(ApplicationModel.user_id == owner)
+
+    def _artifacts(self, session: Session, access: Access):
+        """Artifact versions `access` may see: those of its own applications."""
+        q = session.query(ArtifactVersionModel)
+        owner = owner_of(access)
+        if owner is None:
+            return q
+        return q.join(
+            ApplicationModel, ApplicationModel.id == ArtifactVersionModel.application_id
+        ).filter(ApplicationModel.user_id == owner)
+
+    def _filtered(self, session: Session, query: BoardQuery, access: Access):
+        q = self._owned(self._joined(session), access)
         if query.states:
             q = q.filter(_STATUS.in_([status.value for status in query.states]))
         if query.company:
@@ -325,13 +368,11 @@ class ApplicationBoardStore:
             q = q.filter(ApplicationModel.created_at >= query.created_from)
         if query.created_to is not None:
             q = q.filter(ApplicationModel.created_at <= query.created_to)
-        if query.user_id is not None:
-            q = q.filter(ApplicationModel.user_id == query.user_id)
         return q
 
-    def _one(self, session: Session, application_id: UUID):
+    def _one(self, session: Session, application_id: UUID, access: Access):
         return (
-            self._joined(session)
+            self._owned(self._joined(session), access)
             .with_entities(ApplicationModel, JobPostingModel, ApplicationStatusViewModel)
             .filter(ApplicationModel.id == application_id)
             .first()

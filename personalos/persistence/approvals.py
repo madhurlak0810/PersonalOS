@@ -29,6 +29,15 @@ would, with `APPROVAL_EXPIRY_ACTOR` as the decider so the refusal the graph
 records says "expired" and not "denied". It is the same guarded insert a
 reviewer's decision is, so an expiry racing a last-minute answer leaves one of
 them on record, not both.
+
+**Only a person can decide, and only their own.** `decide` takes the verified
+`Principal`, not an actor string. A system identity (the worker, the
+scheduler, a model-driven node) is refused, and so is a token without the
+`approve` scope -- both with a 403 and an audit row -- so the agent cannot
+approve the action it proposed. The approval is looked up within the
+principal's `ActorScope`: another actor's approval is a 404, as if it did not
+exist. The decider is stored on the `approvals` row, beside the
+`action_hash` the decision is bound to.
 """
 
 import logging
@@ -42,7 +51,8 @@ from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from personalos.domain.errors import Conflict, NotFound
+from personalos.domain.auth import Principal, Scope
+from personalos.domain.errors import Conflict, Forbidden, NotFound
 from personalos.domain.job_search import (
     APPROVAL_EXPIRY_ACTOR,
     ApprovalDecision,
@@ -50,6 +60,7 @@ from personalos.domain.job_search import (
     ApprovalVerdict,
 )
 from personalos.domain.models import AuditEventResult
+from personalos.domain.ownership import SYSTEM_ACCESS, Access, ActorScope
 from personalos.domain.workflow import (
     ApprovalOutcome,
     ApprovalState,
@@ -65,6 +76,13 @@ from personalos.observability.structured_logging import LogEvent
 from personalos.observability.tracing import Attr
 from personalos.persistence.checkpointer import WorkflowThreadRegistry
 from personalos.persistence.models import ApprovalModel, AuditEventModel, WorkflowRunModel
+from personalos.persistence.ownership import (
+    DenialReason,
+    ObjectType,
+    deny_if_not_visible,
+    record_denial,
+    workflow_visible,
+)
 from personalos.persistence.repositories import AuditEventRepository
 from personalos.persistence.workflow_commands import DuplicateWorkflowCommand, WorkflowCommandQueue
 from personalos.persistence.workflow_status import WorkflowStatusReader
@@ -138,10 +156,10 @@ class ApprovalQueue:
         self.commands = commands
         self.clock = clock
 
-    def list_pending(self) -> list[PendingApproval]:
-        """Every request still owed an answer, oldest first, expired ones marked."""
+    def list_pending(self, *, access: Access) -> list[PendingApproval]:
+        """Every request `access` may see still owed an answer, oldest first, expired ones marked."""
         now = self.clock()
-        open_requests = list(self._open_requests())
+        open_requests = list(self._open_requests(access))
         decided = self._decided_rows([item.request.request_id for item in open_requests])
         pending = [
             _pending(item, now) for item in open_requests if item.request.request_id not in decided
@@ -154,26 +172,44 @@ class ApprovalQueue:
         *,
         approved: bool,
         action_hash: str,
-        actor_id: str,
+        principal: Principal,
         correlation_id: UUID | None = None,
     ) -> RecordedApprovalDecision:
         """Record a reviewer's decision and, once its interrupt is answered, resume the run.
 
-        Raises `ApprovalHashMismatch` when `action_hash` is not the hash the
-        request was raised with, `ApprovalExpired` when approving past the
-        request's expiry, `ApprovalAlreadyDecided` when it was decided the other
-        way, and `NotFound` when no such approval is pending. A repeat of a
-        decision already recorded returns that decision and resumes nothing.
+        Raises `Forbidden` when `principal` is a system identity or lacks the
+        `approve` scope, `ApprovalHashMismatch` when `action_hash` is not the
+        hash the request was raised with, `ApprovalExpired` when approving past
+        the request's expiry, `ApprovalAlreadyDecided` when it was decided the
+        other way, and `NotFound` when no such approval is pending *for this
+        principal's actor*. A repeat of a decision already recorded returns
+        that decision and resumes nothing.
         """
+        self.require_decider(principal, approval_id)
+        actor_id = principal.actor_id
+        access = ActorScope.for_principal(principal)
         now = self.clock()
         outcome = ApprovalOutcome.APPROVED if approved else ApprovalOutcome.DENIED_BY_USER
         correlation_id = correlation_id or uuid4()
-        found = self._find(approval_id)
+        found = self._find(approval_id, access)
 
         with self._decision_span(found, approval_id, actor_id, correlation_id) as span:
             recorded = self._decided_rows([approval_id]).get(approval_id)
+            if (
+                recorded is not None
+                and found is None
+                and not self._recorded_visible(recorded, access)
+            ):
+                recorded = None
             if recorded is None:
                 if found is None:
+                    deny_if_not_visible(
+                        self.session_factory,
+                        access,
+                        visible=False,
+                        object_type=ObjectType.APPROVAL,
+                        object_id=approval_id,
+                    )
                     raise NotFound(
                         f"no pending approval '{approval_id}'",
                         details={"approval_id": str(approval_id)},
@@ -224,6 +260,45 @@ class ApprovalQueue:
             )
             return decision
 
+    def require_decider(self, principal: Principal, approval_id: UUID | None = None) -> None:
+        """Refuse, and audit, a principal that may not decide approvals.
+
+        A system identity first -- the worker, the scheduler or a model-driven
+        node must never approve, whatever its token says -- then a token
+        without the `approve` scope.
+        """
+        if principal.is_system:
+            reason, message = (
+                DenialReason.SYSTEM_IDENTITY,
+                "a system identity cannot decide an approval; only a person can",
+            )
+        elif not principal.has(Scope.APPROVE):
+            reason, message = (
+                DenialReason.MISSING_SCOPE,
+                "deciding an approval needs a token with the 'approve' scope",
+            )
+        else:
+            return
+        record_denial(
+            self.session_factory,
+            actor_id=principal.actor_id,
+            object_type=ObjectType.APPROVAL,
+            object_id=approval_id,
+            reason=reason,
+            detail=f"requires {Scope.APPROVE.value}",
+        )
+        raise Forbidden(message, details={"required_scope": Scope.APPROVE.value})
+
+    def _recorded_visible(self, row: ApprovalModel, access: Access) -> bool:
+        workflow_id = self._workflow_id(row)
+        if workflow_id is None:
+            return False
+        session = self.session_factory()
+        try:
+            return workflow_visible(session, workflow_id, access)
+        finally:
+            session.close()
+
     @staticmethod
     def _decision_span(
         found: _OpenRequest | None,
@@ -254,7 +329,7 @@ class ApprovalQueue:
         still has live requests is left parked until they are answered too.
         """
         now = now or self.clock()
-        open_requests = list(self._open_requests())
+        open_requests = list(self._open_requests(SYSTEM_ACCESS))
         decided = self._decided_rows([item.request.request_id for item in open_requests])
         expired: list[UUID] = []
         for item in open_requests:
@@ -277,10 +352,10 @@ class ApprovalQueue:
     # Internals
     # ------------------------------------------------------------------
 
-    def _open_requests(self) -> Iterator[_OpenRequest]:
-        """Every request in an interrupt nobody has queued an answer to."""
-        for workflow_id in self.reader.interrupted_workflow_ids():
-            snapshot = self.reader.read(workflow_id)
+    def _open_requests(self, access: Access) -> Iterator[_OpenRequest]:
+        """Every request `access` may see in an interrupt nobody has queued an answer to."""
+        for workflow_id in self.reader.interrupted_workflow_ids(access=access):
+            snapshot = self.reader.read(workflow_id, access=access)
             if snapshot is None:
                 continue
             threads = {thread.thread_id: thread for thread in snapshot.threads}
@@ -295,9 +370,13 @@ class ApprovalQueue:
                         batch=batch,
                     )
 
-    def _find(self, approval_id: UUID) -> _OpenRequest | None:
+    def _find(self, approval_id: UUID, access: Access) -> _OpenRequest | None:
         return next(
-            (item for item in self._open_requests() if item.request.request_id == approval_id),
+            (
+                item
+                for item in self._open_requests(access)
+                if item.request.request_id == approval_id
+            ),
             None,
         )
 
@@ -335,6 +414,7 @@ class ApprovalQueue:
                     workflow_run_id=thread.workflow_run_id if thread else None,
                     action_hash=request.action_hash,
                     status=_STATUS_BY_OUTCOME[outcome].value,
+                    decided_by=actor_id,
                     note=outcome.value,
                     decided_at=now,
                     created_at=request.requested_at,
@@ -456,21 +536,29 @@ class ApprovalQueue:
             session.close()
 
     def _decided_by(self, approval_ids: list[UUID]) -> dict[UUID, str]:
-        """Who decided each approval, from the audit trail -- the only place it is kept."""
+        """Who decided each approval: the `approvals` row, else (older rows) its audit event."""
         if not approval_ids:
             return {}
         actions = [f"{AUDIT_DECISION_PREFIX}{outcome.value}" for outcome in ApprovalOutcome]
         session = self.session_factory()
         try:
-            rows = (
-                session.query(AuditEventModel.approval_ref, AuditEventModel.actor)
-                .filter(
-                    AuditEventModel.approval_ref.in_([str(i) for i in approval_ids]),
-                    AuditEventModel.action.in_(actions),
-                )
+            stored: dict[UUID, str] = dict(
+                session.query(ApprovalModel.id, ApprovalModel.decided_by)
+                .filter(ApprovalModel.id.in_(approval_ids), ApprovalModel.decided_by.isnot(None))
                 .all()
             )
-            return {UUID(approval_ref): actor for approval_ref, actor in rows}
+            missing = [str(i) for i in approval_ids if i not in stored]
+            if missing:
+                rows = (
+                    session.query(AuditEventModel.approval_ref, AuditEventModel.actor)
+                    .filter(
+                        AuditEventModel.approval_ref.in_(missing),
+                        AuditEventModel.action.in_(actions),
+                    )
+                    .all()
+                )
+                stored.update({UUID(approval_ref): actor for approval_ref, actor in rows})
+            return stored
         finally:
             session.close()
 

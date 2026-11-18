@@ -39,6 +39,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from personalos.domain.auth import is_system_actor
 from personalos.domain.errors import ValidationFailed
 from personalos.domain.models import (
     ApplicationStatus,
@@ -1275,6 +1276,10 @@ class RefusalReason(str, Enum):
     HASH_MISMATCH = "action_hash_mismatch"
     #: The approval window closed before the run got back to the executor.
     EXPIRED = "approval_expired"
+    #: The "approval" was decided by a system identity -- the worker, the
+    #: scheduler, a model-driven node -- not a person. The agent may propose
+    #: an action; it may never approve one (`personalos.domain.auth`).
+    SYSTEM_APPROVER = "system_approver"
 
 
 class ApprovalRefusal(_Value):
@@ -1341,7 +1346,10 @@ def authorize_execution(
       -- or a model driving one -- could rewrite it. Recomputing the hash here
       and comparing it to the stored `action_hash` is what makes a rewritten
       action fail closed instead of executing under someone else's approval;
-    - the approval has not expired.
+    - the approval has not expired;
+    - **a person approved it.** A decision whose `decided_by` is a system
+      identity is refused however it got into state, so the agent cannot
+      approve its own proposed action.
 
     Pure, and takes `now` rather than reading a clock, so every branch is
     testable without waiting and a caller cannot get a different answer than
@@ -1407,6 +1415,19 @@ def authorize_execution(
             detail=(
                 f"action {intent.action_id} ({intent.kind.value}) was not approved: "
                 f"verdict={decision.verdict.value}"
+            ),
+            approved_hash=request.action_hash,
+            recomputed_hash=intent.fingerprint(),
+        )
+
+    if is_system_actor(decision.decided_by):
+        return ApprovalRefusal(
+            action_id=intent.action_id,
+            request_id=request.request_id,
+            reason=RefusalReason.SYSTEM_APPROVER,
+            detail=(
+                f"action {intent.action_id} ({intent.kind.value}) was 'approved' by "
+                f"{decision.decided_by!r}, a system identity; only a person can approve"
             ),
             approved_hash=request.action_hash,
             recomputed_hash=intent.fingerprint(),

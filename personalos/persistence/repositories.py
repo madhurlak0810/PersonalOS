@@ -27,6 +27,7 @@ from personalos.domain.models import (
     validate_application_status_transition,
     validate_evidence_links,
 )
+from personalos.domain.ownership import Access, owner_of
 from personalos.domain.redaction import redact, redact_text
 from personalos.persistence.models import (
     ApplicationModel,
@@ -1162,9 +1163,27 @@ class CredentialRepository:
         self.session.commit()
         return db_credential
 
-    def list_by_provider(self, provider: str, *, active_only: bool = True) -> list[CredentialModel]:
-        """Every credential recorded for a provider, most recently changed first."""
+    def list_by_provider(
+        self,
+        provider: str,
+        *,
+        access: Access,
+        include_unowned: bool = False,
+        active_only: bool = True,
+    ) -> list[CredentialModel]:
+        """Every credential recorded for a provider that `access` may see, newest change first.
+
+        A scoped `access` sees the references its owner connected, plus -- with
+        `include_unowned`, which the API passes only for an `admin` token --
+        the install-wide ones nobody owns. `SYSTEM_ACCESS` sees every one.
+        """
         query = self.session.query(CredentialModel).filter(CredentialModel.provider == provider)
+        owner = owner_of(access)
+        if owner is not None:
+            owned = CredentialModel.user_id == owner
+            query = query.filter(
+                or_(owned, CredentialModel.user_id.is_(None)) if include_unowned else owned
+            )
         if active_only:
             query = query.filter(CredentialModel.status == "active")
         return query.order_by(

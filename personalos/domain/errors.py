@@ -37,6 +37,7 @@ class ErrorCode(str, Enum):
     VALIDATION = "validation"
     PAYLOAD_TOO_LARGE = "payload_too_large"
     UNAUTHENTICATED = "unauthenticated"
+    FORBIDDEN = "forbidden"
     NOT_FOUND = "not_found"
     POLICY_DENIED = "policy_denied"
     APPROVAL_REQUIRED = "approval_required"
@@ -166,6 +167,19 @@ class Unauthenticated(PersonalOSError):
     code = ErrorCode.UNAUTHENTICATED
     http_status = 401
     default_message = "authentication required"
+
+
+class Forbidden(PersonalOSError):
+    """The caller is authenticated, but its token does not allow this.
+
+    Only for what the caller may *do* (a missing scope, a system identity
+    deciding an approval). An object the caller may not *see* is a
+    `NotFound`, exactly as if it did not exist, so existence is not leaked.
+    """
+
+    code = ErrorCode.FORBIDDEN
+    http_status = 403
+    default_message = "this credential is not allowed to do that"
 
 
 class NotFound(PersonalOSError):
@@ -360,6 +374,7 @@ __all__ = [
     "PersonalOSError",
     "ValidationFailed",
     "PayloadTooLarge",
+    "Forbidden",
     "NotFound",
     "PolicyDeniedError",
     "ApprovalRequiredError",

@@ -42,6 +42,7 @@ from personalos.domain.checkpoints import (
 )
 from personalos.domain.job_search import FollowUpKind, JobMatch
 from personalos.domain.models import APPLICATION_STATUS_CHANGED_EVENT, ApplicationStatus
+from personalos.domain.ownership import SYSTEM_ACCESS
 from personalos.domain.workflow import application_transition_thread_id
 from personalos.persistence.application_board import ApplicationBoardStore
 from personalos.persistence.application_lifecycle import ApplicationLifecycleStore
@@ -61,7 +62,7 @@ from personalos.persistence.repositories import ApplicationRepository, JobPostin
 from personalos.policy.engine import PolicyEngine
 from personalos.policy.intents import Decision
 from personalos.policy.permissions import PermissionClass
-from tests.fixtures.auth import bearer, install_test_auth
+from tests.fixtures.auth import bearer, install_test_auth, owner_id
 
 S = ApplicationStatus
 T0 = datetime(2026, 10, 1, 9, 0, 0)
@@ -108,7 +109,7 @@ def api_process(db_path: Path, *, policy: PolicyEngine | None = None) -> TestCli
     app = create_app()
     app.dependency_overrides[get_application_services] = services
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
-    return TestClient(install_test_auth(app), headers=bearer())
+    return TestClient(install_test_auth(app), headers=bearer(ACTOR))
 
 
 def new_application(
@@ -122,11 +123,11 @@ def new_application(
     """A DISCOVERED application for a fresh posting."""
     session = factory()
     try:
-        if user_id is None:
-            user = UserModel(email=f"candidate-{uuid4()}@example.com")
-            session.add(user)
+        # The test actor owns it unless the test says whose it is.
+        user_id = user_id or owner_id(ACTOR)
+        if session.get(UserModel, user_id) is None:
+            session.add(UserModel(id=user_id, email=f"candidate-{uuid4()}@example.com"))
             session.commit()
-            user_id = user.id
         posting = JobPostingRepository(session).create(
             source="greenhouse",
             title=title,
@@ -149,7 +150,7 @@ def new_application(
 def move(factory, application_id: UUID, *statuses: ApplicationStatus) -> None:
     lifecycle = ApplicationLifecycleStore(factory)
     for status in statuses:
-        lifecycle.transition(application_id, status, actor="setup")
+        lifecycle.transition(application_id, status, access=SYSTEM_ACCESS, actor="setup")
 
 
 def add_artifact(factory, application_id: UUID, artifact_type: str = "resume") -> UUID:
@@ -296,7 +297,7 @@ def test_bookkeeping_transitions_are_applied_at_once(db_path, session_factory, p
     assert response.json()["application"]["status"] == target.value
     assert (
         events(session_factory, application_id, APPLICATION_STATUS_CHANGED_EVENT)[-1]["actor"]
-        == "api"
+        == ACTOR
     )
 
 

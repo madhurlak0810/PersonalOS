@@ -28,12 +28,14 @@ from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from apps.api.auth import (
+    TICKET_SCOPES,
     ApiAuth,
     LocalTokenVerifier,
     StreamTicketSigner,
     UnsafeBindAddress,
     build_api_auth,
     ensure_safe_bind,
+    get_audit_session_factory,
     is_loopback_host,
 )
 from apps.api.main import create_app
@@ -91,12 +93,15 @@ def auth_header(token: str = SEEDED_TOKEN) -> dict[str, str]:
 
 
 class _FakeProgressLog:
-    """Knows one workflow, which has no events yet."""
+    """Knows two workflows of the API actor's, neither with any events yet."""
 
-    def workflow_exists(self, workflow_id: UUID) -> bool:
-        return workflow_id == KNOWN_WORKFLOW
+    def workflow_exists(self, workflow_id: UUID, *, access) -> bool:
+        return access.actor_id == settings.api_actor and workflow_id in (
+            KNOWN_WORKFLOW,
+            OTHER_WORKFLOW,
+        )
 
-    def events_after(self, workflow_id, after, *, limit):
+    def events_after(self, workflow_id, after, *, access, limit):
         return []
 
 
@@ -168,7 +173,12 @@ def test_health_needs_no_token(client):
 def test_the_right_token_authenticates_as_the_configured_actor(client):
     response = client.get("/v1/auth/whoami", headers=auth_header())
     assert response.status_code == 200
-    assert response.json() == {"actor_id": settings.api_actor, "method": "local_token"}
+    assert response.json() == {
+        "actor_id": settings.api_actor,
+        "method": "local_token",
+        "kind": "human",
+        "scopes": ["admin", "approve", "read", "write"],
+    }
 
 
 def test_the_actor_comes_from_the_token_not_a_header(client):
@@ -234,8 +244,15 @@ def test_rotation_takes_effect_without_a_restart(token_file):
 
 
 @pytest.fixture
-def stream_client(app) -> TestClient:
+def audit_sessions(tmp_path):
+    """Where this app's authorization denials are audited."""
+    return session_factory(tmp_path / "denials.db")
+
+
+@pytest.fixture
+def stream_client(app, audit_sessions) -> TestClient:
     app.dependency_overrides[get_progress_log] = lambda: _FakeProgressLog()
+    app.dependency_overrides[get_audit_session_factory] = lambda: audit_sessions
     return TestClient(app)
 
 
@@ -310,7 +327,7 @@ def test_a_ticket_expires():
     assert issued.expires_at == datetime.fromtimestamp(1_000_060, tz=timezone.utc)
 
     assert signer.verify(issued.ticket, KNOWN_WORKFLOW) == Principal(
-        "api", AuthMethod.STREAM_TICKET
+        "api", AuthMethod.STREAM_TICKET, scopes=TICKET_SCOPES
     )
     now[0] += 60
     assert signer.verify(issued.ticket, KNOWN_WORKFLOW) is None
@@ -390,7 +407,12 @@ def test_with_auth_disabled_every_request_is_the_configured_actor(monkeypatch):
     response = TestClient(create_app()).get(
         "/v1/auth/whoami", headers={"X-Actor-Id": "user:mallory"}
     )
-    assert response.json() == {"actor_id": settings.api_actor, "method": "disabled"}
+    assert response.json() == {
+        "actor_id": settings.api_actor,
+        "method": "disabled",
+        "kind": "human",
+        "scopes": ["admin", "approve", "read", "write"],
+    }
 
 
 # --- The CLI ----------------------------------------------------------------------
@@ -438,6 +460,7 @@ def test_a_seeded_token_never_appears_in_logs_or_span_attributes(app, tmp_path, 
     factory = session_factory(tmp_path / "redaction.db")
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
     app.dependency_overrides[get_progress_log] = lambda: _FakeProgressLog()
+    app.dependency_overrides[get_audit_session_factory] = lambda: factory
     client = TestClient(app, raise_server_exceptions=False)
     caplog.set_level(logging.DEBUG)
 

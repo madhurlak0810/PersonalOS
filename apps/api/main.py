@@ -12,6 +12,7 @@ from apps.api.auth import (
     build_api_auth,
     ensure_safe_bind,
     require_principal,
+    require_route_scope,
     require_stream_principal,
 )
 from apps.api.errors import register_error_handlers
@@ -30,6 +31,7 @@ from personalos.observability.structured_logging import (
 )
 from personalos.observability.tracing_setup import configure_tracing_from_settings
 from personalos.persistence import init_db
+from personalos.persistence.ownership import authorization_context
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +69,14 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
             str(correlation_id),
             tracing.extract_trace_context(request.headers),
         )
-        with tracing.attached(ctx), log_scope(correlation_id=correlation_id):
+        # The route an authorization denial is audited against: method and
+        # path only -- never the query string, where a stream ticket travels.
+        route = f"{request.method} {request.url.path}"
+        with (
+            tracing.attached(ctx),
+            log_scope(correlation_id=correlation_id),
+            authorization_context(route),
+        ):
             response = await call_next(request)
         response.headers[CORRELATION_ID_HEADER] = str(correlation_id)
         return response
@@ -146,7 +155,10 @@ def create_app() -> FastAPI:
     # one-time `state` an authenticated `/connect` minted is its credential.
     app.include_router(integrations.callback_router, prefix="/v1", tags=["integrations"])
 
-    authenticated = [Depends(require_principal)]
+    # Authentication, then the route's scope (`read` for GET, `write` otherwise,
+    # or what the endpoint names with `requires_scope`). Ownership is the
+    # stores' to enforce, scoped by `current_access`.
+    authenticated = [Depends(require_principal), Depends(require_route_scope)]
     for router, tag in (
         (auth.router, "auth"),
         (workflows.router, "workflows"),
@@ -166,7 +178,7 @@ def create_app() -> FastAPI:
         events.router,
         prefix="/v1",
         tags=["events"],
-        dependencies=[Depends(require_stream_principal)],
+        dependencies=[Depends(require_stream_principal), Depends(require_route_scope)],
     )
 
     register_error_handlers(app)

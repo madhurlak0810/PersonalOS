@@ -30,6 +30,7 @@ from personalos.domain.action_status import (
     derive_shortlist,
     derive_thread_actions,
 )
+from personalos.domain.ownership import Access
 from personalos.domain.workflow import ApprovalOutcome, ApprovalState
 from personalos.persistence.approvals import AUDIT_DECISION_PREFIX
 from personalos.persistence.checkpointer import SqlAlchemyCheckpointSaver
@@ -40,6 +41,7 @@ from personalos.persistence.models import (
     WorkflowModel,
     WorkflowRunModel,
 )
+from personalos.persistence.ownership import workflow_visible
 
 #: State keys an approval request is held under; the ids in it are what the
 #: `approvals` table is keyed by.
@@ -61,11 +63,13 @@ class WorkflowActionReader:
         self.checkpointer = checkpointer
         self.clock = clock
 
-    def read(self, workflow_id: UUID) -> WorkflowActions | None:
-        """The workflow's actions and shortlist, or `None` if there is no such workflow."""
+    def read(self, workflow_id: UUID, *, access: Access) -> WorkflowActions | None:
+        """The workflow's actions and shortlist, or `None` if `access` cannot see it."""
         session = self.session_factory()
         try:
-            if session.get(WorkflowModel, workflow_id) is None:
+            if session.get(WorkflowModel, workflow_id) is None or not workflow_visible(
+                session, workflow_id, access
+            ):
                 return None
             thread_ids = [
                 thread_id

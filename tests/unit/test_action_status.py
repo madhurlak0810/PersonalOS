@@ -84,12 +84,14 @@ from personalos.domain.workflow import (
 )
 from personalos.persistence.models import Base
 from tests.fixtures import job_search_fakes as fakes
-from tests.fixtures.auth import bearer, install_test_auth
+from tests.fixtures.auth import DEFAULT_TEST_ACTOR, bearer, install_test_auth, owner_id
 
-USER_ID = UUID("6f1e7b3a-0000-4000-8000-0000000000bb")
+#: Whose workflow it is: the API's actor, so the API and the CLI both show it.
+USER_ID = owner_id(DEFAULT_TEST_ACTOR)
 WORKFLOW_ID = UUID("6f1e7b3a-0000-4000-8000-0000000000cc")
 THREAD = "job_search:test"
-ACTOR = "maddy"
+#: The reviewer is the owner: the API actor, whose workflows the CLI shows too.
+ACTOR = DEFAULT_TEST_ACTOR
 
 
 # --- Builders -------------------------------------------------------------------

@@ -29,12 +29,18 @@ the run's config -- the Phase A `ExecutionContext` contract, carried into a
 process that never saw the request. An approval decision's `decided_by` is the
 actor too, never a field the caller fills in.
 
-**The candidate defaults to the actor.** A chat that names no `user_id` searches
-for the actor's own candidate id (`actor_user_id`) -- the one its
-`/v1/profile` is stored under -- so the job search loads that stored profile
-and the request carries no profile at all. The actor is the one the bearer
-token verified as (`apps.api.auth`); which candidates an actor may name in
-`user_id` is the follow-up phase's authorization model.
+**The candidate is the actor.** A chat searches for the actor's own candidate
+id (`actor_user_id`) -- the one its `/v1/profile` is stored under -- so the job
+search loads that stored profile and the request carries no profile at all.
+The actor is the one the bearer token verified as (`apps.api.auth`); a request
+cannot name another (`user_id` in a body is a 422).
+
+**Every read is the caller's.** Workflows, threads and approvals are read
+within the caller's `ActorScope` (`apps.api.auth.current_access`): another
+actor's workflow -- or a thread of it, continued through `/v1/chat` -- is a
+404, exactly like one that does not exist. A resume that carries approval
+decisions needs the `approve` scope, as `POST /v1/approvals/{id}/decision`
+does, and is refused to a system identity.
 """
 
 import logging
@@ -48,7 +54,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from apps.api.auth import current_actor
+from apps.api.auth import current_access, current_actor, current_principal
 from personalos.bootstrap import (
     SUPERVISOR_WORKFLOW,
     build_approval_queue,
@@ -66,9 +72,11 @@ from personalos.domain.action_status import (
     WorkflowActions,
     audit_url,
 )
+from personalos.domain.auth import Principal
 from personalos.domain.errors import Conflict, NotFound, ValidationFailed
 from personalos.domain.failures import parse_stored_error, sanitize_error
 from personalos.domain.job_search import ApprovalDecision, ApprovalVerdict
+from personalos.domain.ownership import ActorScope
 from personalos.domain.search_profiles import actor_user_id
 from personalos.domain.workflow import (
     SUPERVISOR_THREAD_NAMESPACE,
@@ -91,6 +99,12 @@ from personalos.persistence.workflow_status import WorkflowStatusReader
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+#: Fields that would claim an identity. No request body has one -- the actor is
+#: the verified caller -- and the free-form resume `event` may not carry one.
+IDENTITY_FIELDS = frozenset(
+    {"actor_id", "actor", "user_id", "owner_id", "decided_by", "requested_by", "approved_by"}
+)
 
 #: Upper bound on one chat message. Generous for a request, and well short of
 #: anything that would make a checkpoint row unreasonable.
@@ -147,9 +161,8 @@ class ChatRequest(BaseModel):
     #: The thread a previous `POST /v1/chat` returned. Omitted, a new
     #: conversation -- and a new workflow -- is started.
     thread_id: str | None = None
-    #: The candidate the conversation is about. Omitted, it is the actor's own
-    #: (`actor_user_id`), whose stored profile the job search loads.
-    user_id: UUID | None = None
+    # No `user_id` or `actor_id`: the conversation is the verified actor's own
+    # (`actor_user_id`), and `extra="forbid"` makes naming anyone else a 422.
 
 
 class ChatResponse(BaseModel):
@@ -196,6 +209,12 @@ class ResumeRequest(BaseModel):
     def _exactly_one_answer(self) -> "ResumeRequest":
         if (self.decisions is None) == (self.event is None):
             raise ValueError("give exactly one of 'decisions' or 'event'")
+        named = sorted(IDENTITY_FIELDS & set(self.event or {}))
+        if named:
+            raise ValueError(
+                f"an event may not name an identity ({', '.join(named)}); "
+                "who answered is the authenticated caller"
+            )
         return self
 
 
@@ -351,8 +370,10 @@ class WorkflowStatusResponse(BaseModel):
 # --- Routes ---------------------------------------------------------------------
 
 
-def _read_or_404(services: WorkflowServices, workflow_id: UUID) -> WorkflowSnapshot:
-    snapshot = services.reader.read(workflow_id)
+def _read_or_404(
+    services: WorkflowServices, workflow_id: UUID, access: ActorScope
+) -> WorkflowSnapshot:
+    snapshot = services.reader.read(workflow_id, access=access)
     if snapshot is None:
         raise NotFound(
             f"workflow '{workflow_id}' not found", details={"workflow_id": str(workflow_id)}
@@ -367,6 +388,7 @@ async def chat(
     request: ChatRequest,
     services: WorkflowServices = Depends(get_workflow_services),
     actor_id: str = Depends(current_actor),
+    access: ActorScope = Depends(current_access),
 ):
     """Start a Supervisor conversation, or continue one, by queuing a run of it.
 
@@ -378,10 +400,8 @@ async def chat(
     new_workflow = request.thread_id is None
 
     if request.thread_id is None:
-        user_id = request.user_id
-        if user_id is None:
-            user_id = actor_user_id(actor_id)
-            services.profiles.ensure_user(user_id, display_name=actor_id)
+        user_id = actor_user_id(actor_id)
+        services.profiles.ensure_user(user_id, display_name=actor_id)
         workflow_id = services.registry.create_workflow(SUPERVISOR_WORKFLOW)
         thread = register_supervisor_thread(
             conversation_key=str(uuid4()),
@@ -393,7 +413,12 @@ async def chat(
         )
     else:
         thread = services.registry.resolve(request.thread_id)
-        if thread is None:
+        # Visibility first: another actor's thread is "not found", before its
+        # namespace could say anything about it.
+        snapshot = (
+            services.reader.read(thread.workflow_id, access=access) if thread is not None else None
+        )
+        if thread is None or snapshot is None:
             raise NotFound(
                 f"thread '{request.thread_id}' not found",
                 details={"thread_id": request.thread_id},
@@ -403,7 +428,6 @@ async def chat(
                 f"thread '{request.thread_id}' is not a conversation thread; only "
                 f"'{SUPERVISOR_THREAD_NAMESPACE}' threads can be continued through /v1/chat"
             )
-        snapshot = _read_or_404(services, thread.workflow_id)
         if snapshot.pending_interrupts:
             raise Conflict(
                 f"workflow {thread.workflow_id} is waiting on an approval; answer it with "
@@ -458,10 +482,13 @@ async def chat(
 async def get_workflow(
     workflow_id: UUID,
     services: WorkflowServices = Depends(get_workflow_services),
+    access: ActorScope = Depends(current_access),
 ):
     """Plan, completed steps, labelled actions, pending approval, failures, audit link."""
-    snapshot = _read_or_404(services, workflow_id)
-    return WorkflowStatusResponse.from_snapshot(snapshot, services.actions.read(workflow_id))
+    snapshot = _read_or_404(services, workflow_id, access)
+    return WorkflowStatusResponse.from_snapshot(
+        snapshot, services.actions.read(workflow_id, access=access)
+    )
 
 
 @router.post("/workflows/{workflow_id}/resume", response_model=ResumeResponse, status_code=202)
@@ -470,7 +497,8 @@ async def resume_workflow(
     http_request: Request,
     request: ResumeRequest,
     services: WorkflowServices = Depends(get_workflow_services),
-    actor_id: str = Depends(current_actor),
+    principal: Principal = Depends(current_principal),
+    access: ActorScope = Depends(current_access),
 ):
     """Queue the answer to the interrupt a workflow is parked on.
 
@@ -479,8 +507,12 @@ async def resume_workflow(
     naming its actual status, never a silently accepted no-op. So is an answer
     racing another answer to the same interrupt: the queue refuses the second.
     """
+    actor_id = principal.actor_id
     correlation_id = _correlation_id(http_request)
-    snapshot = _read_or_404(services, workflow_id)
+    snapshot = _read_or_404(services, workflow_id, access)
+    if request.decisions is not None:
+        # Decisions are approvals: the same gate as the decision endpoint.
+        services.approvals.require_decider(principal)
 
     pending = [
         interrupt
@@ -566,6 +598,7 @@ async def resume_workflow(
 
 
 __all__ = [
+    "IDENTITY_FIELDS",
     "router",
     "WorkflowServices",
     "build_workflow_services",

@@ -52,6 +52,7 @@ from personalos.domain.job_search import (
     ApprovalRequest,
 )
 from personalos.domain.models import ApplicationStatus
+from personalos.domain.ownership import SYSTEM_ACCESS
 from personalos.domain.redaction import REDACTED, default_redactor
 from personalos.domain.workflow import JOB_SEARCH_THREAD_NAMESPACE
 from personalos.persistence.application_lifecycle import ApplicationLifecycleStore
@@ -64,7 +65,7 @@ from personalos.persistence.models import (
     UserModel,
 )
 from personalos.persistence.repositories import ApplicationRepository, JobPostingRepository
-from tests.fixtures.auth import bearer, install_test_auth
+from tests.fixtures.auth import bearer, install_test_auth, owner_id
 
 S = ApplicationStatus
 ACTOR = "maddy"
@@ -100,16 +101,18 @@ def api_process(db_path: Path) -> TestClient:
     app.dependency_overrides[get_audit_store] = lambda: build_audit_store(factory)
     app.dependency_overrides[get_application_services] = lambda: build_application_services(factory)
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
-    return TestClient(install_test_auth(app), headers=bearer())
+    return TestClient(install_test_auth(app), headers=bearer(ACTOR))
 
 
 def applied_application(factory) -> UUID:
     """An APPLIED application, so withdrawing it can ask for the recruiter to be told."""
     session = factory()
     try:
-        user = UserModel(email=f"candidate-{uuid4()}@example.com")
-        session.add(user)
-        session.commit()
+        user = session.get(UserModel, owner_id(ACTOR))
+        if user is None:
+            user = UserModel(id=owner_id(ACTOR), email=f"candidate-{uuid4()}@example.com")
+            session.add(user)
+            session.commit()
         posting = JobPostingRepository(session).create(
             source="greenhouse",
             title="Staff Engineer",
@@ -125,7 +128,7 @@ def applied_application(factory) -> UUID:
         session.close()
     lifecycle = ApplicationLifecycleStore(factory)
     for status in (S.SAVED, S.PREPARING, S.READY_TO_APPLY, S.APPLIED):
-        lifecycle.transition(application_id, status, actor="setup")
+        lifecycle.transition(application_id, status, access=SYSTEM_ACCESS, actor="setup")
     return application_id
 
 
@@ -337,9 +340,7 @@ def test_an_unknown_workflow_trail_is_a_404(db_path):
 
 
 def test_a_workflow_with_nothing_recorded_has_an_empty_trail(db_path, session_factory):
-    workflow_id = build_workflow_thread_registry(session_factory).create_workflow(
-        JOB_SEARCH_WORKFLOW
-    )
+    workflow_id = owned_workflow(session_factory)
 
     response = api_process(db_path).get(f"/v1/workflows/{workflow_id}/audit")
 
@@ -429,9 +430,7 @@ def test_an_inverted_time_range_and_an_oversized_page_are_refused(db_path):
 @pytest.mark.parametrize("method", ["post", "put", "patch", "delete"])
 def test_no_endpoint_modifies_the_trail(db_path, session_factory, method):
     event_id = seed_event(session_factory)
-    workflow_id = build_workflow_thread_registry(session_factory).create_workflow(
-        JOB_SEARCH_WORKFLOW
-    )
+    workflow_id = owned_workflow(session_factory)
     client = api_process(db_path)
 
     for path in ("/v1/audit", f"/v1/audit/{event_id}", f"/v1/workflows/{workflow_id}/audit"):
@@ -451,9 +450,7 @@ BEARER = "Bearer ya29.a0AfH6SMBfakefakefakefakefake"
 
 def test_a_secret_in_the_source_rows_is_redacted_in_every_response(db_path, session_factory):
     """Rows written around the repositories, as a legacy or corrupted row would be."""
-    workflow_id = build_workflow_thread_registry(session_factory).create_workflow(
-        JOB_SEARCH_WORKFLOW
-    )
+    workflow_id = owned_workflow(session_factory)
     approval_id = uuid4()
     session = session_factory()
     try:
@@ -568,14 +565,34 @@ def test_a_secret_learned_after_the_row_was_written_is_redacted_on_read(db_path,
 # --- Helpers ----------------------------------------------------------------------
 
 
+def owned_workflow(factory, actor: str = ACTOR) -> UUID:
+    """A workflow with one run, owned by `actor` -- whose trail `actor` may read."""
+    registry = build_workflow_thread_registry(factory)
+    workflow_id = registry.create_workflow(JOB_SEARCH_WORKFLOW)
+    registry.register(
+        thread_id=f"job_search:{uuid4().hex}",
+        workflow_name=JOB_SEARCH_WORKFLOW,
+        workflow_id=workflow_id,
+        user_id=owner_id(actor),
+        actor_id=actor,
+    )
+    return workflow_id
+
+
 def seed_event(
     factory, *, actor: str = "seed", action: str = "files.overwrite_document", at: datetime = T0
 ) -> UUID:
-    """An audit row with no chain, written directly."""
+    """An audit row with no chain, written directly, on a workflow of `ACTOR`'s."""
+    workflow_id = owned_workflow(factory)
     session = factory()
     try:
         event = AuditEventModel(
-            actor=actor, action=action, target_ref="notes.md", result="success", timestamp=at
+            actor=actor,
+            action=action,
+            target_ref="notes.md",
+            result="success",
+            timestamp=at,
+            workflow_id=workflow_id,
         )
         session.add(event)
         session.commit()

@@ -25,7 +25,11 @@ the authorization code, and the access log line for it goes through the same
 log redaction as everything else.
 
 Behind the API token, except the callback, and deployment-wide: there is one
-set of Google connections per PersonalOS install. **The callback is the one
+set of Google connections per PersonalOS install. Because it belongs to no
+one actor, beginning consent and revoking need the `admin` scope, and the
+install-wide connection is listed only to an `admin` token; a credential
+reference with an owner is listed only to that owner
+(`CredentialRepository.list_by_provider`). **The callback is the one
 exemption besides `/health`**, because it is Google redirecting the user's
 browser, which has no bearer token to send. It is authenticated instead by
 its `state`: single-use, minted only by an authenticated `connect`, bound to
@@ -38,7 +42,9 @@ bearer dependency, and `tests/unit/test_api_auth.py` names it explicitly.
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from apps.api.auth import current_access, current_principal, requires_scope
 from personalos.bootstrap import build_google_connection_reader, build_google_connector
+from personalos.domain.auth import Principal, Scope
 from personalos.domain.failures import IntegrationHealth
 from personalos.domain.health import GOOGLE, GOOGLE_INTEGRATIONS
 from personalos.domain.integrations import (
@@ -48,6 +54,7 @@ from personalos.domain.integrations import (
     IntegrationStatus,
     RevokeResult,
 )
+from personalos.domain.ownership import ActorScope
 from personalos.executor.google_connect import GoogleConnectionReader, GoogleConnector
 from personalos.persistence.database import SessionLocal
 from personalos.secrets.oauth_loopback import LOOPBACK_HOST
@@ -106,9 +113,13 @@ def _callback_uri(request: Request) -> str:
 
 
 @router.get("/integrations", response_model=IntegrationsResponse)
-def list_integrations(reader: GoogleConnectionReader = Depends(get_google_connection_reader)):
+def list_integrations(
+    reader: GoogleConnectionReader = Depends(get_google_connection_reader),
+    principal: Principal = Depends(current_principal),
+    access: ActorScope = Depends(current_access),
+):
     """Every integration's connection and health state. Never includes token material."""
-    google = reader.status()
+    google = reader.status(access=access, include_unowned=principal.has(Scope.ADMIN))
     others = [
         _status(health, google) for health in reader.health.all() if health.provider != GOOGLE
     ]
@@ -136,6 +147,7 @@ def _status(health: IntegrationHealth, google: IntegrationStatus) -> Integration
 
 
 @router.post("/integrations/google/connect", response_model=ConsentRequest, status_code=201)
+@requires_scope(Scope.ADMIN)
 def begin_google_connect(
     request: Request,
     body: GoogleConnectRequest | None = None,
@@ -167,12 +179,16 @@ async def google_oauth_callback(
 
 
 @router.post("/integrations/google/revoke", response_model=GoogleRevokeResponse)
+@requires_scope(Scope.ADMIN)
 async def revoke_google(
     body: GoogleRevokeRequest | None = None,
     connector: GoogleConnector = Depends(get_google_connector),
+    access: ActorScope = Depends(current_access),
 ):
     """Revoke at Google and delete the keychain entry."""
-    results = await connector.revoke(body.account if body else None)
+    results = await connector.revoke(
+        body.account if body else None, access=access, include_unowned=True
+    )
     return GoogleRevokeResponse(results=results)
 
 

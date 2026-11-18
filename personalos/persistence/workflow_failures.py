@@ -35,6 +35,7 @@ from personalos.domain.failures import (
     redacted_receipt,
 )
 from personalos.domain.models import AuditEventResult
+from personalos.domain.ownership import Access
 from personalos.domain.redaction import redact_text
 from personalos.domain.workflow import RecoverableFailure, WorkflowCommandKind, WorkflowSnapshot
 from personalos.persistence.integration_health import IntegrationHealthStore
@@ -79,9 +80,9 @@ class WorkflowFailureStore:
         self.commands = commands
         self.integrations = integrations
 
-    def snapshot(self, workflow_id: UUID) -> WorkflowSnapshot | None:
-        """The workflow's snapshot, or `None` when it does not exist."""
-        return self.reader.read(workflow_id)
+    def snapshot(self, workflow_id: UUID, *, access: Access) -> WorkflowSnapshot | None:
+        """The workflow's snapshot, or `None` when `access` cannot see it."""
+        return self.reader.read(workflow_id, access=access)
 
     def failures(
         self, snapshot: WorkflowSnapshot, *, include_dismissed: bool = False

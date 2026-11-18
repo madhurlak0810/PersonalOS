@@ -21,7 +21,7 @@ import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, TypedDict
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -55,9 +55,11 @@ from personalos.domain.workflow import (
 )
 from personalos.persistence.models import ApprovalModel, AuditEventModel, Base, OutboxEventModel
 from tests.fixtures import job_search_fakes as fakes
-from tests.fixtures.auth import bearer, install_test_auth
+from tests.fixtures.auth import bearer, install_test_auth, owner_id
 
-USER_ID = UUID("6f1e7b3a-0000-4000-8000-0000000000aa")
+#: The reviewer is the candidate: an actor decides only its own approvals.
+REVIEWER = "user:reviewer"
+USER_ID = owner_id(REVIEWER)
 
 
 # --- Fixtures -------------------------------------------------------------------
@@ -87,7 +89,7 @@ def api_process(db_path: Path) -> TestClient:
     factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     app = create_app()
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
-    return TestClient(install_test_auth(app), headers=bearer())
+    return TestClient(install_test_auth(app), headers=bearer(REVIEWER))
 
 
 class _JobState(TypedDict, total=False):
