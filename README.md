@@ -1,5 +1,7 @@
 # PersonalOS
 
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 Local-first, multi-agent personal assistant that automates job search, orchestrated with LangGraph. An LLM proposes actions; a deterministic policy engine authorizes them and an isolated executor runs them, with durable state, human-approval gates, and a full audit trail.
 
 ## How it works
@@ -102,3 +104,7 @@ See `IMPLEMENTATION_GUIDE.md` for data flow and API details.
 Actively in development. Built: contracts and boundaries, the data model, the orchestration runtime, the security boundary, the API and worker, the outbox, tracing and logging, the evaluation harness and adversarial tests, covered by 2,000+ tests.
 
 Still to come: adapters for the ports the worker reports as unbound (application submission, mailbox, calendar), the File, Communications and Calendar subgraphs, the Google MCP server, and API authentication. See [Next Steps](IMPLEMENTATION_GUIDE.md#next-steps).
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.
