@@ -53,6 +53,7 @@ from personalos.bootstrap import (
     register_job_search_thread,
 )
 from personalos.domain.errors import ProviderPermanentFailure
+from personalos.domain.ownership import ActorScope
 from personalos.domain.progress import WORKFLOW_AGGREGATE, ProgressEventType
 from personalos.domain.workflow import (
     JOB_SEARCH_THREAD_NAMESPACE,
@@ -61,11 +62,13 @@ from personalos.domain.workflow import (
 )
 from personalos.persistence.models import Base, EventLogModel
 from personalos.persistence.workflow_progress import WorkflowProgressLog
-from tests.fixtures.auth import bearer, install_test_auth
+from tests.fixtures.auth import bearer, install_test_auth, owner_id
 
-USER_ID = UUID("6f1e7b3a-0000-4000-8000-0000000000dd")
-SECRET = "sk-live-4f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c"
 ACTOR = "user:alice"
+#: The candidate is the actor: a stream is only its owner's to read.
+USER_ID = owner_id(ACTOR)
+ACCESS = ActorScope.of(ACTOR)
+SECRET = "sk-live-4f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c"
 
 #: The whole run, as the log records it.
 FULL_RUN = [
@@ -106,7 +109,7 @@ def api_process(db_path: Path) -> TestClient:
     app.dependency_overrides[get_progress_log] = lambda: build_progress_log(factory)
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
     app.dependency_overrides[get_failure_services] = lambda: build_failure_services(factory)
-    return TestClient(install_test_auth(app), headers=bearer())
+    return TestClient(install_test_auth(app), headers=bearer(ACTOR))
 
 
 class _State(TypedDict, total=False):
@@ -167,7 +170,11 @@ class Harness:
 
         self.workflow_id = self.registry.create_workflow(JOB_SEARCH_WORKFLOW)
         self.thread = register_job_search_thread(
-            user_id=USER_ID, registry=self.registry, workflow_id=self.workflow_id
+            user_id=USER_ID,
+            registry=self.registry,
+            workflow_id=self.workflow_id,
+            # Its own thread: two harnesses are two workflows, each with a run.
+            search_key=str(self.workflow_id),
         )
         self.graph = builder(self).compile(
             checkpointer=build_durable_checkpointer(self.factory, self.registry)
@@ -309,6 +316,7 @@ def test_a_live_client_dropped_mid_run_resumes_without_gap_or_repeat(db_path):
                 follow=True,
                 settings=settings,
                 is_disconnected=never_disconnected,
+                access=ACCESS,
             )
             async for frame in stream:
                 received.extend(parse_frames(frame))
@@ -333,6 +341,7 @@ def test_a_live_client_dropped_mid_run_resumes_without_gap_or_repeat(db_path):
             follow=False,
             settings=settings,
             is_disconnected=never_disconnected,
+            access=ACCESS,
         ):
             reconnected.extend(parse_frames(frame))
         return received, reconnected
@@ -570,10 +579,13 @@ def test_an_event_is_never_stamped_behind_one_already_in_the_log(db_path):
         data={"step": "prepare"},
     )
 
-    [after] = log.events_after(harness.workflow_id, earlier_id)
+    [after] = log.events_after(harness.workflow_id, earlier_id, access=ACCESS)
     assert after.event_id == later_id
     assert after.at > ahead
-    assert [e.event_id for e in log.events_after(harness.workflow_id)] == [earlier_id, later_id]
+    assert [e.event_id for e in log.events_after(harness.workflow_id, access=ACCESS)] == [
+        earlier_id,
+        later_id,
+    ]
 
 
 def test_a_long_backlog_is_read_in_batches_without_loss(db_path):
@@ -594,6 +606,7 @@ def test_a_long_backlog_is_read_in_batches_without_loss(db_path):
             follow=False,
             settings=EventStreamSettings(batch_size=3),
             is_disconnected=connected,
+            access=ACCESS,
         ):
             frames.extend(parse_frames(frame))
         return frames

@@ -24,6 +24,14 @@ stateless, so any API worker process can check one another issued; the
 signing key is derived from the local token, so rotating the token voids
 every outstanding ticket.
 
+**Authorization follows.** A principal carries scopes (`read`, `write`,
+`approve`, `admin`). Every authenticated router is mounted behind
+`require_route_scope` too, which asks a `GET` for `read` and anything else for
+`write`, unless the endpoint names its own with `@requires_scope(...)` -- the
+approval decision names `approve`. A missing scope is a 403 and an audit row.
+Which *objects* a caller may touch is not decided here but in the stores,
+scoped by `current_access` (`personalos.domain.ownership`).
+
 **Turning it off is loopback-only.** `API_AUTH_ENABLED=false` makes every
 request the configured `API_ACTOR`, and `ensure_safe_bind` refuses to start
 such an API on anything but a loopback address.
@@ -48,8 +56,18 @@ from fastapi import Depends, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from personalos.config import settings
-from personalos.domain.auth import STREAM_TICKET_PREFIX, AuthMethod, Principal
-from personalos.domain.errors import Unauthenticated
+from personalos.domain.auth import (
+    HUMAN_SCOPES,
+    STREAM_TICKET_PREFIX,
+    AuthMethod,
+    Principal,
+    Scope,
+    is_system_actor,
+    parse_scopes,
+)
+from personalos.domain.errors import Forbidden, Unauthenticated
+from personalos.domain.ownership import ActorScope
+from personalos.persistence.ownership import DenialReason, ObjectType, record_denial
 from personalos.secrets.api_token import LocalApiToken
 
 logger = logging.getLogger(__name__)
@@ -81,12 +99,20 @@ class LocalTokenVerifier:
         token: LocalApiToken,
         *,
         actor_id: str,
+        scopes: frozenset[Scope] = HUMAN_SCOPES,
         reload_seconds: float = DEFAULT_TOKEN_RELOAD_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ):
-        """Verify against the token `token` manages, as `actor_id`."""
+        """Verify against the token `token` manages, as `actor_id` holding `scopes`.
+
+        An `actor_id` that names a system identity never holds `approve`,
+        whatever `scopes` lists.
+        """
         self._token = token
         self._actor_id = actor_id
+        self._scopes = (
+            frozenset(scopes) - {Scope.APPROVE} if is_system_actor(actor_id) else frozenset(scopes)
+        )
         self._reload_seconds = reload_seconds
         self._clock = clock
         self._lock = threading.Lock()
@@ -107,7 +133,9 @@ class LocalTokenVerifier:
             return None
         if not hmac.compare_digest(token.encode("utf-8"), current):
             return None
-        return Principal(actor_id=self._actor_id, method=AuthMethod.LOCAL_TOKEN)
+        return Principal(
+            actor_id=self._actor_id, method=AuthMethod.LOCAL_TOKEN, scopes=self._scopes
+        )
 
     def ticket_key(self) -> bytes | None:
         """The stream-ticket signing key, derived from the current token."""
@@ -144,6 +172,24 @@ class StreamTicket:
 
     ticket: str
     expires_at: datetime
+
+
+#: What a stream ticket lets its holder do: read the one stream it names.
+TICKET_SCOPES: frozenset[Scope] = frozenset({Scope.READ})
+
+
+@dataclass(frozen=True)
+class TicketCheck:
+    """The outcome of checking a ticket: who it is for, or why it was refused.
+
+    `actor_id` is set whenever the ticket is genuine (its MAC verifies), even
+    when it is refused -- for the wrong workflow, or expired -- so that the
+    refusal can be audited against the actor it was issued to.
+    """
+
+    principal: Principal | None
+    actor_id: str | None = None
+    refusal: DenialReason | None = None
 
 
 class StreamTicketSigner:
@@ -187,23 +233,36 @@ class StreamTicketSigner:
 
     def verify(self, ticket: str, workflow_id: UUID) -> Principal | None:
         """The principal a ticket was issued to, if it is genuine, current and for this workflow."""
+        return self.check(ticket, workflow_id).principal
+
+    def check(self, ticket: str, workflow_id: UUID) -> TicketCheck:
+        """Check a ticket against the stream it is being used for.
+
+        The principal it yields holds `read` only, and only for this one
+        workflow: a ticket is not a token.
+        """
         key = self._key()
         if key is None or not ticket.startswith(STREAM_TICKET_PREFIX):
-            return None
+            return TicketCheck(None)
         payload, dot, mac = ticket[len(STREAM_TICKET_PREFIX) :].partition(".")
         if not dot:
-            return None
+            return TicketCheck(None)
         expected = _b64(hmac.new(key, payload.encode("ascii", "replace"), hashlib.sha256).digest())
         if not hmac.compare_digest(mac.encode("ascii", "replace"), expected.encode("ascii")):
-            return None
+            return TicketCheck(None)
         try:
             claims = json.loads(_unb64(payload))
             actor, scoped, expires = str(claims["a"]), str(claims["w"]), int(claims["e"])
         except (ValueError, KeyError, TypeError):
-            return None
-        if scoped != str(workflow_id) or self._clock() >= expires:
-            return None
-        return Principal(actor_id=actor, method=AuthMethod.STREAM_TICKET)
+            return TicketCheck(None)
+        if scoped != str(workflow_id):
+            return TicketCheck(None, actor, DenialReason.TICKET_WRONG_WORKFLOW)
+        if self._clock() >= expires:
+            return TicketCheck(None, actor, DenialReason.TICKET_EXPIRED)
+        return TicketCheck(
+            Principal(actor_id=actor, method=AuthMethod.STREAM_TICKET, scopes=TICKET_SCOPES),
+            actor,
+        )
 
 
 # --- What the app holds ----------------------------------------------------------
@@ -233,7 +292,11 @@ def build_api_auth() -> ApiAuth:
             enabled=False,
             disabled_actor=settings.api_actor,
         )
-    verifier = LocalTokenVerifier(build_local_api_token(), actor_id=settings.api_actor)
+    verifier = LocalTokenVerifier(
+        build_local_api_token(),
+        actor_id=settings.api_actor,
+        scopes=parse_scopes(settings.api_token_scopes),
+    )
     return ApiAuth(
         verifier=verifier,
         tickets=StreamTicketSigner(verifier.ticket_key, ttl_seconds=ttl),
@@ -295,6 +358,30 @@ def current_actor(principal: Principal = Depends(require_principal)) -> str:
     return principal.actor_id
 
 
+def current_principal(request: Request) -> Principal:
+    """FastAPI dependency: the principal the router's auth dependency verified.
+
+    Works behind both `require_principal` and `require_stream_principal`,
+    which each leave it on `request.state` before any route dependency runs.
+    """
+    principal = getattr(request.state, "principal", None)
+    if not isinstance(principal, Principal):  # pragma: no cover - every router is behind auth
+        raise Unauthenticated()
+    return principal
+
+
+def current_access(principal: Principal = Depends(current_principal)) -> ActorScope:
+    """FastAPI dependency: the caller's `ActorScope`, which every store call is scoped by."""
+    return ActorScope.for_principal(principal)
+
+
+def get_audit_session_factory() -> Callable[[], object]:
+    """FastAPI dependency: where authorization denials raised here are audited."""
+    from personalos.persistence.database import SessionLocal
+
+    return SessionLocal
+
+
 def require_stream_principal(
     workflow_id: UUID,
     request: Request,
@@ -304,15 +391,89 @@ def require_stream_principal(
     ),
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     auth: ApiAuth = Depends(get_api_auth),
+    audit_sessions: Callable[[], object] = Depends(get_audit_session_factory),
 ) -> Principal:
-    """FastAPI dependency for an event stream: a bearer token, or a ticket for this workflow."""
+    """FastAPI dependency for an event stream: a bearer token, or a ticket for this workflow.
+
+    A genuine ticket refused for being for another workflow, or expired, is
+    audited against the actor it was issued to. The ticket itself is never
+    recorded: the audit row names the workflow and the route path, not the URL.
+    """
     if not auth.enabled or credentials is not None or not ticket:
         return _authenticate(request, credentials, auth)
-    principal = auth.tickets.verify(ticket, workflow_id)
-    if principal is None:
+    checked = auth.tickets.check(ticket, workflow_id)
+    if checked.principal is None:
+        if checked.refusal is not None and checked.actor_id is not None:
+            record_denial(
+                audit_sessions,  # type: ignore[arg-type]
+                actor_id=checked.actor_id,
+                object_type=ObjectType.WORKFLOW_EVENTS,
+                object_id=workflow_id,
+                reason=checked.refusal,
+            )
         raise Unauthenticated()
-    request.state.principal = principal
-    return principal
+    request.state.principal = checked.principal
+    return checked.principal
+
+
+# --- Scopes ----------------------------------------------------------------------
+
+_REQUIRED_SCOPE_ATTR = "__required_scope__"
+
+
+def requires_scope(scope: Scope):
+    """Mark an endpoint as needing `scope`, instead of its method's default."""
+
+    def mark(endpoint):
+        setattr(endpoint, _REQUIRED_SCOPE_ATTR, scope)
+        return endpoint
+
+    return mark
+
+
+def required_scope(endpoint: Callable | None, method: str) -> Scope:
+    """The scope an endpoint needs: its own mark, else `read` for GET/HEAD, else `write`."""
+    marked = getattr(endpoint, _REQUIRED_SCOPE_ATTR, None) if endpoint is not None else None
+    if isinstance(marked, Scope):
+        return marked
+    return Scope.READ if method.upper() in ("GET", "HEAD") else Scope.WRITE
+
+
+def require_route_scope(
+    request: Request,
+    principal: Principal = Depends(current_principal),
+    audit_sessions: Callable[[], object] = Depends(get_audit_session_factory),
+) -> Principal:
+    """FastAPI dependency: refuse, with a 403 and an audit row, a token lacking the route's scope.
+
+    Mounted on every authenticated router after the authentication
+    dependency. A system identity asking for `approve` is refused as such.
+    """
+    route = request.scope.get("route")
+    scope = required_scope(getattr(route, "endpoint", None), request.method)
+    if principal.has(scope):
+        return principal
+    reason = (
+        DenialReason.SYSTEM_IDENTITY
+        if scope is Scope.APPROVE and principal.is_system
+        else DenialReason.MISSING_SCOPE
+    )
+    record_denial(
+        audit_sessions,  # type: ignore[arg-type]
+        actor_id=principal.actor_id,
+        object_type=ObjectType.ROUTE,
+        object_id=None,
+        reason=reason,
+        # The path only: never the query string, where a stream ticket travels.
+        route=f"{request.method} {request.url.path}",
+        detail=f"requires {scope.value}",
+    )
+    raise Forbidden(
+        f"this credential lacks the '{scope.value}' scope this request needs"
+        if reason is DenialReason.MISSING_SCOPE
+        else "a system identity cannot decide an approval; only a person can",
+        details={"required_scope": scope.value},
+    )
 
 
 # --- Bind address ----------------------------------------------------------------
@@ -343,15 +504,23 @@ def ensure_safe_bind(host: str, *, auth_enabled: bool) -> None:
 
 
 __all__ = [
+    "TICKET_SCOPES",
     "ApiAuth",
     "LocalTokenVerifier",
     "StreamTicket",
     "StreamTicketSigner",
+    "TicketCheck",
     "TokenVerifier",
     "UnsafeBindAddress",
     "bearer_scheme",
     "build_api_auth",
+    "current_access",
     "current_actor",
+    "current_principal",
+    "get_audit_session_factory",
+    "require_route_scope",
+    "required_scope",
+    "requires_scope",
     "ensure_safe_bind",
     "get_api_auth",
     "is_loopback_host",

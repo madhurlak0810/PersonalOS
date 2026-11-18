@@ -17,6 +17,13 @@ is the read side keeping it that way.
 and `approvals` rows of the action an entry belongs to are attached under
 `links`, so any one entry is enough to trace the rest.
 
+**The trail is the caller's own.** Both reads are scoped by the caller's
+`ActorScope`: the search returns only events of the caller's workflows (and
+events filed under no workflow that name the caller, such as its own
+authorization denials), and another actor's workflow trail is a 404. The
+`actor` filter narrows the caller's own trail -- to what the worker did, say
+-- and can never widen it to someone else's.
+
 **Payloads are redacted.** Every value has been through the redactor on its way
 out, so a credential that reached a row -- a receipt that echoed a token, an
 error carrying a header -- comes back as `[REDACTED]`.
@@ -30,6 +37,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
+from apps.api.auth import current_access
 from personalos.bootstrap import build_audit_trail_store
 from personalos.domain.audit import (
     DEFAULT_AUDIT_PAGE_SIZE,
@@ -38,6 +46,7 @@ from personalos.domain.audit import (
     AuditTrailEntry,
 )
 from personalos.domain.errors import NotFound
+from personalos.domain.ownership import ActorScope
 from personalos.persistence.audit_trail import AuditTrailStore
 from personalos.persistence.database import SessionLocal
 
@@ -92,6 +101,7 @@ async def search_audit(
     limit: int = Query(default=DEFAULT_AUDIT_PAGE_SIZE, ge=1, le=MAX_AUDIT_PAGE_SIZE),
     offset: int = Query(default=0, ge=0),
     store: AuditTrailStore = Depends(get_audit_store),
+    access: ActorScope = Depends(current_access),
 ):
     """Audit events matching every filter given, newest first.
 
@@ -108,7 +118,8 @@ async def search_audit(
             until=until,
             limit=limit,
             offset=offset,
-        )
+        ),
+        access=access,
     )
     return AuditSearchResponse(
         entries=list(page.entries),
@@ -123,9 +134,10 @@ async def search_audit(
 async def get_workflow_audit(
     workflow_id: UUID,
     store: AuditTrailStore = Depends(get_audit_store),
+    access: ActorScope = Depends(current_access),
 ):
     """Everything recorded for one workflow, in the order it happened."""
-    trail = store.workflow_trail(workflow_id)
+    trail = store.workflow_trail(workflow_id, access=access)
     if trail is None:
         raise NotFound(
             f"workflow '{workflow_id}' not found",

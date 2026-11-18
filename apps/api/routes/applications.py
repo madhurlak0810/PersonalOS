@@ -28,6 +28,11 @@ job-search run on the application's own thread, which proposes the effect,
 parks at the approval checkpoint -- where it shows up in `GET /v1/approvals` --
 and writes the status change only once the effect has run. That answer is a
 202, and the board keeps showing the old status until then.
+
+**The board is the caller's own.** Every store call is scoped by the caller's
+`ActorScope`: the board lists only the caller's applications (there is no
+`user_id` to ask for someone else's), and another actor's application is a
+404 on every endpoint -- its documents, events and approvals with it.
 """
 
 import logging
@@ -41,7 +46,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from apps.api.auth import current_actor
+from apps.api.auth import current_access, current_actor
 from apps.api.routes.approvals import PendingApprovalItem
 from apps.api.routes.workflows import WorkflowServices, build_workflow_services
 from personalos.bootstrap import (
@@ -67,6 +72,7 @@ from personalos.domain.checkpoints import PendingCheckpoint
 from personalos.domain.errors import Conflict, NotFound, PolicyDeniedError
 from personalos.domain.job_search import JobMatch
 from personalos.domain.models import ApplicationStatus
+from personalos.domain.ownership import ActorScope
 from personalos.domain.workflow import (
     WorkflowCommand,
     WorkflowCommandKind,
@@ -213,8 +219,10 @@ class TransitionResponse(BaseModel):
 # --- Routes ---------------------------------------------------------------------
 
 
-def _card_or_404(services: ApplicationServices, application_id: UUID) -> ApplicationCard:
-    card = services.board.card(application_id)
+def _card_or_404(
+    services: ApplicationServices, application_id: UUID, access: ActorScope
+) -> ApplicationCard:
+    card = services.board.card(application_id, access=access)
     if card is None:
         raise NotFound(
             f"application '{application_id}' not found",
@@ -229,10 +237,10 @@ async def list_applications(
     company: str | None = Query(default=None, max_length=255),
     created_from: datetime | None = Query(default=None),
     created_to: datetime | None = Query(default=None),
-    user_id: UUID | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=MAX_BOARD_PAGE_SIZE),
     offset: int = Query(default=0, ge=0),
     services: ApplicationServices = Depends(get_application_services),
+    access: ActorScope = Depends(current_access),
 ):
     """The board: applications grouped by lifecycle state, a page at a time.
 
@@ -245,10 +253,10 @@ async def list_applications(
             company=company or None,
             created_from=created_from,
             created_to=created_to,
-            user_id=user_id,
             limit=limit,
             offset=offset,
-        )
+        ),
+        access=access,
     )
     return BoardResponse(
         columns=[
@@ -270,9 +278,10 @@ async def list_applications(
 async def get_application(
     application_id: UUID,
     services: ApplicationServices = Depends(get_application_services),
+    access: ActorScope = Depends(current_access),
 ):
     """One application: fit, evidence, documents, recruiter events and open waits."""
-    detail = services.board.detail(application_id)
+    detail = services.board.detail(application_id, access=access)
     if detail is None:
         raise NotFound(
             f"application '{application_id}' not found",
@@ -290,7 +299,7 @@ async def get_application(
         pending_checkpoints=list(detail.pending_checkpoints),
         pending_approvals=[
             PendingApprovalItem.from_pending(approval)
-            for approval in services.workflows.approvals.list_pending()
+            for approval in services.workflows.approvals.list_pending(access=access)
             if approval.thread_id == thread_id
         ],
         history=list(detail.history),
@@ -305,6 +314,7 @@ async def transition_application(
     request: TransitionRequest,
     services: ApplicationServices = Depends(get_application_services),
     actor_id: str = Depends(current_actor),
+    access: ActorScope = Depends(current_access),
 ):
     """Move an application to another lifecycle state.
 
@@ -313,14 +323,14 @@ async def transition_application(
     put to the policy engine -- a denial is a 403 -- and otherwise queued for
     approval (202); a second one while the first is still in flight is a 409.
     """
-    card = _card_or_404(services, application_id)
+    card = _card_or_404(services, application_id, access)
     check_manual_transition(
         card.status, request.to, resume_status=card.resume_status, effect=request.effect
     )
 
     if request.effect is None:
         state = services.lifecycle.transition(
-            application_id, request.to, reason=request.reason, actor=actor_id
+            application_id, request.to, access=access, reason=request.reason, actor=actor_id
         )
         logger.info(
             "application %s moved %s -> %s by %s",
@@ -333,7 +343,7 @@ async def transition_application(
             outcome=TransitionOutcomeKind.APPLIED,
             from_status=card.status,
             to_status=request.to,
-            application=_card_or_404(services, application_id),
+            application=_card_or_404(services, application_id, access),
             event_id=state.last_event_id,
         )
 
@@ -342,6 +352,7 @@ async def transition_application(
         services,
         card,
         request,
+        access=access,
         actor_id=actor_id,
         correlation_id=getattr(http_request.state, "correlation_id", None) or uuid4(),
     )
@@ -352,6 +363,7 @@ def _queue_effectful_transition(
     card: ApplicationCard,
     request: TransitionRequest,
     *,
+    access: ActorScope,
     actor_id: str,
     correlation_id: UUID,
 ) -> TransitionResponse:
@@ -365,7 +377,7 @@ def _queue_effectful_transition(
         actor_id=actor_id,
         correlation_id=correlation_id,
     )
-    snapshot = workflows.reader.read(thread.workflow_id)
+    snapshot = workflows.reader.read(thread.workflow_id, access=access)
     if snapshot is not None and snapshot.status in _IN_FLIGHT:
         raise Conflict(
             f"a transition on application {application_id} is already in flight "
@@ -386,12 +398,14 @@ def _queue_effectful_transition(
         posting_url=card.url,
         recipient=request.recipient,
         message=(
-            request.message or services.board.cover_note(application_id)
+            request.message or services.board.cover_note(application_id, access=access)
             if is_submission
             else request.message
         ),
         attachments=(
-            tuple(services.board.submission_attachments(application_id)) if is_submission else ()
+            tuple(services.board.submission_attachments(application_id, access=access))
+            if is_submission
+            else ()
         ),
     )
     intent = transition_action_intent(transition)
@@ -410,7 +424,7 @@ def _queue_effectful_transition(
             f"{verdict.reason}"
         )
 
-    event_id = services.board.record_transition_request(transition)
+    event_id = services.board.record_transition_request(transition, access=access)
     command = workflows.commands.enqueue(
         WorkflowCommand(
             command_id=uuid4(),

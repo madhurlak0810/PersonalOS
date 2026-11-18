@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     # The actor the local token authenticates as: whose profile, evidence and
     # approvals a request touches. Matches the CLI's default --actor.
     api_actor: str = "api"
+    # The scopes the local token carries, comma-separated, from `read`,
+    # `write`, `approve` and `admin` (see `personalos.domain.auth.Scope`). All
+    # four by default: the local token is the install's one person. A token
+    # for an API_ACTOR that names a system identity never carries `approve`.
+    api_token_scopes: str = "read,write,approve,admin"
     # How long a stream ticket (`POST /v1/auth/stream-tickets`) can be used to
     # open a workflow's event stream.
     api_stream_ticket_seconds: int = 60

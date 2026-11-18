@@ -76,13 +76,13 @@ def _client(factory) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
     app.dependency_overrides[get_failure_services] = lambda: build_failure_services(factory)
-    return TestClient(install_test_auth(app), headers=bearer())
+    # The candidate's own actor: a UUID actor is its own candidate id, so the
+    # chat searches for `fakes.USER_ID` without naming anyone in the body.
+    return TestClient(install_test_auth(app), headers=bearer(str(fakes.USER_ID)))
 
 
 def _chat(client: TestClient) -> dict:
-    response = client.post(
-        "/v1/chat", json={"message": "find me a python job", "user_id": str(fakes.USER_ID)}
-    )
+    response = client.post("/v1/chat", json={"message": "find me a python job"})
     assert response.status_code == 202, response.text
     return response.json()
 

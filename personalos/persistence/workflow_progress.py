@@ -29,6 +29,7 @@ from uuid import UUID
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
+from personalos.domain.ownership import Access
 from personalos.domain.progress import (
     DEFAULT_PROGRESS_BATCH,
     STORED_PROGRESS_TYPES,
@@ -38,7 +39,8 @@ from personalos.domain.progress import (
     WorkflowProgressEvent,
 )
 from personalos.domain.redaction import redact
-from personalos.persistence.models import EventLogModel, WorkflowModel
+from personalos.persistence.models import EventLogModel
+from personalos.persistence.ownership import ObjectType, deny_if_not_visible, workflow_visible
 from personalos.persistence.repositories import EventLogRepository
 
 logger = logging.getLogger(__name__)
@@ -117,31 +119,43 @@ class WorkflowProgressLog:
     # Read side
     # ------------------------------------------------------------------
 
-    def workflow_exists(self, workflow_id: UUID) -> bool:
-        """Whether the workflow is registered at all."""
+    def workflow_exists(self, workflow_id: UUID, *, access: Access) -> bool:
+        """Whether the workflow is registered and `access` may see it.
+
+        A scoped miss -- no such workflow, or another actor's -- is audited.
+        """
         session = self.session_factory()
         try:
-            return (
-                session.query(WorkflowModel.id).filter(WorkflowModel.id == workflow_id).first()
-                is not None
-            )
+            visible = workflow_visible(session, workflow_id, access)
         finally:
             session.close()
+        return deny_if_not_visible(
+            self.session_factory,
+            access,
+            visible=visible,
+            object_type=ObjectType.WORKFLOW_EVENTS,
+            object_id=workflow_id,
+        )
 
     def events_after(
         self,
         workflow_id: UUID,
         after: UUID | None = None,
         *,
+        access: Access,
         limit: int = DEFAULT_PROGRESS_BATCH,
     ) -> list[WorkflowProgressEvent]:
         """The workflow's events after `after` (from the first when `None`), oldest first.
 
         Raises `InvalidEventCursor` when `after` is not one of this workflow's
         events. At most `limit`; call again from the last one for the rest.
+        Nothing at all for a workflow `access` cannot see -- a cursor into
+        another actor's stream finds no events, not theirs.
         """
         session = self.session_factory()
         try:
+            if not workflow_visible(session, workflow_id, access):
+                return []
             query = session.query(EventLogModel).filter(
                 EventLogModel.aggregate_type == WORKFLOW_AGGREGATE,
                 EventLogModel.aggregate_id == workflow_id,

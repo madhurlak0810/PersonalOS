@@ -32,6 +32,7 @@ from uuid import UUID
 from langgraph.checkpoint.base import CheckpointTuple
 from sqlalchemy.orm import Session
 
+from personalos.domain.ownership import Access
 from personalos.domain.workflow import (
     PendingInterrupt,
     RecoverableFailure,
@@ -41,6 +42,12 @@ from personalos.domain.workflow import (
 )
 from personalos.persistence.checkpointer import SqlAlchemyCheckpointSaver
 from personalos.persistence.models import CheckpointWriteModel, WorkflowModel, WorkflowRunModel
+from personalos.persistence.ownership import (
+    ObjectType,
+    deny_if_not_visible,
+    workflow_column_filter,
+    workflow_visible,
+)
 from personalos.persistence.workflow_commands import WorkflowCommandQueue
 
 logger = logging.getLogger(__name__)
@@ -71,12 +78,29 @@ class WorkflowStatusReader:
         self.checkpointer = checkpointer
         self.commands = commands
 
-    def read(self, workflow_id: UUID) -> WorkflowSnapshot | None:
-        """The workflow as the database has it, or `None` if it does not exist."""
+    def read(self, workflow_id: UUID, *, access: Access) -> WorkflowSnapshot | None:
+        """The workflow as the database has it, or `None` if `access` cannot see it.
+
+        "Cannot see" covers both a workflow that does not exist and one
+        another actor owns; a scoped miss is audited as a denial either way.
+        """
         session = self.session_factory()
         try:
-            workflow = session.query(WorkflowModel).filter(WorkflowModel.id == workflow_id).first()
+            visible = workflow_visible(session, workflow_id, access)
+            workflow = (
+                session.query(WorkflowModel).filter(WorkflowModel.id == workflow_id).first()
+                if visible
+                else None
+            )
             if workflow is None:
+                session.close()
+                deny_if_not_visible(
+                    self.session_factory,
+                    access,
+                    visible=False,
+                    object_type=ObjectType.WORKFLOW,
+                    object_id=workflow_id,
+                )
                 return None
             runs = (
                 session.query(WorkflowRunModel)
@@ -97,8 +121,8 @@ class WorkflowStatusReader:
             created_at=created_at,
         )
 
-    def interrupted_workflow_ids(self) -> list[UUID]:
-        """Workflows with a thread that has ever stopped at an interrupt.
+    def interrupted_workflow_ids(self, *, access: Access) -> list[UUID]:
+        """Workflows `access` may see with a thread that has ever stopped at an interrupt.
 
         A superset of the workflows waiting right now: an interrupt write
         outlives its answer. It is the cheap narrowing a cross-workflow listing
@@ -112,7 +136,10 @@ class WorkflowStatusReader:
                     CheckpointWriteModel,
                     CheckpointWriteModel.thread_id == WorkflowRunModel.thread_id,
                 )
-                .filter(CheckpointWriteModel.channel == _INTERRUPT_CHANNEL)
+                .filter(
+                    CheckpointWriteModel.channel == _INTERRUPT_CHANNEL,
+                    workflow_column_filter(WorkflowRunModel.workflow_id, access),
+                )
                 .distinct()
                 .all()
             )

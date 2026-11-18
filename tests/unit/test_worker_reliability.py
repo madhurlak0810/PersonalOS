@@ -53,6 +53,7 @@ from personalos.domain.job_search import (
     ApprovalVerdict,
 )
 from personalos.domain.models import OutboxEventStatus, ToolExecutionStatus
+from personalos.domain.ownership import SYSTEM_ACCESS
 from personalos.domain.retry_policy import (
     CALENDAR_WRITE,
     DRAFT,
@@ -74,12 +75,13 @@ from personalos.persistence.models import (
     OutboxEventModel,
     ToolExecutionModel,
     WorkflowModel,
+    WorkflowRunModel,
 )
 from personalos.persistence.repositories import OutboxEventRepository
 from personalos.persistence.workflow_commands import WORKFLOW_COMMAND_EVENT
 from personalos.policy import ToolIntent
 from personalos.tools.gateway import ToolResult
-from tests.fixtures.auth import bearer, install_test_auth
+from tests.fixtures.auth import DEFAULT_TEST_ACTOR, bearer, install_test_auth, owner_id
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 T0 = datetime(2026, 10, 23, 9, 0)
@@ -157,10 +159,20 @@ def _row(factory, outbox_id: UUID) -> OutboxEventModel:
 
 
 def _workflow(factory) -> UUID:
+    """A workflow of the API actor's: one run, keyed by its owner id."""
     session = factory()
     try:
         workflow = WorkflowModel(name="job_search")
         session.add(workflow)
+        session.commit()
+        session.add(
+            WorkflowRunModel(
+                workflow_id=workflow.id,
+                user_id=owner_id(),
+                thread_id=f"job_search:{uuid4().hex}",
+                actor_id=DEFAULT_TEST_ACTOR,
+            )
+        )
         session.commit()
         return workflow.id
     finally:
@@ -602,7 +614,7 @@ def test_a_schema_invalid_event_is_quarantined_and_surfaced_for_retry(factory, c
     assert failure["status"] == "failed"
     assert failure["workflow_id"] == str(workflow_id)
 
-    retried = client.post(f"/v1/failures/events/{poison_id}/retry", headers=bearer("operator"))
+    retried = client.post(f"/v1/failures/events/{poison_id}/retry", headers=bearer())
     assert retried.status_code == 202, retried.text
     assert retried.json()["status"] == "retry_queued"
     row = _row(factory, poison_id)
@@ -617,7 +629,7 @@ def test_a_schema_invalid_event_is_quarantined_and_surfaced_for_retry(factory, c
             .filter(AuditEventModel.action == EVENT_RETRY_REQUESTED)
             .all()
         )
-        assert audit.actor == "operator"
+        assert audit.actor == DEFAULT_TEST_ACTOR
         assert audit.target_ref == event_target(poison_id)
         assert audit.workflow_id == workflow_id
     finally:
@@ -647,11 +659,11 @@ def test_a_handler_rejecting_the_payload_quarantines_it_without_a_retry(factory,
     # Surfaced on the workflow's own failures view...
     client = _api(db_path)
     services = build_failure_services(factory)
-    (failure,) = services.events.failures(workflow_id=workflow_id)
+    (failure,) = services.events.failures(access=SYSTEM_ACCESS, workflow_id=workflow_id)
     assert failure.failure_id == envelope.event_id
     assert failure.event_id == envelope.event_id
     assert failure.disposition.value == "quarantined"
-    assert services.events.failures(workflow_id=uuid4()) == []
+    assert services.events.failures(access=SYSTEM_ACCESS, workflow_id=uuid4()) == []
 
     # ...and once the handler is fixed, a manual retry delivers it.
     assert client.post(f"/v1/failures/events/{envelope.event_id}/retry").status_code == 202

@@ -21,6 +21,13 @@ workflow's events is a 422 rather than a replay from the start.
 **Nothing here touches the run.** The stream only reads; the worker only
 appends. A slow or vanished client holds up nothing but its own connection.
 
+**The stream is the caller's own.** It is read within the caller's
+`ActorScope` -- the bearer token's actor, or the actor a stream ticket was
+issued to. Another actor's workflow is a 404, like one that does not exist,
+and so is a cursor into it: `Last-Event-ID` cannot reach events of a workflow
+the caller does not own. A ticket opens only the workflow it names, and only
+until it expires (`apps.api.auth`).
+
 `?follow=false` sends what has happened so far and closes, instead of
 waiting for more: one read of the backlog, for a client that would rather
 poll.
@@ -37,8 +44,10 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from apps.api.auth import current_access
 from personalos.bootstrap import build_workflow_progress_log
 from personalos.domain.errors import NotFound, ValidationFailed
+from personalos.domain.ownership import ActorScope
 from personalos.domain.progress import DEFAULT_PROGRESS_BATCH, WorkflowProgressEvent
 from personalos.persistence.database import SessionLocal
 from personalos.persistence.workflow_progress import WorkflowProgressLog
@@ -98,6 +107,7 @@ async def progress_stream(
     follow: bool,
     settings: EventStreamSettings,
     is_disconnected: Callable[[], Awaitable[bool]],
+    access: ActorScope,
     first: list[WorkflowProgressEvent] | None = None,
 ) -> AsyncIterator[str]:
     """The frames of a workflow's events after `after`, then (if `follow`) of new ones.
@@ -112,7 +122,9 @@ async def progress_stream(
     while True:
         if batch is None:
             batch = await run_in_threadpool(
-                log.events_after, workflow_id, cursor, limit=settings.batch_size
+                lambda after=cursor: log.events_after(
+                    workflow_id, after, access=access, limit=settings.batch_size
+                )
             )
         for event in batch:
             yield sse_frame(event)
@@ -161,20 +173,23 @@ async def stream_workflow_events(
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
     log: WorkflowProgressLog = Depends(get_progress_log),
     settings: EventStreamSettings = Depends(get_event_stream_settings),
+    access: ActorScope = Depends(current_access),
 ):
     """Stream the workflow's progress events, resuming after `Last-Event-ID` if given.
 
     The header wins over `?last_event_id=` when both are sent: it is what a
     reconnecting `EventSource` sets, and it is the newer of the two.
     """
-    if not await run_in_threadpool(log.workflow_exists, workflow_id):
+    if not await run_in_threadpool(lambda: log.workflow_exists(workflow_id, access=access)):
         raise NotFound(
             f"workflow '{workflow_id}' not found", details={"workflow_id": str(workflow_id)}
         )
     after = _cursor(last_event_id if last_event_id is not None else last_event_id_query)
     # Read the first batch here, before the response starts, so a cursor that
     # names no event of this workflow is an error response, not a broken stream.
-    first = await run_in_threadpool(log.events_after, workflow_id, after, limit=settings.batch_size)
+    first = await run_in_threadpool(
+        lambda: log.events_after(workflow_id, after, access=access, limit=settings.batch_size)
+    )
     return StreamingResponse(
         progress_stream(
             log,
@@ -183,6 +198,7 @@ async def stream_workflow_events(
             follow=follow,
             settings=settings,
             is_disconnected=request.is_disconnected,
+            access=access,
             first=first,
         ),
         media_type=EVENT_STREAM,

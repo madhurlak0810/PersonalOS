@@ -101,7 +101,7 @@ export interface paths {
         };
         /**
          * List Approvals
-         * @description Every approval still owed an answer, oldest first; expired ones are marked.
+         * @description Every approval of the caller's still owed an answer, oldest first; expired ones marked.
          */
         get: operations["list_approvals_v1_approvals_get"];
         put?: never;
@@ -172,7 +172,7 @@ export interface paths {
         put?: never;
         /**
          * Create Stream Ticket
-         * @description A short-lived ticket for one workflow's event stream.
+         * @description A short-lived ticket for one of the caller's workflows' event stream.
          */
         post: operations["create_stream_ticket_v1_auth_stream_tickets_post"];
         delete?: never;
@@ -254,7 +254,7 @@ export interface paths {
         };
         /**
          * List Event Failures
-         * @description Every dead-lettered or quarantined event, with its last error, newest first.
+         * @description Every dead-lettered or quarantined event the caller may see, newest first.
          */
         get: operations["list_event_failures_v1_failures_events_get"];
         put?: never;
@@ -278,8 +278,8 @@ export interface paths {
          * Retry Event Failure
          * @description Put a dead-lettered or quarantined event back in line, with a fresh attempt budget.
          *
-         *     A 404 when there is no such event, and a 409 when it is not parked --
-         *     pending, being delivered, or delivered.
+         *     A 404 when there is no such event the caller may see, and a 409 when it
+         *     is not parked -- pending, being delivered, or delivered.
          */
         post: operations["retry_event_failure_v1_failures_events__failure_id__retry_post"];
         delete?: never;
@@ -931,7 +931,7 @@ export interface components {
          * @description How a principal was established. Recorded, never trusted for scoping.
          * @enum {string}
          */
-        AuthMethod: "local_token" | "stream_ticket" | "disabled";
+        AuthMethod: "local_token" | "stream_ticket" | "disabled" | "system";
         /**
          * BoardColumnView
          * @description One lifecycle state: this page's cards in it, and how many match in all.
@@ -1043,8 +1043,6 @@ export interface components {
             message: string;
             /** Thread Id */
             thread_id?: string | null;
-            /** User Id */
-            user_id?: string | null;
         };
         /**
          * ChatResponse
@@ -2071,7 +2069,7 @@ export interface components {
          *     `DENIED_BY_USER` is the ordinary outcome of a reviewer saying no.
          * @enum {string}
          */
-        RefusalReason: "no_approval_request" | "not_approved" | "denied_by_user" | "misdirected_decision" | "action_hash_mismatch" | "approval_expired";
+        RefusalReason: "no_approval_request" | "not_approved" | "denied_by_user" | "misdirected_decision" | "action_hash_mismatch" | "approval_expired" | "system_approver";
         /**
          * ResumeRequest
          * @description The answer to whatever the workflow is waiting on.
@@ -2169,6 +2167,22 @@ export interface components {
             secret_deleted: boolean;
         };
         /**
+         * Scope
+         * @description What a token lets its holder do. Carried by the principal, checked per route.
+         *
+         *     - `read`: see the actor's own workflows, approvals, applications, audit.
+         *     - `write`: start, resume, retry and move them.
+         *     - `approve`: decide an approval (`POST /v1/approvals/{id}/decision`, or a
+         *       resume that carries decisions). Never held by a system identity.
+         *     - `admin`: install-wide operations that belong to no one actor -- the
+         *       Google connection, dead-lettered events, the integration health board.
+         *
+         *     `admin` does not widen ownership: an admin still sees only its own
+         *     workflows. Ownership is `ActorScope`'s, not a scope's.
+         * @enum {string}
+         */
+        Scope: "read" | "write" | "approve" | "admin";
+        /**
          * SeniorityLevel
          * @description Career level of a role, in ascending order.
          *
@@ -2239,7 +2253,7 @@ export interface components {
         };
         /**
          * StreamTicketRequest
-         * @description Which workflow's event stream the ticket opens.
+         * @description Which workflow's event stream the ticket opens. The actor is the caller's.
          */
         StreamTicketRequest: {
             /**
@@ -2369,12 +2383,16 @@ export interface components {
         };
         /**
          * WhoAmIResponse
-         * @description The verified caller.
+         * @description The verified caller: who, what kind of identity, and what its token allows.
          */
         WhoAmIResponse: {
             /** Actor Id */
             actor_id: string;
+            /** Kind */
+            kind: string;
             method: components["schemas"]["AuthMethod"];
+            /** Scopes */
+            scopes?: components["schemas"]["Scope"][];
         };
         /**
          * WorkMode
@@ -2602,7 +2620,6 @@ export interface operations {
                 company?: string | null;
                 created_from?: string | null;
                 created_to?: string | null;
-                user_id?: string | null;
                 limit?: number;
                 offset?: number;
             };

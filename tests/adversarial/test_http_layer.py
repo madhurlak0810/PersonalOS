@@ -20,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.main import create_app
+from apps.api.routes.events import get_progress_log
 from apps.api.security import (
     API_CONTENT_SECURITY_POLICY,
     DOCS_CONTENT_SECURITY_POLICY,
@@ -47,11 +48,27 @@ DISALLOWED_ORIGINS = {
 MAX_BODY_BYTES = 4096
 
 
+class _EveryWorkflowIsYours:
+    """A progress log for which the caller owns every workflow, so a ticket is issued.
+
+    These tests use `POST /v1/auth/stream-tickets` as a small JSON endpoint;
+    which workflows an actor owns is `test_actor_scoping`'s business.
+    """
+
+    def workflow_exists(self, workflow_id, *, access) -> bool:
+        return True
+
+    def events_after(self, workflow_id, after, *, access, limit):
+        return []
+
+
 @pytest.fixture
 def app(monkeypatch):
     monkeypatch.setattr(settings, "api_cors_origins", [UI_ORIGIN])
     monkeypatch.setattr(settings, "api_max_body_bytes", MAX_BODY_BYTES)
-    return install_test_auth(create_app())
+    app = install_test_auth(create_app())
+    app.dependency_overrides[get_progress_log] = lambda: _EveryWorkflowIsYours()
+    return app
 
 
 @pytest.fixture

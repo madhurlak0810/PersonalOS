@@ -32,6 +32,7 @@ from personalos.domain.models import (
     allowed_application_transitions,
     validate_application_status_transition,
 )
+from personalos.domain.ownership import SYSTEM_ACCESS
 from personalos.persistence.application_lifecycle import ApplicationLifecycleStore
 from personalos.persistence.models import (
     ApplicationModel,
@@ -220,11 +221,11 @@ def test_every_transition_is_accepted_or_rejected_by_the_store(move):
         store = ApplicationLifecycleStore(factory, clock=TickingClock())
         application_id = _new_application(factory)
         for step in REACHABLE[(status, held_from)]:
-            store.transition(application_id, step)
+            store.transition(application_id, step, access=SYSTEM_ACCESS)
         events_before = _status_events(factory, application_id)
 
         if target in allowed_application_transitions(status, resume_status=held_from):
-            state = store.transition(application_id, target, reason="because")
+            state = store.transition(application_id, target, access=SYSTEM_ACCESS, reason="because")
             assert state.status is target
             events = _status_events(factory, application_id)
             assert len(events) == len(events_before) + 1
@@ -241,7 +242,7 @@ def test_every_transition_is_accepted_or_rejected_by_the_store(move):
                 session.close()
         else:
             with pytest.raises(InvalidApplicationTransition):
-                store.transition(application_id, target)
+                store.transition(application_id, target, access=SYSTEM_ACCESS)
             state = store.get(application_id)
             assert (state.status, state.resume_status) == (status, held_from)
             assert _status_events(factory, application_id) == events_before
@@ -256,7 +257,7 @@ def test_discovered_to_offer_is_rejected_by_the_store():
         store = ApplicationLifecycleStore(factory, clock=TickingClock())
         application_id = _new_application(factory)
         with pytest.raises(InvalidApplicationTransition):
-            store.transition(application_id, S.OFFER)
+            store.transition(application_id, S.OFFER, access=SYSTEM_ACCESS)
         assert store.get(application_id).status is S.DISCOVERED
         assert _status_events(factory, application_id) == []
     finally:
@@ -293,7 +294,7 @@ def test_a_recommendation_cannot_set_an_arbitrary_status(to):
     try:
         store = ApplicationLifecycleStore(factory, clock=TickingClock())
         application_id = _new_application(factory)
-        store.transition(application_id, S.SAVED)
+        store.transition(application_id, S.SAVED, access=SYSTEM_ACCESS)
 
         with pytest.raises(InvalidApplicationTransition):
             store.recommend(
@@ -324,7 +325,7 @@ def test_state_survives_a_restart_with_no_chat_history(tmp_path):
     application_id = _new_application(factory)
     path = (S.SAVED, S.PREPARING, S.READY_TO_APPLY, S.APPLIED, S.RESPONSE, S.FOLLOW_UP_PENDING)
     for step in path:
-        last = store.transition(application_id, step)
+        last = store.transition(application_id, step, access=SYSTEM_ACCESS)
     del store
     engine.dispose()
 
@@ -343,8 +344,11 @@ def test_state_survives_a_restart_with_no_chat_history(tmp_path):
 
         # And the lifecycle carries on from where it was, rules intact.
         with pytest.raises(InvalidApplicationTransition):
-            restarted.transition(application_id, S.OFFER)
-        assert restarted.transition(application_id, S.INTERVIEWING).status is S.INTERVIEWING
+            restarted.transition(application_id, S.OFFER, access=SYSTEM_ACCESS)
+        assert (
+            restarted.transition(application_id, S.INTERVIEWING, access=SYSTEM_ACCESS).status
+            is S.INTERVIEWING
+        )
     finally:
         restarted_engine.dispose()
 
@@ -375,7 +379,7 @@ def test_a_failed_transition_leaves_no_event_behind(tmp_path):
 def _applied_application(factory, store):
     application_id = _new_application(factory)
     for step in (S.SAVED, S.PREPARING, S.READY_TO_APPLY, S.APPLIED):
-        state = store.transition(application_id, step)
+        state = store.transition(application_id, step, access=SYSTEM_ACCESS)
     return application_id, state.last_activity_at
 
 
@@ -505,7 +509,7 @@ def test_only_applications_still_in_play_can_stall(tmp_path):
                 continue
             application_id = _new_application(factory)
             for step in path:
-                store.transition(application_id, step)
+                store.transition(application_id, step, access=SYSTEM_ACCESS)
             by_status[application_id] = status
 
         report = monitor.sweep(now=T0 + timedelta(days=365), limit=len(by_status))

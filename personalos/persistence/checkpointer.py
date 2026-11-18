@@ -82,6 +82,10 @@ class UnregisteredWorkflowThread(ValidationFailed, ValueError):
     """
 
 
+class WorkflowOwnerMismatch(ValidationFailed, ValueError):
+    """A run was registered into a workflow another owner's runs belong to."""
+
+
 class WorkflowThreadRegistry:
     """Binds `thread_id`s to the workflow whose process they are part of.
 
@@ -122,6 +126,12 @@ class WorkflowThreadRegistry:
         `workflow_id` is explicit when the caller is resuming a known process
         and omitted when starting a new one, in which case the workflow is
         looked up by `workflow_name` and created on first use.
+
+        **A workflow has one owner.** Its owner is the `user_id` its runs are
+        keyed by (`personalos.persistence.ownership`), so a run for a different
+        owner is refused here rather than silently sharing the workflow --
+        and its approvals, audit and events -- with a second actor. A run
+        registered with no `user_id` into an owned workflow takes the owner's.
         """
         session = self.session_factory()
         try:
@@ -136,6 +146,7 @@ class WorkflowThreadRegistry:
                 return thread
 
             workflow = self._workflow(session, workflow_id=workflow_id, workflow_name=workflow_name)
+            user_id = self._owner_for_new_run(session, workflow.id, user_id)
             run = WorkflowRunModel(
                 workflow_id=workflow.id,
                 user_id=user_id,
@@ -297,6 +308,32 @@ class WorkflowThreadRegistry:
             session.commit()
         finally:
             session.close()
+
+    @staticmethod
+    def _owner_for_new_run(
+        session: Session, workflow_id: UUID, user_id: UUID | None
+    ) -> UUID | None:
+        """The owner a new run of `workflow_id` is keyed by; refuses a second owner."""
+        owners = {
+            owner
+            for (owner,) in session.query(WorkflowRunModel.user_id)
+            .filter(
+                WorkflowRunModel.workflow_id == workflow_id,
+                WorkflowRunModel.user_id.isnot(None),
+            )
+            .distinct()
+            .all()
+        }
+        if not owners:
+            return user_id
+        if user_id is None:
+            return next(iter(owners)) if len(owners) == 1 else None
+        if owners != {user_id}:
+            raise WorkflowOwnerMismatch(
+                f"workflow {workflow_id} belongs to another owner; a run for a different "
+                f"owner cannot be added to it"
+            )
+        return user_id
 
     @staticmethod
     def _workflow(
@@ -738,6 +775,7 @@ __all__ = [
     "RUN_STATUS_COMPLETED",
     "RUN_STATUS_FAILED",
     "UnregisteredWorkflowThread",
+    "WorkflowOwnerMismatch",
     "WorkflowThreadRegistry",
     "SqlAlchemyCheckpointSaver",
 ]

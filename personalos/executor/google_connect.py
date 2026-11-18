@@ -50,6 +50,7 @@ from personalos.domain.integrations import (
     consent_scopes,
     data_scopes,
 )
+from personalos.domain.ownership import SYSTEM_ACCESS, Access
 from personalos.domain.redaction import Redactor, default_redactor
 from personalos.persistence.integration_health import DEGRADED, IntegrationHealthStore
 from personalos.persistence.repositories import CredentialRepository
@@ -130,20 +131,29 @@ class GoogleConnectionReader:
         """The health store the status is read from."""
         return self._health
 
-    def connections(self, *, active_only: bool = True) -> list[GoogleConnection]:
-        """Connected Google accounts, most recently changed first."""
+    def connections(
+        self, *, access: Access, include_unowned: bool = False, active_only: bool = True
+    ) -> list[GoogleConnection]:
+        """Connected Google accounts `access` may see, most recently changed first.
+
+        The install's Google connection belongs to no one actor; a scoped
+        caller sees it only with `include_unowned` (an `admin` token).
+        """
         session = self._session_factory()
         try:
             rows = CredentialRepository(session).list_by_provider(
-                GOOGLE_PROVIDER, active_only=active_only
+                GOOGLE_PROVIDER,
+                access=access,
+                include_unowned=include_unowned,
+                active_only=active_only,
             )
             return [_connection(row) for row in rows]
         finally:
             session.close()
 
-    def status(self) -> IntegrationStatus:
+    def status(self, *, access: Access, include_unowned: bool = False) -> IntegrationStatus:
         """Whether Google is connected, as which accounts, and whether it needs reconnecting."""
-        every = self.connections(active_only=False)
+        every = self.connections(access=access, include_unowned=include_unowned, active_only=False)
         active = [c for c in every if c.status == "active"]
         health = self._health.get(GOOGLE_PROVIDER)
         now = self._clock()
@@ -213,7 +223,8 @@ class GoogleConnector:
         includes_write = any(c in WRITE_CAPABILITIES for c in enable)
         login_hint = None
         if includes_write:
-            existing = self.connections()
+            # Consent is an install-wide, admin-only operation.
+            existing = self.connections(access=SYSTEM_ACCESS)
             if not existing:
                 raise WriteConsentNeedsConnection()
             login_hint = existing[0].account
@@ -328,17 +339,27 @@ class GoogleConnector:
 
     # --- Status -------------------------------------------------------------
 
-    def connections(self, *, active_only: bool = True) -> list[GoogleConnection]:
-        """Connected Google accounts, most recently changed first."""
-        return self._reader.connections(active_only=active_only)
+    def connections(
+        self, *, access: Access, include_unowned: bool = False, active_only: bool = True
+    ) -> list[GoogleConnection]:
+        """See `GoogleConnectionReader.connections`."""
+        return self._reader.connections(
+            access=access, include_unowned=include_unowned, active_only=active_only
+        )
 
-    def status(self) -> IntegrationStatus:
+    def status(self, *, access: Access, include_unowned: bool = False) -> IntegrationStatus:
         """See `GoogleConnectionReader.status`."""
-        return self._reader.status()
+        return self._reader.status(access=access, include_unowned=include_unowned)
 
     # --- Revocation ---------------------------------------------------------
 
-    async def revoke(self, account: str | None = None) -> list[RevokeResult]:
+    async def revoke(
+        self,
+        account: str | None = None,
+        *,
+        access: Access,
+        include_unowned: bool = False,
+    ) -> list[RevokeResult]:
         """Disconnect: revoke the grant at Google and delete the keychain entry.
 
         Revokes every active Google connection, or only `account`'s. The local
@@ -347,7 +368,7 @@ class GoogleConnector:
         so, so the user can also withdraw access at
         https://myaccount.google.com/permissions.
         """
-        targets = self.connections()
+        targets = self.connections(access=access, include_unowned=include_unowned)
         if account is not None:
             targets = [c for c in targets if c.account == account.lower()]
         if not targets:
@@ -390,7 +411,7 @@ class GoogleConnector:
                 "yes" if revoked_at_provider else "no",
             )
 
-        if not self.connections():
+        if not self.connections(access=SYSTEM_ACCESS):
             self._health.mark_degraded(
                 GOOGLE_PROVIDER, reason=DISCONNECTED_REASON, detail="disconnected by the user"
             )

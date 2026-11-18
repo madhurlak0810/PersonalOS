@@ -2,8 +2,8 @@
 
 Two endpoints, for a human acting on workflows parked at an approval:
 
-- `GET /v1/approvals` lists every request still owed an answer, across all
-  workflows, with what a reviewer needs to decide it.
+- `GET /v1/approvals` lists every request still owed an answer across the
+  caller's own workflows, with what a reviewer needs to decide it.
 - `POST /v1/approvals/{id}/decision` records the answer to one of them and,
   once its interrupt is fully answered, queues the workflow's resume.
 
@@ -20,7 +20,14 @@ is a reply or a new thread) and the consequences of saying yes.
 `action_hash` the list returned; one that does not match the hash stored with
 the request is a 409, so an approval of an action that has since changed can
 never be spent on what replaced it. The decider is the request's
-authenticated actor (`apps.api.auth.current_actor`), never a field of the body.
+authenticated actor (`apps.api.auth.current_actor`), never a field of the body,
+and it is stored on the approval record beside that hash.
+
+**Only a person with `approve` decides.** The decision endpoint needs the
+`approve` scope; a system identity -- the worker, the scheduler, a
+model-driven node -- never holds it, so the agent cannot approve its own
+proposed action. Either refusal is a 403 and an audit row. Another actor's
+approval is a 404, as if it did not exist.
 """
 
 import logging
@@ -31,10 +38,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from apps.api.auth import current_actor
+from apps.api.auth import current_access, current_principal, requires_scope
 from apps.api.routes.workflows import WorkflowServices, get_workflow_services
 from personalos.domain.action_status import ActionStatus, consequences
+from personalos.domain.auth import Principal, Scope
 from personalos.domain.job_search import ActionKind, ActionPreview
+from personalos.domain.ownership import ActorScope
 from personalos.domain.workflow import (
     ApprovalOutcome,
     ApprovalState,
@@ -156,23 +165,25 @@ class DecisionResponse(BaseModel):
 @router.get("/approvals", response_model=PendingApprovalsResponse)
 async def list_approvals(
     services: WorkflowServices = Depends(get_workflow_services),
+    access: ActorScope = Depends(current_access),
 ):
-    """Every approval still owed an answer, oldest first; expired ones are marked."""
+    """Every approval of the caller's still owed an answer, oldest first; expired ones marked."""
     return PendingApprovalsResponse(
         approvals=[
             PendingApprovalItem.from_pending(approval)
-            for approval in services.approvals.list_pending()
+            for approval in services.approvals.list_pending(access=access)
         ]
     )
 
 
 @router.post("/approvals/{approval_id}/decision", response_model=DecisionResponse)
+@requires_scope(Scope.APPROVE)
 async def decide_approval(
     approval_id: UUID,
     http_request: Request,
     request: DecisionRequest,
     services: WorkflowServices = Depends(get_workflow_services),
-    actor_id: str = Depends(current_actor),
+    principal: Principal = Depends(current_principal),
 ):
     """Approve or reject one pending approval.
 
@@ -182,11 +193,12 @@ async def decide_approval(
     decision are each a 409. Repeating a recorded decision returns it
     unchanged and resumes nothing a second time.
     """
+    actor_id = principal.actor_id
     decision = services.approvals.decide(
         approval_id,
         approved=request.approved,
         action_hash=request.action_hash,
-        actor_id=actor_id,
+        principal=principal,
         correlation_id=getattr(http_request.state, "correlation_id", None),
     )
     logger.info(

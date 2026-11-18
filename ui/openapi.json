@@ -796,7 +796,8 @@
         "enum": [
           "local_token",
           "stream_ticket",
-          "disabled"
+          "disabled",
+          "system"
         ],
         "title": "AuthMethod",
         "type": "string"
@@ -1077,18 +1078,6 @@
               }
             ],
             "title": "Thread Id"
-          },
-          "user_id": {
-            "anyOf": [
-              {
-                "format": "uuid",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "User Id"
           }
         },
         "required": [
@@ -3207,7 +3196,8 @@
           "denied_by_user",
           "misdirected_decision",
           "action_hash_mismatch",
-          "approval_expired"
+          "approval_expired",
+          "system_approver"
         ],
         "title": "RefusalReason",
         "type": "string"
@@ -3410,6 +3400,17 @@
         "title": "RevokeResult",
         "type": "object"
       },
+      "Scope": {
+        "description": "What a token lets its holder do. Carried by the principal, checked per route.\n\n- `read`: see the actor's own workflows, approvals, applications, audit.\n- `write`: start, resume, retry and move them.\n- `approve`: decide an approval (`POST /v1/approvals/{id}/decision`, or a\n  resume that carries decisions). Never held by a system identity.\n- `admin`: install-wide operations that belong to no one actor -- the\n  Google connection, dead-lettered events, the integration health board.\n\n`admin` does not widen ownership: an admin still sees only its own\nworkflows. Ownership is `ActorScope`'s, not a scope's.",
+        "enum": [
+          "read",
+          "write",
+          "approve",
+          "admin"
+        ],
+        "title": "Scope",
+        "type": "string"
+      },
       "SeniorityLevel": {
         "description": "Career level of a role, in ascending order.\n\nOrdered so \"how far is this posting from what the candidate wants\" is a\nsubtraction (see `rank`) rather than a table of pairs.",
         "enum": [
@@ -3582,7 +3583,8 @@
         "type": "object"
       },
       "StreamTicketRequest": {
-        "description": "Which workflow's event stream the ticket opens.",
+        "additionalProperties": false,
+        "description": "Which workflow's event stream the ticket opens. The actor is the caller's.",
         "properties": {
           "workflow_id": {
             "format": "uuid",
@@ -3922,19 +3924,31 @@
         "type": "object"
       },
       "WhoAmIResponse": {
-        "description": "The verified caller.",
+        "description": "The verified caller: who, what kind of identity, and what its token allows.",
         "properties": {
           "actor_id": {
             "title": "Actor Id",
             "type": "string"
           },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
           "method": {
             "$ref": "#/components/schemas/AuthMethod"
+          },
+          "scopes": {
+            "items": {
+              "$ref": "#/components/schemas/Scope"
+            },
+            "title": "Scopes",
+            "type": "array"
           }
         },
         "required": [
           "actor_id",
-          "method"
+          "method",
+          "kind"
         ],
         "title": "WhoAmIResponse",
         "type": "object"
@@ -4613,23 +4627,6 @@
           },
           {
             "in": "query",
-            "name": "user_id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "format": "uuid",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "User Id"
-            }
-          },
-          {
-            "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
@@ -4795,7 +4792,7 @@
     },
     "/v1/approvals": {
       "get": {
-        "description": "Every approval still owed an answer, oldest first; expired ones are marked.",
+        "description": "Every approval of the caller's still owed an answer, oldest first; expired ones marked.",
         "operationId": "list_approvals_v1_approvals_get",
         "responses": {
           "200": {
@@ -5045,7 +5042,7 @@
     },
     "/v1/auth/stream-tickets": {
       "post": {
-        "description": "A short-lived ticket for one workflow's event stream.",
+        "description": "A short-lived ticket for one of the caller's workflows' event stream.",
         "operationId": "create_stream_ticket_v1_auth_stream_tickets_post",
         "requestBody": {
           "content": {
@@ -5213,7 +5210,7 @@
     },
     "/v1/failures/events": {
       "get": {
-        "description": "Every dead-lettered or quarantined event, with its last error, newest first.",
+        "description": "Every dead-lettered or quarantined event the caller may see, newest first.",
         "operationId": "list_event_failures_v1_failures_events_get",
         "parameters": [
           {
@@ -5264,7 +5261,7 @@
     },
     "/v1/failures/events/{failure_id}/retry": {
       "post": {
-        "description": "Put a dead-lettered or quarantined event back in line, with a fresh attempt budget.\n\nA 404 when there is no such event, and a 409 when it is not parked --\npending, being delivered, or delivered.",
+        "description": "Put a dead-lettered or quarantined event back in line, with a fresh attempt budget.\n\nA 404 when there is no such event the caller may see, and a 409 when it\nis not parked -- pending, being delivered, or delivered.",
         "operationId": "retry_event_failure_v1_failures_events__failure_id__retry_post",
         "parameters": [
           {

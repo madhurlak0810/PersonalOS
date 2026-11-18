@@ -286,7 +286,8 @@ class BoardQuery(_Value):
     #: Inclusive bounds on when the application was created.
     created_from: datetime | None = None
     created_to: datetime | None = None
-    user_id: UUID | None = None
+    # No owner field: whose applications are shown is the caller's `access`,
+    # never something a query names (`personalos.domain.ownership`).
     limit: int = Field(default=DEFAULT_BOARD_PAGE_SIZE, ge=1, le=MAX_BOARD_PAGE_SIZE)
     offset: int = Field(default=0, ge=0)
 

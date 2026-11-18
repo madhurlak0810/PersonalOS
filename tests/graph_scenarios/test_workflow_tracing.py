@@ -61,9 +61,11 @@ from personalos.observability.tracing_setup import configure_tracing, reset_trac
 from personalos.persistence.execution_ledger import ExecutionLedger
 from personalos.persistence.models import Base
 from tests.fixtures import job_search_fakes as fakes
-from tests.fixtures.auth import bearer, install_test_auth
+from tests.fixtures.auth import bearer, install_test_auth, owner_id
 
-USER_ID = UUID("6f1e7b3a-0000-4000-8000-0000000000aa")
+#: One actor starts the workflow and approves it: only its owner may.
+CANDIDATE = "user:candidate"
+USER_ID = owner_id(CANDIDATE)
 
 #: Matches the token-shaped redaction rule.
 PATTERN_SECRET = "sk-" + "f4keS3cretValue0123456789abcdefXYZ"
@@ -112,7 +114,7 @@ def api_process(db_path: Path) -> TestClient:
     factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     app = create_app()
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
-    return TestClient(install_test_auth(app), headers=bearer())
+    return TestClient(install_test_auth(app), headers=bearer(CANDIDATE))
 
 
 class FlakyProvider:
@@ -220,7 +222,7 @@ def run_demo_workflow(db_path: Path, *, message: str) -> tuple[UUID, FlakyProvid
     provider = FlakyProvider()
 
     started = api_process(db_path).post(
-        "/v1/chat", json={"message": message}, headers=bearer("user:candidate")
+        "/v1/chat", json={"message": message}, headers=bearer(CANDIDATE)
     )
     assert started.status_code == 202, started.text
     workflow_id = UUID(started.json()["workflow_id"])
@@ -240,7 +242,7 @@ def run_demo_workflow(db_path: Path, *, message: str) -> tuple[UUID, FlakyProvid
                 }
             ]
         },
-        headers=bearer("user:reviewer"),
+        headers=bearer(CANDIDATE),
     )
     assert resumed.status_code == 202, resumed.text
 
@@ -337,8 +339,8 @@ def test_api_interrupt_approval_resume_and_execution_are_one_connected_trace(spa
     assert receipt.attributes[Attr.EXTERNAL_REFERENCE] == "app-42"
     assert receipt.attributes[Attr.THREAD_ID].startswith("job_search:")
     assert named["node.load_context"][0].attributes[Attr.THREAD_ID].startswith("supervisor:")
-    assert resume.attributes[Attr.ACTOR_ID] == "user:reviewer"
-    assert start.attributes[Attr.ACTOR_ID] == "user:candidate"
+    assert resume.attributes[Attr.ACTOR_ID] == CANDIDATE
+    assert start.attributes[Attr.ACTOR_ID] == CANDIDATE
     assert {Attr.CORRELATION_ID in span.attributes for span in finished} == {True}
 
 

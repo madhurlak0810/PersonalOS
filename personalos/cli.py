@@ -107,25 +107,42 @@ def stall_monitor(once: bool):
     asyncio.run(monitor.run_forever())
 
 
+def _cli_access(actor_id: str | None = None):
+    """Whose data the CLI reads: the API's actor (API_ACTOR) unless `--actor` says.
+
+    The same `ActorScope` the API applies, so the CLI shows exactly what that
+    actor's token would see through the API, and nothing of anyone else's.
+    """
+    from personalos.config import settings
+    from personalos.domain.ownership import ActorScope
+
+    return ActorScope.of(actor_id or settings.api_actor)
+
+
 @cli.command()
 @click.argument("workflow_id", type=click.UUID)
 @click.option("--json", "as_json", is_flag=True, help="Print the API response body instead.")
-def workflow_status(workflow_id, as_json: bool):
+@click.option("--actor", "actor_id", default=None, help="Whose workflow: API_ACTOR by default.")
+def workflow_status(workflow_id, as_json: bool, actor_id: str | None):
     """Show a workflow: plan, what was done, what is only suggested, what is waiting."""
     from apps.api.routes.workflows import WorkflowStatusResponse, get_workflow_services
     from personalos.cli_views import render_workflow
 
     services = get_workflow_services()
-    snapshot = services.reader.read(workflow_id)
+    access = _cli_access(actor_id)
+    snapshot = services.reader.read(workflow_id, access=access)
     if snapshot is None:
         raise click.ClickException(f"workflow '{workflow_id}' not found")
-    view = WorkflowStatusResponse.from_snapshot(snapshot, services.actions.read(workflow_id))
+    view = WorkflowStatusResponse.from_snapshot(
+        snapshot, services.actions.read(workflow_id, access=access)
+    )
     click.echo(view.model_dump_json(indent=2) if as_json else render_workflow(view))
 
 
 @cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Print the API response body instead.")
-def approvals(as_json: bool):
+@click.option("--actor", "actor_id", default=None, help="Whose approvals: API_ACTOR by default.")
+def approvals(as_json: bool, actor_id: str | None):
     """List every action waiting for approval, with what approving it would do."""
     from apps.api.routes.approvals import PendingApprovalItem, PendingApprovalsResponse
     from apps.api.routes.workflows import get_workflow_services
@@ -133,7 +150,7 @@ def approvals(as_json: bool):
 
     items = [
         PendingApprovalItem.from_pending(approval)
-        for approval in get_workflow_services().approvals.list_pending()
+        for approval in get_workflow_services().approvals.list_pending(access=_cli_access(actor_id))
     ]
     if as_json:
         click.echo(PendingApprovalsResponse(approvals=items).model_dump_json(indent=2))
@@ -419,6 +436,7 @@ def auth_google(
     from personalos.bootstrap import build_google_connection_reader, build_google_connector
     from personalos.cli_views import render_integration, render_revocations
     from personalos.domain.integrations import parse_capabilities
+    from personalos.domain.ownership import SYSTEM_ACCESS
     from personalos.executor.google_connect import run_loopback_consent
 
     if sum((show_status, revoke, bool(enable))) > 1:
@@ -431,14 +449,17 @@ def auth_google(
         raise click.BadParameter(str(exc), param_hint="--enable") from exc
 
     if show_status:
-        status = build_google_connection_reader().status()
+        # The CLI is the install's operator: the install-wide connection is its own.
+        status = build_google_connection_reader().status(access=SYSTEM_ACCESS)
         click.echo(status.model_dump_json(indent=2) if as_json else render_integration(status))
         return
 
     connector = _profile_call(build_google_connector)
 
     if revoke:
-        results = _profile_call(lambda: asyncio.run(connector.revoke(account)))
+        results = _profile_call(
+            lambda: asyncio.run(connector.revoke(account, access=SYSTEM_ACCESS))
+        )
         if as_json:
             from apps.api.routes.integrations import GoogleRevokeResponse
 
@@ -464,7 +485,7 @@ def auth_google(
             )
         )
     )
-    status = connector.status()
+    status = connector.status(access=SYSTEM_ACCESS)
     click.echo(status.model_dump_json(indent=2) if as_json else render_integration(status))
 
 

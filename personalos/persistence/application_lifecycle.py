@@ -36,6 +36,7 @@ from personalos.domain.models import (
     InvalidApplicationTransition,
     parse_recommended_status,
 )
+from personalos.domain.ownership import SYSTEM_ACCESS, Access, can_see
 from personalos.persistence.models import ApplicationModel, ApplicationStatusViewModel
 from personalos.persistence.repositories import ApplicationRepository, EventLogRepository
 
@@ -72,13 +73,21 @@ class ApplicationLifecycleStore:
         application_id: UUID,
         new_status: ApplicationStatus,
         *,
+        access: Access,
         reason: str | None = None,
         actor: str = "system",
         now: datetime | None = None,
     ) -> ApplicationLifecycleState:
-        """Move an application to `new_status`; see `ApplicationRepository.update_status`."""
+        """Move an application to `new_status`; see `ApplicationRepository.update_status`.
+
+        `access` scopes the write: an application `access` cannot see is not
+        found, whoever's it is.
+        """
         session = self.session_factory()
         try:
+            application = session.get(ApplicationModel, application_id)
+            if application is not None and not can_see(access, application.user_id):
+                raise ValueError(f"Application {application_id} not found")
             row = ApplicationRepository(session).update_status(
                 application_id,
                 new_status,
@@ -111,6 +120,8 @@ class ApplicationLifecycleStore:
         return self.transition(
             recommendation.application_id,
             parse_recommended_status(recommendation),
+            # Model-driven, so run by the worker: its own, unscoped access.
+            access=SYSTEM_ACCESS,
             reason=recommendation.reason,
             actor=actor,
             now=now,
@@ -143,6 +154,8 @@ class ApplicationLifecycleStore:
                     return self.transition(
                         application_id,
                         state.resume_status,
+                        # Activity is recorded by the worker, on its own account.
+                        access=SYSTEM_ACCESS,
                         reason=reason or "activity resumed",
                         now=now,
                     )
@@ -279,7 +292,9 @@ class StoreApplicationTransitioner:
         actor: str = "system",
     ) -> ApplicationLifecycleState:
         """Move the application; see `ApplicationLifecycleStore.transition`."""
-        return self.store.transition(application_id, new_status, reason=reason, actor=actor)
+        return self.store.transition(
+            application_id, new_status, access=SYSTEM_ACCESS, reason=reason, actor=actor
+        )
 
 
 def _to_state(session: Session, row: ApplicationModel) -> ApplicationLifecycleState:

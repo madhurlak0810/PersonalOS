@@ -26,6 +26,7 @@ from personalos.domain.job_search import ActionKind
 from personalos.domain.mailbox import MailboxScope
 from personalos.domain.models import ToolAuthorization
 from personalos.domain.outbound_email import EMAIL_ACTION_KINDS
+from personalos.domain.ownership import SYSTEM_ACCESS
 from personalos.domain.workflow import (
     WorkflowThread,
     application_transition_thread_id,
@@ -660,7 +661,8 @@ def connected_google_credential(
     `CredentialReconnectRequired` when there is none.
     """
     account = settings.google_account if account is None else account
-    connections = build_google_connection_reader(session_factory).connections()
+    # The executor's own lookup of the install's Google connection: unscoped.
+    connections = build_google_connection_reader(session_factory).connections(access=SYSTEM_ACCESS)
     for connection in connections:
         if not account or connection.account.lower() == account.lower():
             return CredentialRef.parse(connection.credential_ref)

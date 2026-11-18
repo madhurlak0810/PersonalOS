@@ -55,11 +55,14 @@ from personalos.graphs.supervisor import SupervisorGraph
 from personalos.models.routing import KeywordIntentClassifier
 from personalos.persistence.models import Base, CheckpointModel
 from personalos.secrets.api_token import FileApiTokenStore, LocalApiToken
-from tests.fixtures.auth import bearer, install_test_auth
+from tests.fixtures.auth import bearer, install_test_auth, owner_id
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-USER_ID = UUID("6f1e7b3a-0000-4000-8000-0000000000aa")
+#: The candidate, and the actor every request is from: an actor reviews its own
+#: workflows and no one else's.
+ACTOR = "user:alice"
+USER_ID = owner_id(ACTOR)
 ACTION_ID = UUID("6f1e7b3a-0000-4000-8000-0000000000bb")
 FINGERPRINT = "f" * 64
 JOB_MESSAGE = "find me python backend jobs"
@@ -96,7 +99,7 @@ def api_process(db_path: Path) -> TestClient:
     factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     app = create_app()
     app.dependency_overrides[get_workflow_services] = lambda: build_workflow_services(factory)
-    return TestClient(install_test_auth(app), headers=bearer())
+    return TestClient(install_test_auth(app), headers=bearer(ACTOR))
 
 
 class _JobState(TypedDict, total=False):
@@ -414,7 +417,7 @@ def test_resume_queues_the_decision_and_the_worker_finishes_the_run(db_path):
     workflow_id, worker = parked_at_approval(db_path)
     client = api_process(db_path)
 
-    response = approve(client, workflow_id, **bearer("user:reviewer"))
+    response = approve(client, workflow_id, **bearer(ACTOR))
 
     assert response.status_code == 202, response.text
     body = response.json()
@@ -437,7 +440,7 @@ def test_resume_queues_the_decision_and_the_worker_finishes_the_run(db_path):
     )
     assert final.values["application"] == {"status": "submitted"}
     [decision] = final.values["approvals"]
-    assert decision["decided_by"] == "user:reviewer"
+    assert decision["decided_by"] == ACTOR
 
 
 def test_resuming_a_workflow_that_is_not_waiting_is_a_409(db_path):

@@ -746,6 +746,9 @@ class ApprovalModel(Base):
     )
     requested_by_user_id = Column(GUID(), ForeignKey("users.id"), nullable=True)
     approved_by_user_id = Column(GUID(), ForeignKey("users.id"), nullable=True)
+    # The verified actor that approved or rejected the action: a person, never
+    # a system identity (`personalos.domain.auth`). Bound to `action_hash`.
+    decided_by = Column(String(255), nullable=True)
     note = Column(Text, nullable=True)
     decided_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -767,6 +770,7 @@ class ApprovalModel(Base):
             "approved_by_user_id": str(self.approved_by_user_id)
             if self.approved_by_user_id
             else None,
+            "decided_by": self.decided_by,
             "note": self.note,
             "decided_at": self.decided_at.isoformat() if self.decided_at else None,
             "created_at": self.created_at.isoformat(),

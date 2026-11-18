@@ -53,6 +53,7 @@ from personalos.domain.integrations import (
     GMAIL_SEND_SCOPE,
     GoogleCapability,
 )
+from personalos.domain.ownership import SYSTEM_ACCESS
 from personalos.domain.redaction import REDACTED, Redactor
 from personalos.executor.credentials import CredentialBroker
 from personalos.executor.google_connect import (
@@ -369,7 +370,7 @@ async def test_the_default_consent_is_read_only(install):
     assert consent["code_challenge_method"] == "S256" and "code_verifier" not in consent
     assert consent["redirect_uri"].startswith("http://127.0.0.1:")
     assert consent["access_type"] == "offline"
-    assert install.connector.connections()[0].capabilities == [
+    assert install.connector.connections(access=SYSTEM_ACCESS)[0].capabilities == [
         GoogleCapability.GMAIL_READ,
         GoogleCapability.CALENDAR_READ,
     ]
@@ -422,7 +423,7 @@ async def test_revoking_deletes_the_keychain_entry_and_the_broker_then_asks_for_
     assert token.secret.reveal().startswith("fake-refreshed-access-")
     refresh = install.keyring.passwords[(SERVICE, str(REF))]
 
-    (result,) = await install.connector.revoke()
+    (result,) = await install.connector.revoke(access=SYSTEM_ACCESS)
 
     assert result.revoked_at_provider and result.secret_deleted
     assert install.google.revoked == [refresh]
@@ -448,17 +449,17 @@ async def test_revoking_deletes_the_keychain_entry_and_the_broker_then_asks_for_
     assert RecoveryAction.RECONNECT in failure.actions
     assert failure.integration.provider == "google" and failure.integration.reconnect_required
 
-    status = install.connector.status()
+    status = install.connector.status(access=SYSTEM_ACCESS)
     assert status.connected is False and status.reconnect_required is True
     assert status.health == "degraded" and status.health_reason == "revoked_auth"
 
 
 async def test_reconnecting_after_a_revoke_makes_the_integration_healthy_again(install):
     await install.connect()
-    await install.connector.revoke()
+    await install.connector.revoke(access=SYSTEM_ACCESS)
     await install.connect()
 
-    status = install.connector.status()
+    status = install.connector.status(access=SYSTEM_ACCESS)
     assert status.connected and not status.reconnect_required and status.health == "healthy"
     assert install.row().status == "active"
     assert await install.broker().exchange(REF)
@@ -468,7 +469,7 @@ async def test_a_revoke_google_cannot_hear_still_deletes_the_local_secret(instal
     await install.connect()
     install.google.reachable = False
 
-    (result,) = await install.connector.revoke()
+    (result,) = await install.connector.revoke(access=SYSTEM_ACCESS)
 
     assert result.secret_deleted and not result.revoked_at_provider
     assert "unreachable" in result.provider_error

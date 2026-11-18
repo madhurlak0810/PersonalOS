@@ -368,8 +368,18 @@ kept outside the repository, in a `0600` file
   prints it; `--rotate` replaces it, and a running API stops accepting the
   old one within seconds. A file that other users can read is refused.
 - **The actor comes from the token.** Routes record the actor the token
-  verified as (`API_ACTOR`, `api` by default). `X-Actor-Id` is ignored.
-  Which actor may read or change what is Phase L2.
+  verified as (`API_ACTOR`, `api` by default). `X-Actor-Id` is ignored, and
+  a body that names an identity (`actor_id`, `user_id`, `decided_by`, ...) is
+  a 422.
+- **Each actor sees only its own.** Workflows, events, approvals,
+  applications, artifacts, audit records and credential references are
+  scoped by actor in the stores themselves. Another actor's object is a 404,
+  exactly like a missing one. See [docs/AUTHORIZATION.md](docs/AUTHORIZATION.md).
+- **Tokens carry scopes**: `read`, `write`, `approve` and `admin`
+  (`API_TOKEN_SCOPES`, all four by default). Deciding an approval needs
+  `approve`. The worker, the scheduler and model-driven nodes are system
+  identities that can never hold it, so the agent cannot approve its own
+  action. Every denial is audited, and no audit row carries the token.
 - **The event stream authenticates too.** A fetch-based SSE client sends the
   header. A browser `EventSource`, which cannot, first calls
   `POST /v1/auth/stream-tickets` with `{"workflow_id": ...}` and opens the
@@ -402,7 +412,7 @@ kept outside the repository, in a `0600` file
 - **Approvals are the only control on outside effects.** The policy engine
   still denies anything off its allowlist, and every outward-facing action
   still waits for an approval that quotes its `action_hash`. Anyone holding
-  the token can approve one, so treat it like the user's own password.
+  a token with `approve` can approve one, so treat it like the user's own password.
 - **Secrets stay out of `.env`.** Refresh tokens, API keys and the OAuth
   client secret live in the OS keychain (`SECRET_STORE_SERVICE`). The
   configuration only holds `cred://` references to them.
@@ -503,6 +513,7 @@ PersonalOS/
 │
 ├── docs/
 │   ├── ARCHITECTURE_BOUNDARIES.md # layer ownership and enforced import rules
+│   ├── AUTHORIZATION.md           # scopes, system identities, actor-scoped stores
 │   ├── EVENT_TRANSPORT.md         # the outbox transport and how to swap it
 │   └── quickstart/                # sample resume and profile for the quick start
 │
@@ -1609,7 +1620,7 @@ These fill in the ports the worker reports as unbound at startup.
 | # | Issue | Done when |
 | --- | --- | --- |
 | L1 | Authentication | Done (local token; see [Security Posture](#security-posture)). OIDC replaces `LocalTokenVerifier` behind the same `TokenVerifier` seam |
-| L2 | Actor-scoped authorization | `actor_id` already comes from the token (L1); cross-actor reads are denied, and `POST /v1/chat`'s `user_id` is checked against the actor |
+| L2 | Actor-scoped authorization | Done ([docs/AUTHORIZATION.md](docs/AUTHORIZATION.md)). Scoped stores return 404 across actors, tokens carry `read`/`write`/`approve`/`admin`, system identities cannot approve, and denials are audited |
 | L3 | Rate limiting and request limits | Per-actor limits on workflow starts and approvals. The body-size cap landed with L4 |
 | L4 | CORS and security headers | Done (`apps/api/security.py`; see [Security Posture](#security-posture)). Body caps are in; per-actor rate limits are still L3 |
 
@@ -1661,6 +1672,7 @@ Settings come from the environment, then `.env` in the working directory.
 | `API_AUTH_ENABLED` | `true` | `false` makes every request `API_ACTOR`; loopback only. |
 | `API_TOKEN_STORE` / `API_TOKEN_FILE` | `file` / `~/.config/personalos/api-token` | Or `keychain` for the OS keychain. `personalos.cli auth token [--rotate]`. |
 | `API_ACTOR` | `api` | The actor the local token authenticates as. |
+| `API_TOKEN_SCOPES` | `read,write,approve,admin` | Scopes the local token carries; see [docs/AUTHORIZATION.md](docs/AUTHORIZATION.md). |
 | `API_STREAM_TICKET_SECONDS` | `60` | Lifetime of an event-stream ticket. |
 | `FILES_ALLOWED_ROOTS` | `[]` | JSON list of absolute paths. If empty, every file read and write is refused. |
 | `WORKER_GRAPHS` | `apps.worker.graphs:build_worker_graphs` | `module:callable`. Empty runs no graphs. |
@@ -1695,5 +1707,6 @@ Settings come from the environment, then `.env` in the working directory.
 - [README.md](README.md): what PersonalOS is, in one page
 - [docs/ARCHITECTURE_BOUNDARIES.md](docs/ARCHITECTURE_BOUNDARIES.md): layer ownership and the dependency direction
 - [docs/EVENT_TRANSPORT.md](docs/EVENT_TRANSPORT.md): the outbox and how to replace it
+- [docs/AUTHORIZATION.md](docs/AUTHORIZATION.md): scopes, system identities, actor-scoped stores and denial auditing
 - [evals/README.md](evals/README.md): the evaluation harness and model benchmarks
 - [GitHub Issues](https://github.com/madhurlak0810/PersonalOS/issues)
