@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from personalos.domain.context import ExecutionContext
+from personalos.domain.errors import PolicyDeniedError
 from personalos.domain.models import (
     IDEMPOTENCY_KEY_MAX_LENGTH,
     IDEMPOTENCY_KEY_MIN_LENGTH,
@@ -211,7 +212,7 @@ class MCPServer(ABC):
                 f"Error executing '{tool_name}': {error} ({request.context.as_log_str()})",
                 exc_info=True,
             )
-            return ToolCallResult.failed(request.target, ToolCallErrorCode.EXECUTION_ERROR, error)
+            return ToolCallResult.failed(request.target, _error_code(e), error)
 
     async def _execute_mutating(
         self,
@@ -260,7 +261,7 @@ class MCPServer(ABC):
                 f"Error executing '{target.tool}': {error} ({context.as_log_str()})",
                 exc_info=True,
             )
-            return ToolCallResult.failed(target, ToolCallErrorCode.EXECUTION_ERROR, error)
+            return ToolCallResult.failed(target, _error_code(e), error)
 
         try:
             return ToolCallResult.succeeded(
@@ -277,6 +278,13 @@ class MCPServer(ABC):
     def initialize(self):
         """Initialize the MCP server (register tools, load configs, etc.)."""
         pass
+
+
+def _error_code(error: Exception) -> ToolCallErrorCode:
+    """The failure category for an exception a handler raised."""
+    if isinstance(error, PolicyDeniedError):
+        return ToolCallErrorCode.PERMISSION_DENIED
+    return ToolCallErrorCode.EXECUTION_ERROR
 
 
 def _bind_authorization(handler: Callable, authorization: ToolAuthorization) -> Callable:

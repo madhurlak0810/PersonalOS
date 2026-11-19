@@ -7,7 +7,8 @@
     "create_calendar_event": {"consequential": true, "external_write": true},
     "update_calendar_event": {"consequential": true, "external_write": true},
     "cancel_calendar_event": {"consequential": true, "external_write": true},
-    "overwrite_document": {"consequential": true, "external_write": false}
+    "overwrite_document": {"consequential": true, "external_write": false},
+    "apply_file_plan": {"consequential": true, "external_write": false}
   },
   "cases": [
     {"id": "ab-search-jobs", "tool": "jobs.search_jobs", "origin": "system", "mutating": false, "arguments": {"keywords": "backend", "limit": 20}, "consequential": false, "external_write": false},

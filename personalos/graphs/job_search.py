@@ -1,4 +1,4 @@
-"""The Job Search subgraph: the one domain subgraph this build implements.
+"""The Job Search subgraph: discovery, applications and the recruiter lifecycle.
 
 Pipeline, in order:
 

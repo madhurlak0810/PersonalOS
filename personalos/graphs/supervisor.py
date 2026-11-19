@@ -8,10 +8,14 @@ subgraph. It never touches a tool or a repository directly -- see
 
 Two things keep this graph honest to that boundary:
 
-- `classifier` and `job_subgraph` are injected ports (`IntentClassifier` and
-  `JobSubgraphRunner`), not concrete dependencies this module constructs. The
-  composition root wires a real classifier and an adapter that runs the Job
-  Search subgraph (`personalos.graphs.job_search.JobSearchSubgraphRunner`).
+- `classifier`, `job_subgraph` and `file_subgraph` are injected ports
+  (`IntentClassifier`, `JobSubgraphRunner`, `FileSubgraphRunner`), not
+  concrete dependencies this module constructs. The composition root wires a
+  real classifier and adapters that run the Job Search subgraph
+  (`personalos.graphs.job_search.JobSearchSubgraphRunner`) and the File
+  subgraph (`personalos.graphs.file_task.FileTaskSubgraphRunner`). A
+  Supervisor built without a file subgraph treats `FILE` as unsupported and
+  asks for clarification, exactly as it does for a reserved domain.
 - Graph state is kept JSON-compatible (`dict`, not live `RouteDecision` /
   `TaskDAG` instances) so it round-trips cleanly through any
   `BaseCheckpointSaver`, including the durable, database-backed one in
@@ -31,6 +35,7 @@ from langgraph.store.memory import InMemoryStore
 
 from personalos.domain.routing import (
     DEFAULT_CONFIDENCE_THRESHOLD,
+    SUPPORTED_ROUTE_DOMAINS,
     RouteDecision,
     RouteDomain,
     UnsupportedRouteDomain,
@@ -63,7 +68,14 @@ LOAD_CONTEXT = "load_context"
 CLASSIFY_INTENT = "classify_intent"
 PLAN_WORK = "plan_work"
 RUN_JOB_SUBGRAPH = "run_job_subgraph"
+RUN_FILE_SUBGRAPH = "run_file_subgraph"
 CLARIFY = "clarify"
+
+#: What each routable domain is called in a clarification.
+_DOMAIN_NAMES: dict[RouteDomain, str] = {
+    RouteDomain.JOB: "job search",
+    RouteDomain.FILE: "your job-search documents",
+}
 
 
 class JobSubgraphRunner(Protocol):
@@ -77,6 +89,19 @@ class JobSubgraphRunner(Protocol):
 
     async def __call__(self, task_dag: dict[str, Any], state: "SupervisorState") -> dict[str, Any]:
         """Run the planned work and return a JSON-compatible result."""
+        ...
+
+
+class FileSubgraphRunner(Protocol):
+    """Port the Supervisor uses to hand a planned file task to the File subgraph.
+
+    The File subgraph does its own planning -- a typed `FilePlan` over the
+    files it discovers -- so what it is handed is the request, carried in the
+    DAG's goal and in `state["message"]`, not a plan.
+    """
+
+    async def __call__(self, task_dag: dict[str, Any], state: "SupervisorState") -> dict[str, Any]:
+        """Run the file task and return a JSON-compatible result."""
         ...
 
 
@@ -115,6 +140,25 @@ def _build_job_search_dag(message: str) -> TaskDAG:
     )
 
 
+def _build_file_task_dag(message: str) -> TaskDAG:
+    """The bounded plan for a file-domain request.
+
+    Fixed and linear, like the job search's: discover, plan, execute, verify.
+    The File subgraph's own planner decides *which* files and operations; this
+    DAG only says the task runs as one bounded unit.
+    """
+    goal = f"file_task: {message.strip()}" if message.strip() else "file_task"
+    return TaskDAG(
+        goal=goal[:200],
+        tasks=(
+            TaskNode(id="discover", name="Discover job-search documents"),
+            TaskNode(id="plan", name="Plan file operations", depends_on=("discover",)),
+            TaskNode(id="execute", name="Execute the approved plan", depends_on=("plan",)),
+            TaskNode(id="verify", name="Verify the changes", depends_on=("execute",)),
+        ),
+    )
+
+
 class SupervisorGraph:
     """Builds and compiles the top-level Supervisor LangGraph graph."""
 
@@ -123,6 +167,7 @@ class SupervisorGraph:
         classifier: IntentClassifier,
         job_subgraph: JobSubgraphRunner,
         *,
+        file_subgraph: FileSubgraphRunner | None = None,
         confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
         checkpointer: BaseCheckpointSaver | None = None,
         store: BaseStore | None = None,
@@ -153,6 +198,14 @@ class SupervisorGraph:
 
         self.classifier = classifier
         self.job_subgraph = job_subgraph
+        self.file_subgraph = file_subgraph
+        #: The domains this instance can actually hand work to: the build's
+        #: supported set, less any whose subgraph was not wired.
+        self.routable_domains: frozenset[RouteDomain] = frozenset(
+            domain
+            for domain in SUPPORTED_ROUTE_DOMAINS
+            if domain != RouteDomain.FILE or file_subgraph is not None
+        )
         self.confidence_threshold = confidence_threshold
         self.checkpointer = checkpointer or InMemorySaver()
         self.store = store or InMemoryStore()
@@ -172,6 +225,10 @@ class SupervisorGraph:
             RUN_JOB_SUBGRAPH,
             traced_node(RUN_JOB_SUBGRAPH, self._run_job_subgraph, graph="supervisor"),
         )
+        graph.add_node(
+            RUN_FILE_SUBGRAPH,
+            traced_node(RUN_FILE_SUBGRAPH, self._run_file_subgraph, graph="supervisor"),
+        )
         graph.add_node(CLARIFY, traced_node(CLARIFY, self._clarify, graph="supervisor"))
 
         graph.add_edge(START, LOAD_CONTEXT)
@@ -181,8 +238,13 @@ class SupervisorGraph:
             self._route_after_classification,
             {PLAN_WORK: PLAN_WORK, CLARIFY: CLARIFY},
         )
-        graph.add_edge(PLAN_WORK, RUN_JOB_SUBGRAPH)
+        graph.add_conditional_edges(
+            PLAN_WORK,
+            self._route_after_planning,
+            {RUN_JOB_SUBGRAPH: RUN_JOB_SUBGRAPH, RUN_FILE_SUBGRAPH: RUN_FILE_SUBGRAPH},
+        )
         graph.add_edge(RUN_JOB_SUBGRAPH, END)
+        graph.add_edge(RUN_FILE_SUBGRAPH, END)
         graph.add_edge(CLARIFY, END)
 
         return graph.compile(checkpointer=self.checkpointer, store=self.store)
@@ -231,10 +293,24 @@ class SupervisorGraph:
         if decision.confidence < self.confidence_threshold:
             return CLARIFY
         try:
-            ensure_supported_domain(decision)
+            self._ensure_routable(decision)
         except UnsupportedRouteDomain:
             return CLARIFY
         return PLAN_WORK
+
+    def _ensure_routable(self, decision: RouteDecision) -> RouteDecision:
+        """`ensure_supported_domain`, narrowed to the subgraphs this instance has."""
+        ensure_supported_domain(decision)
+        if decision.domain not in self.routable_domains:
+            raise UnsupportedRouteDomain(
+                f"domain '{decision.domain.value}' is supported but no subgraph is wired for it"
+            )
+        return decision
+
+    def _route_after_planning(self, state: SupervisorState) -> str:
+        """Hand the DAG to the subgraph for the decided domain."""
+        decision = route_decision_from_mapping(state["route_decision"])
+        return RUN_FILE_SUBGRAPH if decision.domain == RouteDomain.FILE else RUN_JOB_SUBGRAPH
 
     def _plan_work(self, state: SupervisorState) -> dict[str, Any]:
         """Produce the bounded task DAG for a confidently-routed, supported domain."""
@@ -242,11 +318,13 @@ class SupervisorGraph:
         if raw_decision is None:  # pragma: no cover - the router only reaches here with one
             raise UnsupportedRouteDomain("plan_work reached without a route decision")
         decision = route_decision_from_mapping(raw_decision)
-        ensure_supported_domain(decision)  # re-checked: plan_work must never plan the unsupported
+        self._ensure_routable(decision)  # re-checked: plan_work must never plan the unsupported
 
         if decision.domain == RouteDomain.JOB:
             dag = _build_job_search_dag(state.get("message", ""))
-        else:  # pragma: no cover - unreachable while SUPPORTED_ROUTE_DOMAINS == {JOB}
+        elif decision.domain == RouteDomain.FILE:
+            dag = _build_file_task_dag(state.get("message", ""))
+        else:  # pragma: no cover - unreachable while SUPPORTED_ROUTE_DOMAINS == {JOB, FILE}
             raise UnsupportedRouteDomain(f"no planner registered for domain '{decision.domain}'")
 
         return {"task_dag": dag.model_dump(mode="json")}
@@ -259,15 +337,28 @@ class SupervisorGraph:
         result = await self.job_subgraph(task_dag, state)
         return {"result": result}
 
+    async def _run_file_subgraph(self, state: SupervisorState) -> dict[str, Any]:
+        """Hand the planned file task to the File subgraph and record its result."""
+        task_dag = state.get("task_dag")
+        if task_dag is None:  # pragma: no cover - plan_work always sets one before this node
+            raise InvalidTaskDAG("file subgraph reached without a planned task DAG")
+        if self.file_subgraph is None:  # pragma: no cover - routing never reaches here without one
+            raise UnsupportedRouteDomain("no file subgraph is wired")
+        result = await self.file_subgraph(task_dag, state)
+        return {"result": result}
+
     def _clarify(self, state: SupervisorState) -> dict[str, Any]:
         """Ask for clarification instead of guessing at a low-confidence or unsupported route."""
         raw_decision = state.get("route_decision")
         decision = route_decision_from_mapping(raw_decision) if raw_decision else None
 
         if decision is not None and decision.confidence >= self.confidence_threshold:
+            handled = " and ".join(
+                _DOMAIN_NAMES[d] for d in RouteDomain if d in self.routable_domains
+            )
             message = (
                 f"I can't help with '{decision.domain.value}' yet -- I currently only "
-                "handle job search. Could you rephrase your request?"
+                f"handle {handled}. Could you rephrase your request?"
             )
         else:
             message = (
@@ -276,4 +367,4 @@ class SupervisorGraph:
         return {"clarification": message}
 
 
-__all__ = ["SupervisorGraph", "SupervisorState", "JobSubgraphRunner"]
+__all__ = ["SupervisorGraph", "SupervisorState", "JobSubgraphRunner", "FileSubgraphRunner"]

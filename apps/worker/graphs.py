@@ -42,7 +42,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from apps.worker.health_monitor import http_get_ok
-from apps.worker.main import WorkerGraphs, WorkflowScopedJobSubgraph
+from apps.worker.main import WorkerGraphs, WorkflowScopedFileSubgraph, WorkflowScopedJobSubgraph
 from apps.worker.unconfigured import (
     NotConfiguredApplicationStore,
     NotConfiguredApplicationSubmitter,
@@ -63,6 +63,7 @@ from personalos.bootstrap import (
     build_durable_checkpointer,
     build_embedder,
     build_event_emitter,
+    build_file_task_graph,
     build_gmail_outbound,
     build_gmail_recruiter_inbox,
     build_gmail_send_executor,
@@ -92,7 +93,11 @@ from personalos.domain.job_search import (
     ApprovalDecision,
     JobSearchContractError,
 )
-from personalos.domain.workflow import JOB_SEARCH_THREAD_NAMESPACE, SUPERVISOR_THREAD_NAMESPACE
+from personalos.domain.workflow import (
+    FILE_TASK_THREAD_NAMESPACE,
+    JOB_SEARCH_THREAD_NAMESPACE,
+    SUPERVISOR_THREAD_NAMESPACE,
+)
 from personalos.graphs.job_search import (
     ExtractingRecruiterClassifier,
     InterruptOnlyApprovalGate,
@@ -297,7 +302,7 @@ def build_worker_graphs(
     overrides: Mapping[str, Any] | None = None,
     lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
 ) -> WorkerGraphs:
-    """The Supervisor and the Job Search subgraph, durable, with this build's ports.
+    """The Supervisor, the Job Search subgraph and the File subgraph, durable.
 
     `overrides` replaces `JobSearchGraph` arguments by name; an argument it
     replaces no longer counts towards `unbound_ports`. `lease_ttl_seconds`
@@ -314,9 +319,14 @@ def build_worker_graphs(
     health_checks = [*default_health_checks(ports), *model_checks]
 
     job_search = JobSearchGraph(**ports, checkpointer=checkpointer).build()
+    file_task = build_file_task_graph(
+        gateway=build_tool_gateway(policy=build_policy_engine(session_factory)),
+        checkpointer=checkpointer,
+    ).build()
     supervisor = SupervisorGraph(
         build_model_gateway().intent_classifier(),
         WorkflowScopedJobSubgraph(job_search, registry, prepare_application=True),
+        file_subgraph=WorkflowScopedFileSubgraph(file_task, registry),
         checkpointer=checkpointer,
     ).build()
 
@@ -333,6 +343,7 @@ def build_worker_graphs(
         runners={
             SUPERVISOR_THREAD_NAMESPACE: runner(supervisor),
             JOB_SEARCH_THREAD_NAMESPACE: runner(job_search),
+            FILE_TASK_THREAD_NAMESPACE: runner(file_task),
         },
         unbound_ports=tuple(sorted({stub.port for group in stubs.values() for stub in group})),
         health_checks=tuple(health_checks),

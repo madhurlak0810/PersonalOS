@@ -50,7 +50,11 @@ from personalos.domain.artifacts import validate_draft
 from personalos.domain.errors import FailureClass, PortNotConfigured
 from personalos.domain.failures import classify, parse_stored_error
 from personalos.domain.models import ArtifactType, OutboxEventStatus
-from personalos.domain.workflow import JOB_SEARCH_THREAD_NAMESPACE, SUPERVISOR_THREAD_NAMESPACE
+from personalos.domain.workflow import (
+    FILE_TASK_THREAD_NAMESPACE,
+    JOB_SEARCH_THREAD_NAMESPACE,
+    SUPERVISOR_THREAD_NAMESPACE,
+)
 from personalos.persistence.checkpointer import SqlAlchemyCheckpointSaver
 from personalos.persistence.models import Base, CandidateProfileModel, OutboxEventModel
 from personalos.persistence.search_profiles import SqlSearchProfileStore
@@ -124,7 +128,11 @@ def _run_worker_until_settled(factory, graphs: WorkerGraphs) -> None:
 def test_the_default_factory_compiles_both_graphs_on_the_durable_checkpointer(factory):
     graphs = build_worker_graphs(factory)
 
-    assert set(graphs.runners) == {SUPERVISOR_THREAD_NAMESPACE, JOB_SEARCH_THREAD_NAMESPACE}
+    assert set(graphs.runners) == {
+        SUPERVISOR_THREAD_NAMESPACE,
+        JOB_SEARCH_THREAD_NAMESPACE,
+        FILE_TASK_THREAD_NAMESPACE,
+    }
     for runner in graphs.runners.values():
         assert isinstance(runner.graph.checkpointer, SqlAlchemyCheckpointSaver)
         assert not isinstance(runner.graph.checkpointer, InMemorySaver)
@@ -165,7 +173,11 @@ def test_the_fake_provider_factory_binds_the_job_board_and_draft_writer(factory)
     # so the walkthrough ends where the guide says it does.
     graphs = fake_providers.build_worker_graphs(factory)
 
-    assert set(graphs.runners) == {SUPERVISOR_THREAD_NAMESPACE, JOB_SEARCH_THREAD_NAMESPACE}
+    assert set(graphs.runners) == {
+        SUPERVISOR_THREAD_NAMESPACE,
+        JOB_SEARCH_THREAD_NAMESPACE,
+        FILE_TASK_THREAD_NAMESPACE,
+    }
     assert JOB_BOARDS_PORT not in graphs.unbound_ports
     assert DRAFT_WRITER_PORT not in graphs.unbound_ports
     assert APPLICATION_SUBMITTER_PORT in graphs.unbound_ports
@@ -203,8 +215,9 @@ def test_startup_logs_the_wired_graphs_and_the_unbound_ports(factory, caplog):
     with caplog.at_level("INFO", logger="apps.worker.main"):
         log_wired_graphs(DEFAULT_FACTORY, graphs)
 
-    assert "wired graphs from 'apps.worker.graphs:build_worker_graphs': job_search, supervisor" in (
-        caplog.text
+    assert (
+        "wired graphs from 'apps.worker.graphs:build_worker_graphs': file_task, job_search, supervisor"
+        in (caplog.text)
     )
     assert "unbound ports (steps that need them fail with a retryable PortNotConfigured): " in (
         caplog.text

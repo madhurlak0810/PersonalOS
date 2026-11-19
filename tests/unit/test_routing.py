@@ -13,14 +13,14 @@ from personalos.domain.routing import (
 )
 
 
-def test_supported_domains_is_only_job_for_this_build():
-    """The requirements are explicit: for this build, only 'job' is valid."""
-    assert SUPPORTED_ROUTE_DOMAINS == frozenset({RouteDomain.JOB})
+def test_supported_domains_are_job_and_file_for_this_build():
+    """Job search, and the File subgraph over job-search documents."""
+    assert SUPPORTED_ROUTE_DOMAINS == frozenset({RouteDomain.JOB, RouteDomain.FILE})
 
 
 def test_route_domain_reserves_future_domains():
-    """File/Communications/Calendar are reserved schema slots, not yet supported."""
-    reserved = {RouteDomain.FILE, RouteDomain.COMMUNICATIONS, RouteDomain.CALENDAR}
+    """Communications/Calendar are reserved schema slots, not yet supported."""
+    reserved = {RouteDomain.COMMUNICATIONS, RouteDomain.CALENDAR}
     assert reserved.isdisjoint(SUPPORTED_ROUTE_DOMAINS)
     for domain in reserved:
         # Schema-valid: constructing a RouteDecision for a reserved domain
@@ -47,14 +47,13 @@ def test_route_decision_rejects_unknown_fields():
         RouteDecision(domain=RouteDomain.JOB, confidence=0.9, extra_field="nope")
 
 
-def test_ensure_supported_domain_allows_job():
-    decision = RouteDecision(domain=RouteDomain.JOB, confidence=0.9)
+@pytest.mark.parametrize("domain", [RouteDomain.JOB, RouteDomain.FILE])
+def test_ensure_supported_domain_allows_job_and_file(domain):
+    decision = RouteDecision(domain=domain, confidence=0.9)
     assert ensure_supported_domain(decision) is decision
 
 
-@pytest.mark.parametrize(
-    "domain", [RouteDomain.FILE, RouteDomain.COMMUNICATIONS, RouteDomain.CALENDAR]
-)
+@pytest.mark.parametrize("domain", [RouteDomain.COMMUNICATIONS, RouteDomain.CALENDAR])
 def test_ensure_supported_domain_rejects_reserved_domains(domain):
     """Rejection of any RouteDecision naming a domain outside the supported set."""
     decision = RouteDecision(domain=domain, confidence=0.95, reasoning="very sure")

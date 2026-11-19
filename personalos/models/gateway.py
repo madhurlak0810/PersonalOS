@@ -68,6 +68,14 @@ from personalos.models.embedding import (
     PrivacyTier,
     default_embeddings_client_factory,
 )
+from personalos.models.file_planning import (
+    PLANNER_SYSTEM_PROMPT,
+    SUMMARIZER_SYSTEM_PROMPT,
+    ExtractiveDocumentSummarizer,
+    ResilientFilePlanner,
+    StructuredLLMDocumentSummarizer,
+    StructuredLLMFilePlanner,
+)
 from personalos.models.health import HttpGet, LocalModelServerCheck, probe_url
 from personalos.models.job_matching import ASSESSOR_SYSTEM_PROMPT, StructuredLLMSemanticAssessor
 from personalos.models.recruiter_events import (
@@ -105,6 +113,12 @@ class ModelRole(str, Enum):
     #: Writes the body of a reply to a recruiter. Text only: it is given no
     #: tool and no way to send, and its output is checked against the evidence.
     REPLY_DRAFTER = "reply_drafter"
+    #: Plans a File subgraph task over file metadata (never content). Falls
+    #: back to the rule-based planner when its plan does not validate.
+    FILE_PLANNER = "file_planner"
+    #: Summarizes one document, given as quoted data, into a schema with no
+    #: field for instructions. Extractive under `rules`.
+    DOCUMENT_SUMMARIZER = "document_summarizer"
 
 
 class ModelSpec(BaseModel):
@@ -165,6 +179,8 @@ def _system_prompts() -> dict[ModelRole, str]:
         ModelRole.SEMANTIC_ASSESSOR: ASSESSOR_SYSTEM_PROMPT,
         ModelRole.DRAFT_WRITER: DRAFT_WRITER_SYSTEM_PROMPT,
         ModelRole.REPLY_DRAFTER: REPLY_DRAFTER_SYSTEM_PROMPT,
+        ModelRole.FILE_PLANNER: PLANNER_SYSTEM_PROMPT,
+        ModelRole.DOCUMENT_SUMMARIZER: SUMMARIZER_SYSTEM_PROMPT,
     }
 
 
@@ -324,6 +340,21 @@ class ModelGateway:
                 update={"params": {**spec.params, "temperature": DEFAULT_REPLY_TEMPERATURE}}
             )
         return StructuredLLMReplyWriter(self._chat_model(spec), **kwargs)
+
+    def file_planner(self) -> ResilientFilePlanner:
+        """The File subgraph's planner: the model, repaired, then the rules; or the rules alone."""
+        spec, kwargs = self._spec(ModelRole.FILE_PLANNER)
+        if spec.provider == "rules":
+            return ResilientFilePlanner(primary=None)
+        return ResilientFilePlanner(StructuredLLMFilePlanner(self._chat_model(spec), **kwargs))
+
+    def document_summarizer(
+        self,
+    ) -> ExtractiveDocumentSummarizer | StructuredLLMDocumentSummarizer:
+        spec, kwargs = self._spec(ModelRole.DOCUMENT_SUMMARIZER)
+        if spec.provider == "rules":
+            return ExtractiveDocumentSummarizer()
+        return StructuredLLMDocumentSummarizer(self._chat_model(spec), **kwargs)
 
     def health_checks(self, *, get: HttpGet) -> list[LocalModelServerCheck]:
         """One check per local model server any role runs on (see `personalos.models.health`).

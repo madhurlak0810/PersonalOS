@@ -65,10 +65,18 @@ class EchoJobSubgraph:
         return {"handed_off": True}
 
 
-def supervisor(gateway: ModelGateway) -> tuple[Any, EchoJobSubgraph]:
+class EchoFileSubgraph(EchoJobSubgraph):
+    """Records the file tasks the Supervisor hands off, as `EchoJobSubgraph` does jobs."""
+
+
+def supervisor(gateway: ModelGateway) -> tuple[Any, EchoJobSubgraph, EchoFileSubgraph]:
     """The compiled Supervisor over the gateway's intent classifier."""
     job_subgraph = EchoJobSubgraph()
-    return SupervisorGraph(gateway.intent_classifier(), job_subgraph).build(), job_subgraph
+    file_subgraph = EchoFileSubgraph()
+    graph = SupervisorGraph(
+        gateway.intent_classifier(), job_subgraph, file_subgraph=file_subgraph
+    ).build()
+    return graph, job_subgraph, file_subgraph
 
 
 @dataclass

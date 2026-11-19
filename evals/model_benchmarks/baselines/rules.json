@@ -8,30 +8,34 @@
       "recruiter_event_extractor": "rules",
       "semantic_assessor": "rules",
       "draft_writer": "rules",
-      "reply_drafter": "rules"
+      "reply_drafter": "rules",
+      "file_planner": "rules",
+      "document_summarizer": "rules"
     },
     "prompt_versions": {
       "intent_classifier": "rules",
       "recruiter_event_extractor": "rules",
       "semantic_assessor": "rules",
       "draft_writer": "rules",
-      "reply_drafter": "rules"
+      "reply_drafter": "rules",
+      "file_planner": "rules",
+      "document_summarizer": "rules"
     },
-    "config_sha256": "52f09b003aaaa4d0b17c3bd00ae0acc0017b6ec52c68b29a7aef4299fd477e1f",
-    "dataset_sha256": "fae96e8a110f7172cf28b5d9fe003c18ab6648212d89cb3b51c6cfa7848e7716",
-    "git_commit": "91c22d2",
-    "started_at": "2026-11-10T09:36:59+00:00",
+    "config_sha256": "afa267e893d0ade89043e04609ab729505cb751cba7079697bd27c001cc2b22e",
+    "dataset_sha256": "3f82272b13dd10c0bf8c01522e8249470dcbb631382ca8551b6d189dc5971cab",
+    "git_commit": "95e746a",
+    "started_at": "2026-11-19T06:53:55+00:00",
     "duration_s": 1.31
   },
   "suites": {
     "routing": {
       "metrics": {
         "route_accuracy": 1.0,
-        "domain_accuracy": 0.9091,
-        "pass_rate": 0.9286
+        "domain_accuracy": 0.9286,
+        "pass_rate": 0.9412
       },
       "counts": {
-        "pass": 13,
+        "pass": 16,
         "fail": 1,
         "error": 0,
         "skipped": 0,
@@ -115,22 +119,21 @@
     },
     "approvals": {
       "metrics": {
-        "approval_precision": 0.8,
+        "approval_precision": 0.8889,
         "approval_recall": 1.0,
         "external_write_approval_recall": 1.0,
-        "approval_prompts": 10,
+        "approval_prompts": 9,
         "consequential_actions": 17,
         "external_writes": 13,
         "ungated_consequential": [],
         "unneeded_prompts": [
-          "files.write_file",
           "jobs.save_favorite_job"
         ],
-        "pass_rate": 0.9394
+        "pass_rate": 0.9697
       },
       "counts": {
-        "pass": 31,
-        "fail": 2,
+        "pass": 32,
+        "fail": 1,
         "error": 0,
         "skipped": 0,
         "review": 0
@@ -312,11 +315,11 @@
       "case_id": "route-11",
       "status": "pass",
       "expected": {
-        "route": "clarify",
+        "route": "file_task",
         "domain": "file"
       },
       "actual": {
-        "route": "clarify",
+        "route": "file_task",
         "domain": "file",
         "confidence": 0.85
       },
@@ -361,6 +364,51 @@
         "route": "clarify",
         "domain": "job",
         "confidence": 0.2
+      },
+      "failures": []
+    },
+    {
+      "suite": "routing",
+      "case_id": "route-15",
+      "status": "pass",
+      "expected": {
+        "route": "file_task",
+        "domain": "file"
+      },
+      "actual": {
+        "route": "file_task",
+        "domain": "file",
+        "confidence": 0.85
+      },
+      "failures": []
+    },
+    {
+      "suite": "routing",
+      "case_id": "route-16",
+      "status": "pass",
+      "expected": {
+        "route": "file_task",
+        "domain": "file"
+      },
+      "actual": {
+        "route": "file_task",
+        "domain": "file",
+        "confidence": 0.85
+      },
+      "failures": []
+    },
+    {
+      "suite": "routing",
+      "case_id": "route-17",
+      "status": "pass",
+      "expected": {
+        "route": "file_task",
+        "domain": "file"
+      },
+      "actual": {
+        "route": "file_task",
+        "domain": "file",
+        "confidence": 0.85
       },
       "failures": []
     },
@@ -1983,19 +2031,17 @@
     {
       "suite": "approvals",
       "case_id": "ab-create-new-file",
-      "status": "fail",
+      "status": "pass",
       "expected": {
         "consequential": false,
         "external_write": false
       },
       "actual": {
-        "decision": "require_approval",
-        "prompted": true,
-        "gated": true
+        "decision": "allow",
+        "prompted": false,
+        "gated": false
       },
-      "failures": [
-        "files.write_file asks for an approval it does not need"
-      ]
+      "failures": []
     },
     {
       "suite": "approvals",

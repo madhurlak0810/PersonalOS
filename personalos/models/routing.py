@@ -40,7 +40,31 @@ _NO_MATCH_CONFIDENCE = 0.2
 #: `ensure_supported_domain` is what turns that recognition into a rejection.
 _DOMAIN_KEYWORDS: dict[RouteDomain, tuple[str, ...]] = {
     RouteDomain.JOB: ("job", "resume", "apply", "interview", "recruiter", "position", "hiring"),
-    RouteDomain.FILE: ("file", "document", "upload", "attachment", "folder"),
+    # Phrases about the person's own documents, so "find my latest resume"
+    # outweighs the single job keyword "resume" it contains. A tie still goes
+    # to JOB, which is listed first: "tailor my resume for this role" is a
+    # job-search request that happens to name a document.
+    RouteDomain.FILE: (
+        "file",
+        "document",
+        "upload",
+        "attachment",
+        "folder",
+        "find my",
+        "where is my",
+        "where's my",
+        "latest",
+        "newest",
+        "most recent",
+        "my resume",
+        "my cv",
+        "cover letter",
+        "summarize my",
+        "summarise my",
+        "organize my",
+        "organise my",
+        "rename",
+    ),
     RouteDomain.COMMUNICATIONS: ("email", "message", "inbox", "reply", "thread"),
     RouteDomain.CALENDAR: ("calendar", "schedule", "meeting", "availability", "event"),
 }
@@ -72,7 +96,10 @@ for the one the request is really about."""
 #: One line per domain, so the prompt and the enum cannot drift apart.
 _DOMAIN_DESCRIPTIONS: dict[RouteDomain, str] = {
     RouteDomain.JOB: "job search, applications, resumes, recruiters, interviews",
-    RouteDomain.FILE: "files, documents, folders, uploads and attachments",
+    RouteDomain.FILE: (
+        "the person's own files: finding, reading, summarizing and organizing "
+        "resumes, cover letters and other documents"
+    ),
     RouteDomain.COMMUNICATIONS: "email and messages: reading, drafting, replying",
     RouteDomain.CALENDAR: "calendar events, scheduling, meetings and availability",
 }

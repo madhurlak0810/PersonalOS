@@ -11,7 +11,10 @@ See ``docs/ARCHITECTURE_BOUNDARIES.md``.
 import logging
 from collections.abc import Callable, Iterable, Mapping
 from datetime import timedelta
+from typing import Any
 from uuid import UUID
+
+from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from personalos.config import settings
 from personalos.domain.credentials import (
@@ -31,6 +34,7 @@ from personalos.domain.workflow import (
     WorkflowThread,
     application_transition_thread_id,
     event_handler_thread_id,
+    file_task_thread_id,
     job_search_thread_id,
     supervisor_thread_id,
 )
@@ -47,6 +51,7 @@ from personalos.executor.calendar import (
 )
 from personalos.executor.credentials import CredentialBroker
 from personalos.executor.document_reader import GatewayDocumentReader
+from personalos.executor.file_operations import GatewayFileOperations
 from personalos.executor.gmail_inbox import GmailRecruiterInbox
 from personalos.executor.gmail_outbound import GmailOutbound, GmailSendExecutor, GmailSentReconciler
 from personalos.executor.google_calendar import CalendarChangeScanner, GoogleCalendar
@@ -57,6 +62,7 @@ from personalos.executor.tool_executor import (
     ProviderReconciler,
     ToolExecutor,
 )
+from personalos.graphs.file_task import FileTaskGraph, FileTaskSubgraphRunner
 from personalos.graphs.job_search import JobSearchSubgraphRunner
 from personalos.mcp.adapter import Authorizer, MCPToolInvoker
 from personalos.mcp.base import MCPServer
@@ -92,6 +98,7 @@ from personalos.persistence.evidence import (
     SqlEvidenceSource,
 )
 from personalos.persistence.execution_ledger import ExecutionLedger
+from personalos.persistence.file_access_audit import record_file_path_denial
 from personalos.persistence.idempotency import OperationStore, SqlOperationStore
 from personalos.persistence.integration_health import IntegrationHealthStore
 from personalos.persistence.job_postings import SqlPostingCatalog
@@ -113,6 +120,7 @@ from personalos.persistence.workflow_failures import WorkflowFailureStore
 from personalos.persistence.workflow_progress import WorkflowProgressLog
 from personalos.persistence.workflow_status import WorkflowStatusReader
 from personalos.policy import ApprovedIntent, PolicyEngine, default_policy_engine
+from personalos.policy.rules import default_rules
 from personalos.providers import (
     JOB_PROVIDERS_SERVER,
     AshbyProvider,
@@ -170,6 +178,9 @@ SUPERVISOR_WORKFLOW = "supervisor"
 #: `workflows.name` for the runs started by events no waiting workflow claimed.
 EVENT_HANDLER_WORKFLOW = "event_handler"
 
+#: `workflows.name` for a File subgraph task run on its own (not under a Supervisor).
+FILE_TASK_WORKFLOW = "file_task"
+
 
 def build_operation_store(session_factory=SessionLocal) -> OperationStore:
     """Build the durable operation store backing idempotency."""
@@ -188,7 +199,11 @@ def register_mcp_servers(
     """
     manager = manager or get_mcp_manager()
     if settings.mcp_files_enabled:
-        manager.register_server(build_files_mcp_server(operation_store=operation_store))
+        manager.register_server(
+            build_files_mcp_server(
+                operation_store=operation_store, denial_sink=build_path_denial_audit()
+            )
+        )
     if settings.mcp_google_enabled:
         manager.register_server(build_google_mcp_server(operation_store=operation_store))
     logger.info("Registered MCP servers: %s", manager.list_servers())
@@ -198,18 +213,80 @@ def register_mcp_servers(
 def build_files_mcp_server(
     allowed_roots: Iterable[str] | None = None,
     operation_store: OperationStore | None = None,
+    denial_sink: Callable[[Any], None] | None = None,
 ) -> MCPServer:
     """Build the files server, confined to the configured allowed roots.
 
     The roots come from `FILES_ALLOWED_ROOTS` and from nowhere else: they are
     never an intent argument, so nothing a model emits can widen them. With
     none configured the server still registers and rejects every path.
+    `denial_sink` receives every path the sandbox refuses; by default each is
+    logged (`build_path_denial_audit` also writes it to `audit_events`).
     """
     from mcp_servers.files.sandbox import PathSandbox
     from mcp_servers.files.server import FilesMCPServer
 
     roots = settings.files_allowed_roots if allowed_roots is None else allowed_roots
-    return FilesMCPServer(PathSandbox(roots), operation_store=operation_store)
+    return FilesMCPServer(
+        PathSandbox(roots), operation_store=operation_store, denial_sink=denial_sink
+    )
+
+
+def build_path_denial_audit(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> Callable[[Any], None]:
+    """The files server's `DenialSink`: a structured WARNING and an `audit_events` row."""
+    from mcp_servers.files.sandbox import log_path_denial
+
+    def sink(denial: Any) -> None:
+        log_path_denial(denial)
+        record_file_path_denial(
+            session_factory,
+            actor_id=denial.actor_id,
+            tool=denial.tool,
+            requested_path=denial.requested_path,
+            reason=denial.reason,
+            workflow_id=denial.workflow_id,
+        )
+
+    return sink
+
+
+def _document_text(path: str, content: bytes) -> str | None:
+    """Text of a PDF, DOCX, Markdown or plain-text document, for the File subgraph."""
+    from personalos.retrieval.resume_chunking import detect_kind, extract_text
+
+    return extract_text(content, detect_kind(path, content)) or None
+
+
+def build_file_operations(gateway: ToolGateway | None = None) -> GatewayFileOperations:
+    """Bind the File subgraph's `FileOperations` port to the tool gateway."""
+    return GatewayFileOperations(gateway or build_tool_gateway(), text_extractor=_document_text)
+
+
+def build_file_task_graph(
+    *,
+    gateway: ToolGateway | None = None,
+    model_gateway: ModelGateway | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
+) -> FileTaskGraph:
+    """The File subgraph, over the gateway and the configured planner and summarizer.
+
+    The unattended limit is `FILES_MAX_UNATTENDED`, and the same limit is
+    what policy holds bulk moves to (`build_policy_engine`).
+    """
+    from personalos.domain.files import FileApprovalPolicy
+
+    models = model_gateway or build_model_gateway()
+    return FileTaskGraph(
+        build_file_operations(gateway),
+        planner=models.file_planner(),
+        summarizer=models.document_summarizer(),
+        approval_policy=FileApprovalPolicy(
+            max_files_without_approval=settings.files_max_unattended
+        ),
+        checkpointer=checkpointer,
+    )
 
 
 def build_policy_engine(
@@ -222,7 +299,10 @@ def build_policy_engine(
     row. `default_policy_engine()` on its own records nothing durable and is
     for tests and callers that have no database.
     """
-    return default_policy_engine(decision_log=SqlPolicyDecisionLog(session_factory))
+    return PolicyEngine(
+        default_rules(max_unattended_files=settings.files_max_unattended),
+        decision_log=SqlPolicyDecisionLog(session_factory),
+    )
 
 
 def build_tool_gateway(
@@ -1320,6 +1400,50 @@ def register_application_transition_thread(
     )
 
 
+def register_file_task_thread(
+    *,
+    user_id: UUID,
+    registry: WorkflowThreadRegistry,
+    workflow_id: UUID | None = None,
+    task_key: str | None = None,
+    actor_id: str = "system",
+    correlation_id: UUID | None = None,
+) -> WorkflowThread:
+    """Derive and register the stable thread a File subgraph task runs on.
+
+    Registered under the candidate (`user_id`) like a job search, so the
+    task, its approval and its audit trail belong to that actor and no other
+    (`personalos.domain.ownership`).
+    """
+    thread_id = file_task_thread_id(user_id, task_key)
+    existing = registry.resolve(thread_id)
+    if existing is not None:
+        return existing
+    return registry.register(
+        thread_id=thread_id,
+        workflow_name=FILE_TASK_WORKFLOW,
+        workflow_id=workflow_id,
+        user_id=user_id,
+        actor_id=actor_id,
+        correlation_id=correlation_id,
+    )
+
+
+def build_file_task_subgraph_runner(
+    compiled_subgraph,
+    *,
+    user_id: UUID,
+    thread: WorkflowThread,
+) -> FileTaskSubgraphRunner:
+    """Bind the Supervisor's `FileSubgraphRunner` port to a registered thread."""
+    return FileTaskSubgraphRunner(
+        compiled_subgraph,
+        user_id=user_id,
+        thread_id=thread.thread_id,
+        workflow_id=thread.workflow_id,
+    )
+
+
 def register_supervisor_thread(
     *,
     conversation_key: str,
@@ -1478,6 +1602,12 @@ __all__ = [
     "build_operation_store",
     "register_mcp_servers",
     "build_files_mcp_server",
+    "build_path_denial_audit",
+    "build_file_operations",
+    "build_file_task_graph",
+    "register_file_task_thread",
+    "build_file_task_subgraph_runner",
+    "FILE_TASK_WORKFLOW",
     "build_google_mcp_server",
     "connected_google_credential",
     "google_authorizer",

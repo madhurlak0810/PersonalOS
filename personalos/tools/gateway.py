@@ -31,6 +31,7 @@ from personalos.domain.errors import (
     InternalError,
     NotFound,
     PersonalOSError,
+    PolicyDeniedError,
     ToolFailure,
     ValidationFailed,
 )
@@ -58,6 +59,7 @@ _ERROR_CODE_TO_EXCEPTION: dict[str, type[PersonalOSError]] = {
     ErrorCode.VALIDATION.value: ValidationFailed,
     ErrorCode.NOT_FOUND.value: NotFound,
     ErrorCode.IDEMPOTENCY_CONFLICT.value: IdempotencyConflict,
+    ErrorCode.POLICY_DENIED.value: PolicyDeniedError,
     ErrorCode.INTERNAL.value: InternalError,
 }
 

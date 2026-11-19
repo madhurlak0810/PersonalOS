@@ -262,6 +262,53 @@ class TestRunJobSubgraph:
             CONTRACTS[sup.RUN_JOB_SUBGRAPH].validate_input({})
 
 
+# --- run_file_subgraph ---------------------------------------------------------
+
+
+@covers_node(SUPERVISOR_GRAPH, sup.RUN_FILE_SUBGRAPH)
+class TestRunFileSubgraph:
+    async def test_hands_the_planned_file_task_over_and_records_only_the_result(self):
+        file_subgraph = RecordingJobSubgraph(result={"plan": {"goal": "locate resume"}})
+        graph = supervisor(file_subgraph=file_subgraph)
+        decision = decided(RouteDomain.FILE)
+        dag = graph._plan_work({"message": "find my latest resume", "route_decision": decision})[
+            "task_dag"
+        ]
+
+        update = await graph._run_file_subgraph(
+            {"message": "find my latest resume", "task_dag": dag}
+        )
+
+        assert update == {"result": {"plan": {"goal": "locate resume"}}}
+        ((handed, state),) = file_subgraph.calls
+        assert handed == dag
+        assert TaskDAG.model_validate(dag).goal == "file_task: find my latest resume"
+        assert state["message"] == "find my latest resume"
+
+    def test_a_file_decision_routes_to_the_file_subgraph_after_planning(self):
+        graph = supervisor(file_subgraph=RecordingJobSubgraph())
+
+        assert (
+            graph._route_after_planning({"route_decision": decided(RouteDomain.FILE)})
+            == sup.RUN_FILE_SUBGRAPH
+        )
+        assert graph._route_after_planning({"route_decision": decided()}) == sup.RUN_JOB_SUBGRAPH
+
+    def test_without_a_file_subgraph_the_file_domain_is_clarified_not_planned(self):
+        graph = supervisor()
+
+        assert (
+            graph._route_after_classification({"route_decision": decided(RouteDomain.FILE)})
+            == sup.CLARIFY
+        )
+        with pytest.raises(UnsupportedRouteDomain):
+            graph._plan_work({"route_decision": decided(RouteDomain.FILE)})
+
+    def test_its_input_contract_requires_a_task_dag(self):
+        with pytest.raises(ValidationError):
+            CONTRACTS[sup.RUN_FILE_SUBGRAPH].validate_input({"message": "find my resume"})
+
+
 # --- clarify -------------------------------------------------------------------
 
 

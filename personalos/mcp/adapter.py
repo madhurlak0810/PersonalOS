@@ -32,6 +32,7 @@ _ERROR_CODE_MAP: dict[ToolCallErrorCode, ErrorCode] = {
     ToolCallErrorCode.MISSING_OPERATION_STORE: ErrorCode.INTERNAL,
     ToolCallErrorCode.MISSING_AUTHORIZATION: ErrorCode.INTERNAL,
     ToolCallErrorCode.IDEMPOTENCY_CONFLICT: ErrorCode.IDEMPOTENCY_CONFLICT,
+    ToolCallErrorCode.PERMISSION_DENIED: ErrorCode.POLICY_DENIED,
     ToolCallErrorCode.EXECUTION_ERROR: ErrorCode.TOOL_FAILURE,
 }
 

@@ -51,6 +51,10 @@ dependencies = [
 
     # MCP
     "mcp>=0.1",
+
+    # File subgraph plans are checked against their JSON schema
+    # (personalos.domain.files.parse_file_plan).
+    "jsonschema>=4.0",
     
     # Resume ingestion: text from PDF resumes (personalos.retrieval.resume_chunking).
     # DOCX, Markdown and text need nothing beyond the standard library.
