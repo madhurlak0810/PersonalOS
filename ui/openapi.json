@@ -409,6 +409,7 @@
         "description": "A reviewer's answer to one `ApprovalRequest` from a pending approval.\n\n`decided_by` is not here on purpose: it is the request's actor.",
         "properties": {
           "action_fingerprint": {
+            "maxLength": 255,
             "minLength": 1,
             "title": "Action Fingerprint",
             "type": "string"
@@ -421,6 +422,7 @@
           "note": {
             "anyOf": [
               {
+                "maxLength": 2000,
                 "type": "string"
               },
               {
@@ -1071,6 +1073,7 @@
           "thread_id": {
             "anyOf": [
               {
+                "maxLength": 255,
                 "type": "string"
               },
               {
@@ -1358,6 +1361,7 @@
         "description": "A reviewer's answer to one approval.",
         "properties": {
           "action_hash": {
+            "maxLength": 255,
             "minLength": 1,
             "title": "Action Hash",
             "type": "string"
@@ -2500,6 +2504,55 @@
         "title": "JobMatch",
         "type": "object"
       },
+      "LimitHitView": {
+        "description": "How often one actor was refused by one limit on one route.",
+        "properties": {
+          "actor_id": {
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "last_hit_at": {
+            "format": "date-time",
+            "title": "Last Hit At",
+            "type": "string"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "string"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actor_id",
+          "route",
+          "limit",
+          "count",
+          "last_hit_at"
+        ],
+        "title": "LimitHitView",
+        "type": "object"
+      },
+      "LimitHitsResponse": {
+        "description": "Requests refused by the API's limits, in this API process since it started.",
+        "properties": {
+          "hits": {
+            "items": {
+              "$ref": "#/components/schemas/LimitHitView"
+            },
+            "title": "Hits",
+            "type": "array"
+          }
+        },
+        "title": "LimitHitsResponse",
+        "type": "object"
+      },
       "LinkedApproval": {
         "additionalProperties": false,
         "description": "The `approvals` row an entry belongs to.",
@@ -3212,6 +3265,7 @@
                 "items": {
                   "$ref": "#/components/schemas/ApprovalDecisionInput"
                 },
+                "maxItems": 100,
                 "minItems": 1,
                 "type": "array"
               },
@@ -3236,6 +3290,7 @@
           "thread_id": {
             "anyOf": [
               {
+                "maxLength": 255,
                 "type": "string"
               },
               {
@@ -4792,8 +4847,22 @@
     },
     "/v1/approvals": {
       "get": {
-        "description": "Every approval of the caller's still owed an answer, oldest first; expired ones marked.",
+        "description": "The caller's approvals still owed an answer, oldest first (at most `limit`); expired ones marked.",
         "operationId": "list_approvals_v1_approvals_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -4804,6 +4873,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "security": [
@@ -5116,8 +5195,28 @@
     },
     "/v1/chat": {
       "post": {
-        "description": "Start a Supervisor conversation, or continue one, by queuing a run of it.\n\nContinuing a conversation whose workflow is parked on an approval is a\n409: a new message would start the thread over and strand the question it\nis waiting on. Answer it through the resume endpoint first.",
+        "description": "Start a Supervisor conversation, or continue one, by queuing a run of it.\n\nContinuing a conversation whose workflow is parked on an approval is a\n409: a new message would start the thread over and strand the question it\nis waiting on. Answer it through the resume endpoint first.\n\nWith an `Idempotency-Key`, a repeat of a request already answered returns\nthat answer (`Idempotent-Replayed: true`) without spending the actor's\n`workflow_start` budget or starting anything. Without one, every request\nspends one; starting a new workflow while `API_MAX_ACTIVE_WORKFLOWS` are\nqueued or running is a 429.",
         "operationId": "chat_v1_chat_post",
+        "parameters": [
+          {
+            "description": "Makes the request safe to retry: the same key returns the same answer.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Makes the request safe to retry: the same key returns the same answer.",
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -5219,7 +5318,7 @@
             "required": false,
             "schema": {
               "default": 100,
-              "maximum": 500,
+              "maximum": 200,
               "minimum": 1,
               "title": "Limit",
               "type": "integer"
@@ -5330,6 +5429,33 @@
           }
         ],
         "summary": "List Integration Failures",
+        "tags": [
+          "failures"
+        ]
+      }
+    },
+    "/v1/failures/limits": {
+      "get": {
+        "description": "Limit hits, most first: the caller's own, or everyone's (and anonymous ones) for `admin`.\n\nCounted in this process (`personalos.observability.limits`); the\n`personalos.api.limit_hits` metric is the cross-process view.",
+        "operationId": "list_limit_hits_v1_failures_limits_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LimitHitsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Limit Hits",
         "tags": [
           "failures"
         ]
@@ -5674,8 +5800,22 @@
     },
     "/v1/profile/versions": {
       "get": {
-        "description": "Every version of the actor's profile, newest first.",
+        "description": "The actor's profile versions, newest first, at most `limit` of them.",
         "operationId": "list_profile_versions_v1_profile_versions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -5686,6 +5826,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "security": [
