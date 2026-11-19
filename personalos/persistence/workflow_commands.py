@@ -171,6 +171,36 @@ class WorkflowCommandQueue:
         finally:
             session.close()
 
+    def active_workflow_ids(self, actor_id: str) -> set[UUID]:
+        """The workflows `actor_id` has a command queued or running for.
+
+        What the API's active-workflow cap counts: a command stays unfinished
+        from `enqueue` until the worker settles it, which it does when the
+        run completes, fails, or parks at an interrupt -- so a workflow waiting
+        on an approval is no longer active, and a finished one frees its slot.
+        Read from the queue, so every API process sees the same count.
+        """
+        session = self.session_factory()
+        try:
+            payloads = [
+                payload
+                for (payload,) in session.query(OutboxEventModel.payload_json).filter(
+                    OutboxEventModel.type == WORKFLOW_COMMAND_EVENT,
+                    OutboxEventModel.status.in_(_UNFINISHED),
+                )
+            ]
+        finally:
+            session.close()
+        active: set[UUID] = set()
+        for payload in payloads:
+            if not isinstance(payload, dict) or payload.get("actor_id") != actor_id:
+                continue
+            try:
+                active.add(UUID(str(payload["workflow_id"])))
+            except (KeyError, ValueError):
+                continue
+        return active
+
     def claim_next(self) -> ClaimedWorkflowCommand | None:
         """Claim the oldest queued command for this worker, or `None` if there is none."""
         session = self.session_factory()

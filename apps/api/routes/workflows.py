@@ -50,11 +50,13 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Header, Request, Response
+from fastapi.responses import JSONResponse
 from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from apps.api.auth import current_access, current_actor, current_principal
+from apps.api.limits import ApiLimits, LimitName, get_api_limits, rate_limited_deps, route_label
 from personalos.bootstrap import (
     SUPERVISOR_WORKFLOW,
     build_approval_queue,
@@ -91,6 +93,13 @@ from personalos.observability.tracing import Attr
 from personalos.persistence.approvals import ApprovalQueue
 from personalos.persistence.checkpointer import WorkflowThreadRegistry
 from personalos.persistence.database import SessionLocal
+from personalos.persistence.idempotent_requests import (
+    MAX_IDEMPOTENCY_KEY_LENGTH,
+    Claim,
+    IdempotentRequests,
+    Replay,
+    request_fingerprint,
+)
 from personalos.persistence.search_profiles import SqlSearchProfileStore
 from personalos.persistence.workflow_actions import WorkflowActionReader
 from personalos.persistence.workflow_commands import WorkflowCommandQueue
@@ -110,6 +119,15 @@ IDENTITY_FIELDS = frozenset(
 #: anything that would make a checkpoint row unreasonable.
 _MAX_MESSAGE_LENGTH = 10_000
 
+#: Upper bounds on the other free-text fields a body may carry.
+_MAX_ID_LENGTH = 255
+_MAX_NOTE_LENGTH = 2_000
+
+#: Header a client sends to make `POST /v1/chat` safe to retry.
+IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
+#: Set on a response that is the stored answer to an earlier request.
+IDEMPOTENT_REPLAY_HEADER = "Idempotent-Replayed"
+
 
 # --- Dependencies ---------------------------------------------------------------
 
@@ -124,6 +142,8 @@ class WorkflowServices:
     approvals: ApprovalQueue
     actions: WorkflowActionReader
     profiles: SqlSearchProfileStore
+    #: Where `POST /v1/chat` keeps the answer to each `Idempotency-Key`.
+    idempotency: IdempotentRequests
 
 
 def build_workflow_services(session_factory: Callable[[], Any]) -> WorkflowServices:
@@ -136,6 +156,7 @@ def build_workflow_services(session_factory: Callable[[], Any]) -> WorkflowServi
         approvals=build_approval_queue(session_factory, registry),
         actions=build_workflow_action_reader(session_factory, registry),
         profiles=build_search_profile_store(session_factory),
+        idempotency=IdempotentRequests(session_factory, operation="chat"),
     )
 
 
@@ -160,7 +181,7 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=_MAX_MESSAGE_LENGTH)
     #: The thread a previous `POST /v1/chat` returned. Omitted, a new
     #: conversation -- and a new workflow -- is started.
-    thread_id: str | None = None
+    thread_id: str | None = Field(default=None, max_length=_MAX_ID_LENGTH)
     # No `user_id` or `actor_id`: the conversation is the verified actor's own
     # (`actor_user_id`), and `extra="forbid"` makes naming anyone else a 422.
 
@@ -185,10 +206,10 @@ class ApprovalDecisionInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action_id: UUID
-    action_fingerprint: str = Field(min_length=1)
+    action_fingerprint: str = Field(min_length=1, max_length=_MAX_ID_LENGTH)
     verdict: Literal[ApprovalVerdict.APPROVED, ApprovalVerdict.REJECTED]
     request_id: UUID | None = None
-    note: str | None = None
+    note: str | None = Field(default=None, max_length=_MAX_NOTE_LENGTH)
 
 
 class ResumeRequest(BaseModel):
@@ -200,10 +221,13 @@ class ResumeRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    decisions: list[ApprovalDecisionInput] | None = Field(default=None, min_length=1)
+    decisions: list[ApprovalDecisionInput] | None = Field(
+        default=None, min_length=1, max_length=100
+    )
+    #: Free-form, but bounded by the JSON limits (depth, string length) and the body cap.
     event: dict[str, Any] | None = None
     #: Which waiting thread to resume, when more than one is waiting.
-    thread_id: str | None = None
+    thread_id: str | None = Field(default=None, max_length=_MAX_ID_LENGTH)
 
     @model_validator(mode="after")
     def _exactly_one_answer(self) -> "ResumeRequest":
@@ -381,6 +405,30 @@ def _read_or_404(
     return snapshot
 
 
+def _idempotency_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    key = value.strip()
+    if not key or len(key) > MAX_IDEMPOTENCY_KEY_LENGTH or not key.isprintable():
+        raise ValidationFailed(
+            f"{IDEMPOTENCY_KEY_HEADER} must be 1 to {MAX_IDEMPOTENCY_KEY_LENGTH} printable "
+            "characters"
+        )
+    return key
+
+
+def _replayed(replay: Replay) -> JSONResponse:
+    workflow_id = replay.result.get("workflow_id")
+    return JSONResponse(
+        status_code=202,
+        content=replay.result,
+        headers={
+            IDEMPOTENT_REPLAY_HEADER: "true",
+            **({"Location": f"/v1/workflows/{workflow_id}"} if workflow_id else {}),
+        },
+    )
+
+
 @router.post("/chat", response_model=ChatResponse, status_code=202)
 async def chat(
     http_request: Request,
@@ -389,17 +437,63 @@ async def chat(
     services: WorkflowServices = Depends(get_workflow_services),
     actor_id: str = Depends(current_actor),
     access: ActorScope = Depends(current_access),
+    limits: ApiLimits = Depends(get_api_limits),
+    idempotency_key: str | None = Header(
+        default=None,
+        alias=IDEMPOTENCY_KEY_HEADER,
+        description="Makes the request safe to retry: the same key returns the same answer.",
+    ),
 ):
     """Start a Supervisor conversation, or continue one, by queuing a run of it.
 
     Continuing a conversation whose workflow is parked on an approval is a
     409: a new message would start the thread over and strand the question it
     is waiting on. Answer it through the resume endpoint first.
+
+    With an `Idempotency-Key`, a repeat of a request already answered returns
+    that answer (`Idempotent-Replayed: true`) without spending the actor's
+    `workflow_start` budget or starting anything. Without one, every request
+    spends one; starting a new workflow while `API_MAX_ACTIVE_WORKFLOWS` are
+    queued or running is a 429.
     """
+    key = _idempotency_key(idempotency_key)
+    claim: Claim | None = None
+    if key is not None:
+        begun = services.idempotency.begin(
+            actor_id, key, request_fingerprint(request.model_dump(mode="json"))
+        )
+        if isinstance(begun, Replay):
+            return _replayed(begun)
+        claim = begun
+    try:
+        response = _start_chat(http_request, request, services, actor_id, access, limits)
+    except BaseException as exc:
+        if claim is not None:
+            services.idempotency.fail(claim, type(exc).__name__)
+        raise
+    if claim is not None:
+        services.idempotency.complete(claim, response.model_dump(mode="json"))
+    http_response.headers["Location"] = f"/v1/workflows/{response.workflow_id}"
+    return response
+
+
+def _start_chat(
+    http_request: Request,
+    request: ChatRequest,
+    services: WorkflowServices,
+    actor_id: str,
+    access: ActorScope,
+    limits: ApiLimits,
+) -> ChatResponse:
+    route = route_label(http_request)
+    limits.consume(actor_id, LimitName.WORKFLOW_START, route=route)
     correlation_id = _correlation_id(http_request)
     new_workflow = request.thread_id is None
 
     if request.thread_id is None:
+        limits.check_active_workflows(
+            actor_id, len(services.commands.active_workflow_ids(actor_id)), route=route
+        )
         user_id = actor_user_id(actor_id)
         services.profiles.ensure_user(user_id, display_name=actor_id)
         workflow_id = services.registry.create_workflow(SUPERVISOR_WORKFLOW)
@@ -467,7 +561,6 @@ async def chat(
         actor_id,
         correlation_id,
     )
-    http_response.headers["Location"] = f"/v1/workflows/{thread.workflow_id}"
     return ChatResponse(
         workflow_id=thread.workflow_id,
         thread_id=thread.thread_id,
@@ -491,7 +584,12 @@ async def get_workflow(
     )
 
 
-@router.post("/workflows/{workflow_id}/resume", response_model=ResumeResponse, status_code=202)
+@router.post(
+    "/workflows/{workflow_id}/resume",
+    response_model=ResumeResponse,
+    status_code=202,
+    dependencies=rate_limited_deps(LimitName.WORKFLOW_RESUME),
+)
 async def resume_workflow(
     workflow_id: UUID,
     http_request: Request,
@@ -598,6 +696,8 @@ async def resume_workflow(
 
 
 __all__ = [
+    "IDEMPOTENCY_KEY_HEADER",
+    "IDEMPOTENT_REPLAY_HEADER",
     "IDENTITY_FIELDS",
     "router",
     "WorkflowServices",

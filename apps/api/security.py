@@ -1,4 +1,4 @@
-"""The API's HTTP-layer defences: CORS, security headers, and a body-size cap.
+"""The API's HTTP-layer defences: CORS, security headers, body and JSON limits.
 
 A browser UI served from its own origin (Phase M) calls this API
 cross-origin. Three things keep that from over-exposing the API:
@@ -21,10 +21,15 @@ cross-origin. Three things keep that from over-exposing the API:
   serves; they get `DOCS_CONTENT_SECURITY_POLICY`, which admits the CDN their
   scripts come from and nothing else. A UI server can send the same set by
   using `SECURITY_HEADERS`, swapping in a CSP that lists its own assets.
-- **A request body is capped** (`API_MAX_BODY_BYTES`, 1 MiB). Nothing the
-  API accepts comes near it: documents are ingested by path, not uploaded. A
+- **A request body is capped** (`API_MAX_BODY_BYTES`, 1 MiB), except resume
+  ingestion (`API_MAX_RESUME_BODY_BYTES`, 10 MiB, its route alone). A
   declared `Content-Length` over the cap is refused before the body is read;
   a chunked body is counted as it arrives and refused once it passes the cap.
+- **A JSON body's shape is checked before it is parsed**
+  (`JsonLimitsMiddleware`): not UTF-8, nested deeper than
+  `API_MAX_JSON_DEPTH`, or holding a string longer than
+  `API_MAX_JSON_STRING_BYTES` is a 422, found in one linear pass over the
+  raw bytes. See docs/LIMITS.md.
 
 Ordering (see `apps.api.main.create_app`): the security headers are
 outermost, so preflights, CORS refusals and the 413 all carry them; CORS is
@@ -35,14 +40,18 @@ the headers itself (`apps.api.errors`).
 """
 
 import json
+import re
 from collections.abc import Iterable, Mapping, MutableMapping, Sequence
+from dataclasses import dataclass
+from itertools import accumulate
 from urllib.parse import urlsplit
 
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.cors import CORSMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from personalos.domain.errors import PayloadTooLarge
+from personalos.domain.errors import PayloadTooLarge, PersonalOSError, ValidationFailed
+from personalos.observability.limits import normalize_path, record_limit_hit
 
 #: The only methods the API's routes serve. `OPTIONS` is the preflight
 #: itself and never needs to be allowed by one.
@@ -219,30 +228,79 @@ class _BodyTooLarge(Exception):
     """Raised from inside `receive` once a streamed body passes the cap."""
 
 
-class BodySizeLimitMiddleware:
-    """Refuses a request whose body is over `max_bytes` with a 413 envelope.
+#: Paths no body limit applies to: the liveness probe.
+LIMIT_EXEMPT_PATHS = frozenset({"/health"})
 
-    A streamed body that passes the cap mid-read raises inside `receive`.
-    FastAPI turns any error reading the body into its own 400, so rather than
-    rely on the exception reaching here, whatever response the app then
-    produces is discarded and the 413 sent in its place.
+
+def _refusal(error: PersonalOSError) -> tuple[Message, Message]:
+    """The two ASGI messages of an error-envelope response sent from a middleware."""
+    body = json.dumps(error.to_envelope()).encode()
+    headers = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode()),
+    ]
+    if isinstance(error, PayloadTooLarge):
+        # The rest of the body is never read; don't keep the socket.
+        headers.append((b"connection", b"close"))
+    return (
+        {"type": "http.response.start", "status": error.http_status, "headers": headers},
+        {"type": "http.response.body", "body": body},
+    )
+
+
+def _route(scope: Scope) -> str:
+    return f"{scope.get('method', '-')} {normalize_path(scope.get('path', ''))}"
+
+
+class BodySizeLimitMiddleware:
+    """Refuses a request whose body is over its cap with a 413 envelope.
+
+    The cap is `max_bytes`, unless `route_caps` names the request's method
+    and path -- resume ingestion's larger one. A streamed body that passes the
+    cap mid-read raises inside `receive`. FastAPI turns any error reading the
+    body into its own 400, so rather than rely on the exception reaching here,
+    whatever response the app then produces is discarded and the 413 sent in
+    its place. `/health` is never capped.
     """
 
-    def __init__(self, app: ASGIApp, *, max_bytes: int = DEFAULT_MAX_BODY_BYTES) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        max_bytes: int = DEFAULT_MAX_BODY_BYTES,
+        route_caps: Mapping[tuple[str, str], int] | None = None,
+    ) -> None:
         if max_bytes <= 0:
             raise ValueError("API_MAX_BODY_BYTES must be positive")
+        caps = dict(route_caps or {})
+        if any(cap <= 0 for cap in caps.values()):
+            raise ValueError("a per-route body cap must be positive")
         self.app = app
         self.max_bytes = max_bytes
+        self.route_caps = {(method.upper(), path): cap for (method, path), cap in caps.items()}
+
+    def cap_for(self, scope: Scope) -> int:
+        """The body cap for this request's method and path."""
+        return self.route_caps.get(
+            (str(scope.get("method", "")).upper(), scope.get("path", "")), self.max_bytes
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
+        if scope["type"] != "http" or scope.get("path") in LIMIT_EXEMPT_PATHS:
             await self.app(scope, receive, send)
             return
-        if self._declares_too_much(scope):
-            await self._refuse(send)
+        cap = self.cap_for(scope)
+
+        async def refuse(send_to: Send) -> None:
+            record_limit_hit(actor_id=None, route=_route(scope), limit="body_size")
+            for message in _refusal(PayloadTooLarge(details={"max_bytes": cap})):
+                await send_to(message)
+
+        if self._declares_too_much(scope, cap):
+            await refuse(send)
             return
 
-        guard = _BodyGuard(self.max_bytes, receive, send, self._refuse)
+        guard = _BodyGuard(cap, receive, send, refuse)
         try:
             await self.app(scope, guard.receive, guard.send)
         except Exception:
@@ -250,31 +308,15 @@ class BodySizeLimitMiddleware:
                 raise
         await guard.finish()
 
-    def _declares_too_much(self, scope: Scope) -> bool:
+    @staticmethod
+    def _declares_too_much(scope: Scope, cap: int) -> bool:
         declared = Headers(scope=scope).get("content-length")
         if declared is None:
             return False
         try:
-            return int(declared) > self.max_bytes
+            return int(declared) > cap
         except ValueError:
             return False  # The server rejects a malformed length itself.
-
-    async def _refuse(self, send: Send) -> None:
-        error = PayloadTooLarge(details={"max_bytes": self.max_bytes})
-        body = json.dumps(error.to_envelope()).encode()
-        await send(
-            {
-                "type": "http.response.start",
-                "status": error.http_status,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(body)).encode()),
-                    # The rest of the body is never read; don't keep the socket.
-                    (b"connection", b"close"),
-                ],
-            }
-        )
-        await send({"type": "http.response.body", "body": body})
 
 
 class _BodyGuard:
@@ -311,17 +353,169 @@ class _BodyGuard:
             await self._refuse(self._send)
 
 
+# --- JSON shape --------------------------------------------------------------------
+
+#: Defaults for `JsonLimitsMiddleware`.
+DEFAULT_MAX_JSON_DEPTH = 32
+DEFAULT_MAX_JSON_STRING_BYTES = 64 * 1024
+
+#: One JSON string token, escapes included -- or, unterminated, everything to
+#: the end of the body. Because a match that starts can never fail (it ends at
+#: a closing quote, the end, or a lone trailing backslash), the scan is linear
+#: whatever the input: no quote is ever re-tried as the start of a string.
+_JSON_STRING = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*(?:"|\\?\Z)', re.DOTALL)
+#: Every byte that is not a bracket, for `bytes.translate` to delete.
+_NOT_BRACKETS = bytes(b for b in range(256) if b not in b"[]{}")
+#: +1 for an opening bracket, -1 for a closing one, by byte value.
+_DEPTH_DELTA = [0] * 256
+for _open in b"[{":
+    _DEPTH_DELTA[_open] = 1
+for _close in b"]}":
+    _DEPTH_DELTA[_close] = -1
+
+
+@dataclass(frozen=True)
+class JsonShapeViolation:
+    """Why a JSON body was refused before parsing."""
+
+    limit: str
+    message: str
+
+
+def check_json_shape(
+    body: bytes, *, max_depth: int, max_string_bytes: int
+) -> JsonShapeViolation | None:
+    """Refuse a body that is not UTF-8, nests too deep, or has too long a string.
+
+    A linear scan of the raw bytes, done before any parser sees them, so a
+    body built to exhaust the parser's recursion or allocate a huge string
+    costs one pass over at most the body cap. Strings are blanked out first
+    so a bracket inside one does not count as nesting.
+    """
+    try:
+        body.decode("utf-8")
+    except UnicodeDecodeError:
+        return JsonShapeViolation("json_encoding", "request body is not valid UTF-8 JSON")
+
+    longest = 0
+
+    def blank(match: re.Match[bytes]) -> bytes:
+        nonlocal longest
+        longest = max(longest, match.end() - match.start() - 2)
+        return b'""'
+
+    structure = _JSON_STRING.sub(blank, body)
+    if longest > max_string_bytes:
+        return JsonShapeViolation(
+            "json_string_length",
+            f"request JSON has a string of {longest} bytes; at most {max_string_bytes} are allowed",
+        )
+    brackets = structure.translate(None, _NOT_BRACKETS)
+    depth = max(accumulate(map(_DEPTH_DELTA.__getitem__, brackets)), default=0)
+    if depth > max_depth:
+        return JsonShapeViolation(
+            "json_depth",
+            f"request JSON nests {depth} levels deep; at most {max_depth} are allowed",
+        )
+    return None
+
+
+def _is_json(scope: Scope) -> bool:
+    content_type = Headers(scope=scope).get("content-type", "")
+    media = content_type.split(";", 1)[0].strip().lower()
+    return media == "application/json" or (
+        media.startswith("application/") and media.endswith("+json")
+    )
+
+
+class JsonLimitsMiddleware:
+    """A 422 for a JSON body that is not UTF-8, nests too deep or holds too long a string.
+
+    Sits inside `BodySizeLimitMiddleware`, so the body it buffers is already
+    bounded by the cap. Only a body sent as JSON is examined; anything else
+    passes untouched (and no route parses it as JSON). `/health` is exempt.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        max_depth: int = DEFAULT_MAX_JSON_DEPTH,
+        max_string_bytes: int = DEFAULT_MAX_JSON_STRING_BYTES,
+    ) -> None:
+        if max_depth <= 0 or max_string_bytes <= 0:
+            raise ValueError("API_MAX_JSON_DEPTH and API_MAX_JSON_STRING_BYTES must be positive")
+        self.app = app
+        self.max_depth = max_depth
+        self.max_string_bytes = max_string_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] != "http"
+            or scope.get("path") in LIMIT_EXEMPT_PATHS
+            or scope.get("method") in ("GET", "HEAD", "OPTIONS")
+            or not _is_json(scope)
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        chunks: list[bytes] = []
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                # The client went away mid-body; let the app see the disconnect.
+                await self.app(scope, _replaying(b"".join(chunks), receive, message), send)
+                return
+            chunks.append(message.get("body", b""))
+            if not message.get("more_body", False):
+                break
+        body = b"".join(chunks)
+
+        violation = check_json_shape(
+            body, max_depth=self.max_depth, max_string_bytes=self.max_string_bytes
+        )
+        if violation is not None:
+            record_limit_hit(actor_id=None, route=_route(scope), limit=violation.limit)
+            error = ValidationFailed(violation.message, details={"limit": violation.limit})
+            for out in _refusal(error):
+                await send(out)
+            return
+        await self.app(scope, _replaying(body, receive), send)
+
+
+def _replaying(body: bytes, receive: Receive, pending: Message | None = None) -> Receive:
+    """A `receive` that hands over `body` once, then defers to the real one."""
+    delivered = False
+
+    async def replay() -> Message:
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        if pending is not None:
+            return pending
+        return await receive()
+
+    return replay
+
+
 __all__ = [
     "API_CONTENT_SECURITY_POLICY",
     "CORS_ALLOWED_HEADERS",
     "CORS_ALLOWED_METHODS",
     "CORS_EXPOSED_HEADERS",
     "DEFAULT_MAX_BODY_BYTES",
+    "DEFAULT_MAX_JSON_DEPTH",
+    "DEFAULT_MAX_JSON_STRING_BYTES",
+    "LIMIT_EXEMPT_PATHS",
     "DOCS_CONTENT_SECURITY_POLICY",
     "SECURITY_HEADERS",
     "BodySizeLimitMiddleware",
+    "JsonLimitsMiddleware",
+    "JsonShapeViolation",
     "SecurityHeadersMiddleware",
     "StrictCORSMiddleware",
     "apply_security_headers",
+    "check_json_shape",
     "validate_cors_origins",
 ]

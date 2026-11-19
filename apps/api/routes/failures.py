@@ -34,6 +34,9 @@ redacted, and are listed:
   event belongs to that workflow;
 - all together at `GET /v1/failures/events`.
 
+Requests the API's limits refused (`apps.api.limits`) are tallied at
+`GET /v1/failures/limits`, so a client stuck in a retry loop shows up here.
+
 Every list and action is the caller's own (`apps.api.auth.current_access`):
 another actor's workflow is a 404, and its parked events are not listed.
 Events that belong to no workflow are install-wide, listed and retried only
@@ -61,6 +64,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from apps.api.auth import current_access, current_actor, current_principal
+from apps.api.limits import MAX_PAGE_SIZE, ApiLimits, LimitName, get_api_limits, rate_limited_deps
 from personalos.bootstrap import (
     build_event_failure_store,
     build_integration_health_store,
@@ -255,7 +259,7 @@ async def list_failures(
 
 @router.get("/failures/events", response_model=EventFailuresResponse)
 async def list_event_failures(
-    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=500),
+    limit: int = Query(default=min(DEFAULT_LIMIT, MAX_PAGE_SIZE), ge=1, le=MAX_PAGE_SIZE),
     services: FailureServices = Depends(get_failure_services),
     principal: Principal = Depends(current_principal),
     access: ActorScope = Depends(current_access),
@@ -280,8 +284,52 @@ async def list_integration_failures(services: FailureServices = Depends(get_fail
     return IntegrationFailuresResponse(integrations=services.integrations.unhealthy())
 
 
+class LimitHitView(BaseModel):
+    """How often one actor was refused by one limit on one route."""
+
+    actor_id: str
+    route: str
+    limit: str
+    count: int
+    last_hit_at: datetime
+
+
+class LimitHitsResponse(BaseModel):
+    """Requests refused by the API's limits, in this API process since it started."""
+
+    hits: list[LimitHitView] = Field(default_factory=list)
+
+
+@router.get("/failures/limits", response_model=LimitHitsResponse)
+async def list_limit_hits(
+    principal: Principal = Depends(current_principal),
+    limits: ApiLimits = Depends(get_api_limits),
+):
+    """Limit hits, most first: the caller's own, or everyone's (and anonymous ones) for `admin`.
+
+    Counted in this process (`personalos.observability.limits`); the
+    `personalos.api.limit_hits` metric is the cross-process view.
+    """
+    actor = None if principal.has(Scope.ADMIN) else principal.actor_id
+    return LimitHitsResponse(
+        hits=[
+            LimitHitView(
+                actor_id=hit.actor_id,
+                route=hit.route,
+                limit=hit.limit,
+                count=hit.count,
+                last_hit_at=hit.last_hit_at,
+            )
+            for hit in limits.hits.snapshot(actor_id=actor)[:MAX_PAGE_SIZE]
+        ]
+    )
+
+
 @router.post(
-    "/failures/events/{failure_id}/retry", response_model=EventRetryResponse, status_code=202
+    "/failures/events/{failure_id}/retry",
+    response_model=EventRetryResponse,
+    status_code=202,
+    dependencies=rate_limited_deps(LimitName.FAILURE_ACTION),
 )
 async def retry_event_failure(
     failure_id: UUID,
@@ -323,7 +371,12 @@ async def retry_event_failure(
     )
 
 
-@router.post("/workflows/{workflow_id}/retry", response_model=RetryResponse, status_code=202)
+@router.post(
+    "/workflows/{workflow_id}/retry",
+    response_model=RetryResponse,
+    status_code=202,
+    dependencies=rate_limited_deps(LimitName.FAILURE_ACTION),
+)
 async def retry_failure(
     workflow_id: UUID,
     http_request: Request,
@@ -391,7 +444,11 @@ async def retry_failure(
     )
 
 
-@router.post("/workflows/{workflow_id}/dismiss", response_model=DismissResponse)
+@router.post(
+    "/workflows/{workflow_id}/dismiss",
+    response_model=DismissResponse,
+    dependencies=rate_limited_deps(LimitName.FAILURE_ACTION),
+)
 async def dismiss_failure(
     workflow_id: UUID,
     request: FailureSelection | None = None,
@@ -450,6 +507,7 @@ __all__ = [
     "WorkflowFailuresResponse",
     "EventFailuresResponse",
     "IntegrationFailuresResponse",
+    "LimitHitsResponse",
     "EventRetryResponse",
     "RetryResponse",
     "DismissResponse",

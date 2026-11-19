@@ -13,6 +13,7 @@ asserting on default FastAPI/Starlette error behavior.
 """
 
 import logging
+import math
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -22,6 +23,7 @@ from apps.api.security import apply_security_headers
 from personalos.domain.errors import (
     InternalError,
     PersonalOSError,
+    RateLimited,
     Unauthenticated,
     ValidationFailed,
 )
@@ -57,6 +59,14 @@ def register_error_handlers(app: FastAPI) -> None:
                 status_code=exc.http_status,
                 content=exc.to_envelope(),
                 headers={"WWW-Authenticate": "Bearer"},
+            )
+        if isinstance(exc, RateLimited):
+            # Already logged as `api.limit_hit` where it was refused; routine,
+            # so no stack trace. `Retry-After` is whole seconds.
+            return JSONResponse(
+                status_code=exc.http_status,
+                content=exc.to_envelope(),
+                headers={"Retry-After": str(max(1, math.ceil(exc.retry_after or 1)))},
             )
         logger.error(
             "%s %s failed (error_code=%s, context_id=%s, correlation_id=%s): %s",

@@ -64,6 +64,32 @@ class Settings(BaseSettings):
     api_cors_origins: list[str] = ["http://localhost:5173"]
     # The largest request body the API reads, in bytes; bigger is a 413.
     api_max_body_bytes: int = 1024 * 1024
+    # The one route allowed a bigger body: resume ingestion
+    # (`POST /v1/evidence/documents`). Still capped; bigger is a 413.
+    api_max_resume_body_bytes: int = 10 * 1024 * 1024
+    # A JSON body nested deeper than this, or with a single string longer
+    # than this many bytes (as sent, escapes included), is a 422 before it is
+    # parsed. See `apps.api.security.JsonLimitsMiddleware`.
+    api_max_json_depth: int = 32
+    api_max_json_string_bytes: int = 64 * 1024
+    # Per-actor request limits (see `apps.api.limits` and docs/LIMITS.md). Each
+    # rate is a token bucket: up to N requests at once, refilling at N per
+    # minute. Counted per API process; keyed on the verified actor only.
+    api_limits_enabled: bool = True
+    api_rate_workflow_start_per_minute: int = 10
+    api_rate_workflow_resume_per_minute: int = 30
+    api_rate_approval_decision_per_minute: int = 60
+    api_rate_failure_action_per_minute: int = 30
+    api_rate_evidence_ingest_per_minute: int = 6
+    # Concurrency caps per actor: workflows with a command queued or running,
+    # and open event streams.
+    api_max_active_workflows: int = 5
+    api_max_sse_connections: int = 5
+    # Failed bearer credentials per source address: this many are free, then
+    # each further failure doubles the wait (from the base, up to the max).
+    api_auth_free_failures: int = 3
+    api_auth_backoff_base_seconds: float = 1.0
+    api_auth_backoff_max_seconds: float = 300.0
 
     # Observability
     log_level: str = "INFO"

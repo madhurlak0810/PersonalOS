@@ -28,6 +28,10 @@ and so is a cursor into it: `Last-Event-ID` cannot reach events of a workflow
 the caller does not own. A ticket opens only the workflow it names, and only
 until it expires (`apps.api.auth`).
 
+**Open streams are capped per actor** (`API_MAX_SSE_CONNECTIONS`, in this
+process): one more is a 429. A stream's slot is given back when it ends,
+however it ends.
+
 `?follow=false` sends what has happened so far and closes, instead of
 waiting for more: one read of the backlog, for a client that would rather
 poll.
@@ -42,9 +46,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from apps.api.auth import current_access
+from apps.api.limits import ApiLimits, Slot, get_api_limits, route_label
 from personalos.bootstrap import build_workflow_progress_log
 from personalos.domain.errors import NotFound, ValidationFailed
 from personalos.domain.ownership import ActorScope
@@ -145,6 +151,15 @@ async def progress_stream(
             idle = 0.0
 
 
+async def _holding(frames: AsyncIterator[str], slot: Slot) -> AsyncIterator[str]:
+    """`frames`, giving `slot` back when the stream ends -- finished, failed or cut off."""
+    try:
+        async for frame in frames:
+            yield frame
+    finally:
+        slot.release()
+
+
 def _cursor(value: str | None) -> UUID | None:
     if value is None or not value.strip():
         return None
@@ -174,6 +189,7 @@ async def stream_workflow_events(
     log: WorkflowProgressLog = Depends(get_progress_log),
     settings: EventStreamSettings = Depends(get_event_stream_settings),
     access: ActorScope = Depends(current_access),
+    limits: ApiLimits = Depends(get_api_limits),
 ):
     """Stream the workflow's progress events, resuming after `Last-Event-ID` if given.
 
@@ -190,19 +206,23 @@ async def stream_workflow_events(
     first = await run_in_threadpool(
         lambda: log.events_after(workflow_id, after, access=access, limit=settings.batch_size)
     )
+    slot = limits.open_stream(access.actor_id, route=route_label(request))
+    frames = progress_stream(
+        log,
+        workflow_id,
+        after=after,
+        follow=follow,
+        settings=settings,
+        is_disconnected=request.is_disconnected,
+        access=access,
+        first=first,
+    )
     return StreamingResponse(
-        progress_stream(
-            log,
-            workflow_id,
-            after=after,
-            follow=follow,
-            settings=settings,
-            is_disconnected=request.is_disconnected,
-            access=access,
-            first=first,
-        ),
+        _holding(frames, slot),
         media_type=EVENT_STREAM,
         headers=_STREAM_HEADERS,
+        # Should the body never be iterated at all, the slot still comes back.
+        background=BackgroundTask(slot.release),
     )
 
 

@@ -32,6 +32,11 @@ approval decision names `approve`. A missing scope is a 403 and an audit row.
 Which *objects* a caller may touch is not decided here but in the stores,
 scoped by `current_access` (`personalos.domain.ownership`).
 
+**Guessing is throttled.** Every failed credential (token or ticket) counts
+against the connection's source address; past a few free failures each one
+doubles how long that address must wait, and while it waits every credential
+from it is refused with a 429 unchecked (`apps.api.limits.AuthFailureThrottle`).
+
 **Turning it off is loopback-only.** `API_AUTH_ENABLED=false` makes every
 request the configured `API_ACTOR`, and `ensure_safe_bind` refuses to start
 such an API on anything but a loopback address.
@@ -328,6 +333,44 @@ def get_api_auth(request: Request) -> ApiAuth:
     return auth
 
 
+def _refuse_if_throttled(request: Request) -> None:
+    """A 429 for an address still waiting out failed credentials -- before any check.
+
+    Refused before the credential is even compared, so a guess made while
+    waiting tells the guesser nothing, the right token included.
+    """
+    from apps.api.limits import LimitName, client_address, get_api_limits, route_label
+
+    limits = get_api_limits(request)
+    if not limits.enabled:
+        return
+    source = client_address(request)
+    wait = limits.auth_failures.retry_after(source)
+    if wait is not None:
+        limits.refuse(
+            None,
+            LimitName.AUTH_FAILURES,
+            route=route_label(request),
+            retry_after=wait,
+            message="too many failed credentials from this address; wait before trying again",
+            source=source,
+        )
+
+
+def _note_credential(request: Request, ok: bool) -> None:
+    """Count a failed credential against its source address, or clear it on success."""
+    from apps.api.limits import client_address, get_api_limits
+
+    limits = get_api_limits(request)
+    if not limits.enabled:
+        return
+    source = client_address(request)
+    if ok:
+        limits.auth_failures.succeeded(source)
+    else:
+        limits.auth_failures.failed(source)
+
+
 def _authenticate(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None,
@@ -336,8 +379,13 @@ def _authenticate(
     principal: Principal | None
     if not auth.enabled:
         principal = Principal(actor_id=auth.disabled_actor, method=AuthMethod.DISABLED)
+    elif credentials is None:
+        # No credential is not a guess: a plain 401, counted against nobody.
+        principal = None
     else:
-        principal = auth.verifier.verify(credentials.credentials) if credentials else None
+        _refuse_if_throttled(request)
+        principal = auth.verifier.verify(credentials.credentials)
+        _note_credential(request, principal is not None)
     if principal is None:
         raise Unauthenticated()
     request.state.principal = principal
@@ -401,7 +449,9 @@ def require_stream_principal(
     """
     if not auth.enabled or credentials is not None or not ticket:
         return _authenticate(request, credentials, auth)
+    _refuse_if_throttled(request)
     checked = auth.tickets.check(ticket, workflow_id)
+    _note_credential(request, checked.principal is not None)
     if checked.principal is None:
         if checked.refusal is not None and checked.actor_id is not None:
             record_denial(
