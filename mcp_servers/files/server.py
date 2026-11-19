@@ -12,24 +12,47 @@ to that. A caller that never read the file can only create it.
 and matters -- the candidate's own resume. It only replaces, the hash of the
 version being replaced is mandatory, and the old content is copied to a backup
 beside the file before the new content lands.
+
+`list_files` and `stat_file` are the File subgraph's discovery and
+reconciliation reads: names, sizes, times and hashes, never content.
+`move_file` (reversible: its result carries the undo move) and `delete_file`
+(destructive) are compare-and-swap on content like every write here, so a
+caller can only move or delete the exact version it saw.
+
+Every path a tool refuses is reported to the server's `DenialSink` with the
+tool, the redacted path, the reason and the calling context -- by default a
+structured WARNING, and in a deployment an `audit_events` row.
 """
 
 import base64
 import binascii
+import contextvars
+import errno
 import hashlib
 import logging
 import os
 import stat
 import tempfile
 import threading
+from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
-from mcp_servers.files.sandbox import PathNotAllowed, PathSandbox, StaleWrite
+from mcp_servers.files.sandbox import (
+    DenialSink,
+    PathNotAllowed,
+    PathSandbox,
+    StaleWrite,
+    log_path_denial,
+    path_denial,
+)
+from personalos.domain.context import ExecutionContext
 from personalos.domain.errors import NotFound, ValidationFailed
-from personalos.domain.models import Intent, MutatingIntent
+from personalos.domain.files import is_document
+from personalos.domain.models import Intent, MutatingIntent, ToolCallRequest, ToolCallResult
 from personalos.mcp.base import MCPServer, ToolSchema
 from personalos.persistence.idempotency import InMemoryOperationStore, OperationStore
 
@@ -42,6 +65,15 @@ DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 ContentEncoding = Literal["utf-8", "base64"]
 
 _SHA256_HEX_LENGTH = 64
+
+#: Most entries one `list_files` call returns.
+DEFAULT_MAX_LIST_ENTRIES = 500
+
+#: The tool and context of the call being executed, so a refused path can be
+#: audited against whoever sent it. Set per call by `FilesMCPServer.execute`.
+_CURRENT_CALL: contextvars.ContextVar[tuple[str, ExecutionContext] | None] = contextvars.ContextVar(
+    "files_current_call", default=None
+)
 
 
 class ReadFileIntent(Intent):
@@ -82,6 +114,52 @@ class OverwriteDocumentIntent(MutatingIntent):
         return _normalize_sha256(value)
 
 
+class ListFilesIntent(Intent):
+    """Typed parameters for `list_files`."""
+
+    directory: str | None = None
+    recursive: bool = True
+    documents_only: bool = True
+    max_entries: int = Field(default=DEFAULT_MAX_LIST_ENTRIES, ge=1, le=DEFAULT_MAX_LIST_ENTRIES)
+
+
+class StatFileIntent(Intent):
+    """Typed parameters for `stat_file`."""
+
+    path: str
+
+
+class MoveFileIntent(MutatingIntent):
+    """Typed parameters for the mutating `move_file`.
+
+    `plan_size` is how many files the plan this move belongs to touches. The
+    handler ignores it; policy reads it, so a bulk move cannot pass as a
+    single one, and it is required so no caller can leave it out.
+    """
+
+    source: str
+    destination: str
+    expected_sha256: str
+    plan_size: int = Field(ge=1)
+
+    @field_validator("expected_sha256")
+    @classmethod
+    def _check_sha256(cls, value: str) -> str:
+        return _normalize_sha256(value)
+
+
+class DeleteFileIntent(MutatingIntent):
+    """Typed parameters for the destructive `delete_file`."""
+
+    path: str
+    expected_sha256: str
+
+    @field_validator("expected_sha256")
+    @classmethod
+    def _check_sha256(cls, value: str) -> str:
+        return _normalize_sha256(value)
+
+
 def _normalize_sha256(value: str) -> str:
     value = value.lower()
     if len(value) != _SHA256_HEX_LENGTH or any(c not in "0123456789abcdef" for c in value):
@@ -102,6 +180,7 @@ class FilesMCPServer(MCPServer):
         sandbox: PathSandbox,
         operation_store: OperationStore | None = None,
         max_bytes: int = DEFAULT_MAX_BYTES,
+        denial_sink: DenialSink | None = None,
     ):
         """Initialize Files MCP Server.
 
@@ -117,6 +196,7 @@ class FilesMCPServer(MCPServer):
         )
         self.sandbox = sandbox
         self.max_bytes = max_bytes
+        self.denial_sink: DenialSink = denial_sink or log_path_denial
         # Serializes compare-then-write within this process. Writers in other
         # processes are caught by the hash check only up to the final rename.
         self._write_lock = threading.Lock()
@@ -222,9 +302,123 @@ class FilesMCPServer(MCPServer):
         )
         self.register_tool(overwrite_schema, self._overwrite_document)
 
+        path_property = {
+            "type": "string",
+            "description": "Path inside the allowed roots",
+        }
+        self.register_tool(
+            ToolSchema(
+                name="list_files",
+                description=(
+                    "List files inside the allowed roots, with size, modification "
+                    "time and sha256. Never returns content."
+                ),
+                intent_type=ListFilesIntent,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "directory": {
+                            "type": "string",
+                            "description": "Directory to list; every allowed root when omitted",
+                        },
+                        "recursive": {"type": "boolean", "default": True},
+                        "documents_only": {"type": "boolean", "default": True},
+                        "max_entries": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": DEFAULT_MAX_LIST_ENTRIES,
+                        },
+                    },
+                },
+            ),
+            self._list_files,
+        )
+        self.register_tool(
+            ToolSchema(
+                name="stat_file",
+                description=(
+                    "Report whether a file exists inside the allowed roots, and its size, "
+                    "modification time and sha256. Never returns content."
+                ),
+                intent_type=StatFileIntent,
+                parameters={"type": "object", "properties": {"path": path_property}},
+                required=["path"],
+            ),
+            self._stat_file,
+        )
+        self.register_tool(
+            ToolSchema(
+                name="move_file",
+                description=(
+                    "Move or rename a file inside the allowed roots. expected_sha256 must "
+                    "match the source's content, and the destination must not exist. "
+                    "The result carries the move that undoes it."
+                ),
+                intent_type=MoveFileIntent,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "source": path_property,
+                        "destination": path_property,
+                        "expected_sha256": {"type": "string"},
+                        "plan_size": {"type": "integer", "minimum": 1},
+                    },
+                },
+                required=["source", "destination", "expected_sha256", "plan_size"],
+            ),
+            self._move_file,
+        )
+        self.register_tool(
+            ToolSchema(
+                name="delete_file",
+                description=(
+                    "Delete a file inside the allowed roots. expected_sha256 must match "
+                    "its content. Destructive."
+                ),
+                intent_type=DeleteFileIntent,
+                parameters={
+                    "type": "object",
+                    "properties": {"path": path_property, "expected_sha256": {"type": "string"}},
+                },
+                required=["path", "expected_sha256"],
+            ),
+            self._delete_file,
+        )
+
+    async def execute(self, request: ToolCallRequest) -> ToolCallResult:
+        """Run the call with its tool and context on hand, for auditing refused paths."""
+        token = _CURRENT_CALL.set((request.target.tool, request.context))
+        try:
+            return await super().execute(request)
+        finally:
+            _CURRENT_CALL.reset(token)
+
+    def _resolve(self, requested: str, *, allow_root: bool = False) -> Path:
+        """`sandbox.resolve`, reporting a refusal to the denial sink before raising."""
+        try:
+            return self.sandbox.resolve(requested, allow_root=allow_root)
+        except PathNotAllowed as exc:
+            self._report_denial(requested, str(exc))
+            raise
+
+    def _report_denial(self, requested: Any, reason: str) -> None:
+        tool, context = _CURRENT_CALL.get() or ("-", ExecutionContext())
+        denial = path_denial(
+            tool,
+            requested,
+            reason,
+            actor_id=context.actor_id,
+            workflow_id=context.workflow_id,
+            correlation_id=context.correlation_id,
+        )
+        try:
+            self.denial_sink(denial)
+        except Exception:  # noqa: BLE001 - the call is refused either way
+            logger.exception("could not record a refused path for files.%s", tool)
+
     def _read_file(self, path: str) -> dict[str, Any]:
         """Read a file inside the allowed roots."""
-        target = self.sandbox.resolve(path)
+        target = self._resolve(path)
         data = self._read_bytes(target, path)
         if data is None:
             raise NotFound(f"file {path!r} does not exist")
@@ -250,7 +444,7 @@ class FilesMCPServer(MCPServer):
         expected_sha256: str | None = None,
     ) -> dict[str, Any]:
         """Create or replace a file inside the allowed roots."""
-        target = self.sandbox.resolve(path)
+        target = self._resolve(path)
         data = _decode_content(content, encoding)
         if len(data) > self.max_bytes:
             raise ValidationFailed(f"content is {len(data)} bytes; the limit is {self.max_bytes}")
@@ -298,7 +492,7 @@ class FilesMCPServer(MCPServer):
         encoding: ContentEncoding = "utf-8",
     ) -> dict[str, Any]:
         """Replace an existing document, backing up the version it replaces."""
-        target = self.sandbox.resolve(path)
+        target = self._resolve(path)
         data = _decode_content(content, encoding)
         if len(data) > self.max_bytes:
             raise ValidationFailed(f"content is {len(data)} bytes; the limit is {self.max_bytes}")
@@ -330,6 +524,172 @@ class FilesMCPServer(MCPServer):
             "backup_path": str(backup),
             "created": False,
         }
+
+    def _list_files(
+        self,
+        directory: str | None = None,
+        recursive: bool = True,
+        documents_only: bool = True,
+        max_entries: int = DEFAULT_MAX_LIST_ENTRIES,
+    ) -> dict[str, Any]:
+        """List files below `directory` (or every root), with metadata and hashes.
+
+        Walks without following directory symlinks, prunes hidden and denied
+        directories, and re-resolves every file through the sandbox, so a
+        symlink pointing out of the roots is skipped rather than reported.
+        """
+        starts = (
+            [self._resolve(directory, allow_root=True)]
+            if directory is not None
+            else list(self.sandbox.roots)
+        )
+        entries: list[dict[str, Any]] = []
+        truncated = False
+        for target in self._walk(starts, directory, recursive, documents_only):
+            entry = self._list_entry(target)
+            if entry is None:
+                continue
+            if len(entries) >= max_entries:
+                truncated = True
+                break
+            entries.append(entry)
+        return {
+            "roots": [str(root) for root in self.sandbox.roots],
+            "entries": entries,
+            "truncated": truncated,
+        }
+
+    def _walk(
+        self,
+        starts: list[Path],
+        directory: str | None,
+        recursive: bool,
+        documents_only: bool,
+    ) -> Iterator[Path]:
+        """Canonical paths of the listable files below `starts`, each once."""
+        seen: set[Path] = set()
+        for start in starts:
+            if not start.is_dir():
+                raise NotFound(f"directory {directory!r} does not exist")
+            for current, dirnames, filenames in os.walk(start, followlinks=False):
+                dirnames[:] = sorted(
+                    name for name in dirnames if recursive and not self.sandbox.is_denied_name(name)
+                )
+                for name in sorted(filenames):
+                    if self.sandbox.is_denied_name(name) or (
+                        documents_only and not is_document(name)
+                    ):
+                        continue
+                    try:
+                        target = self.sandbox.resolve(str(Path(current) / name))
+                    except PathNotAllowed:
+                        continue
+                    if target not in seen:
+                        seen.add(target)
+                        yield target
+
+    def _list_entry(self, target: Path) -> dict[str, Any] | None:
+        """One listing entry, or None for a file that cannot be read safely."""
+        try:
+            data = self._read_bytes(target, str(target))
+        except (PathNotAllowed, ValidationFailed):
+            return None
+        if data is None:
+            return None
+        return {
+            "path": str(target),
+            "name": target.name,
+            "size": len(data),
+            "modified_at": _mtime(target),
+            "sha256": content_sha256(data),
+        }
+
+    def _stat_file(self, path: str) -> dict[str, Any]:
+        """Whether a file exists, and its size, time and hash. No content."""
+        target = self._resolve(path)
+        data = self._read_bytes(target, path)
+        if data is None:
+            return {"path": str(target), "exists": False}
+        return {
+            "path": str(target),
+            "exists": True,
+            "size": len(data),
+            "modified_at": _mtime(target),
+            "sha256": content_sha256(data),
+        }
+
+    def _move_file(
+        self,
+        source: str,
+        destination: str,
+        expected_sha256: str,
+        plan_size: int = 1,
+    ) -> dict[str, Any]:
+        """Move a file, refusing to clobber the destination; return the undo move."""
+        del plan_size  # read by policy, not by the move
+        src = self._resolve(source)
+        dst = self._resolve(destination)
+        if src == dst:
+            raise ValidationFailed("source and destination are the same file")
+
+        with self._write_lock:
+            current = self._read_bytes(src, source)
+            if current is None:
+                raise NotFound(f"file {source!r} does not exist")
+            sha256 = content_sha256(current)
+            if sha256 != expected_sha256:
+                raise StaleWrite(
+                    f"file {source!r} changed since it was read "
+                    f"(current sha256 {sha256}); re-read it before moving"
+                )
+            if os.path.lexists(dst):
+                raise StaleWrite(f"destination {destination!r} already exists; refusing to clobber")
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if self.sandbox.resolve(destination) != dst:
+                raise PathNotAllowed(f"path {destination!r} changed while it was being moved")
+            try:
+                # A hard link fails if anything appeared at `dst`, so the move
+                # can never overwrite; unlinking the source completes it.
+                os.link(src, dst)
+            except FileExistsError as exc:
+                raise StaleWrite(
+                    f"destination {destination!r} was created by another writer"
+                ) from exc
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                self._replace_atomically(dst, current, destination, creating=True)
+            os.unlink(src)
+
+        logger.info("Moved %s to %s", src, dst)
+        return {
+            "source": str(src),
+            "destination": str(dst),
+            "sha256": sha256,
+            "undo": {
+                "op": "move",
+                "path": str(dst),
+                "destination": str(src),
+                "expected_sha256": sha256,
+            },
+        }
+
+    def _delete_file(self, path: str, expected_sha256: str) -> dict[str, Any]:
+        """Delete the exact version of a file the caller saw."""
+        target = self._resolve(path)
+        with self._write_lock:
+            current = self._read_bytes(target, path)
+            if current is None:
+                raise NotFound(f"file {path!r} does not exist")
+            sha256 = content_sha256(current)
+            if sha256 != expected_sha256:
+                raise StaleWrite(
+                    f"file {path!r} changed since it was read "
+                    f"(current sha256 {sha256}); re-read it before deleting"
+                )
+            os.unlink(target)
+        logger.info("Deleted %s", target)
+        return {"path": str(target), "deleted": True, "sha256": sha256}
 
     def _back_up(self, target: Path, current: bytes, sha256: str, requested: str) -> Path:
         """Copy `current` beside `target`, named for the version it holds.
@@ -407,6 +767,11 @@ class FilesMCPServer(MCPServer):
         finally:
             if tmp_name is not None:
                 os.unlink(tmp_name)
+
+
+def _mtime(target: Path) -> str:
+    """A file's modification time, as an ISO-8601 UTC timestamp."""
+    return datetime.fromtimestamp(os.stat(target, follow_symlinks=False).st_mtime, UTC).isoformat()
 
 
 def _decode_content(content: str, encoding: ContentEncoding) -> bytes:

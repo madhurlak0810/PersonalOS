@@ -54,6 +54,7 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
   create_calendar_event: "Create calendar event",
   update_calendar_event: "Move calendar event",
   cancel_calendar_event: "Cancel calendar event",
+  apply_file_plan: "Apply file plan",
 };
 
 export function actionTypeLabel(actionType: string): string {

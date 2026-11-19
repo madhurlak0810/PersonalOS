@@ -249,7 +249,7 @@ async def test_read_file_rejects_traversal(server, path):
     result = await server.execute(request("read_file", path=path))
 
     assert result.ok is False
-    assert result.error.code == ToolCallErrorCode.EXECUTION_ERROR
+    assert result.error.code == ToolCallErrorCode.PERMISSION_DENIED
     assert "outside the allowed roots" in result.error.message
 
 

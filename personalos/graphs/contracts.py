@@ -34,6 +34,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validat
 
 from personalos.domain.applications import RequestedTransition, TransitionOutcome
 from personalos.domain.checkpoints import PendingCheckpoint
+from personalos.domain.files import FileInventory, FilePlan, FileReceipt, FileVerification
 from personalos.domain.interview_scheduling import (
     CalendarEvent,
     InterviewRequest,
@@ -68,12 +69,14 @@ from personalos.domain.recruiter_events import (
 )
 from personalos.domain.routing import RouteDecision
 from personalos.domain.tasks import TaskDAG
+from personalos.graphs import file_task as fsg
 from personalos.graphs import job_search as jsg
 from personalos.graphs import supervisor as sup
 
 #: Graph names, as `traced_node` labels them.
 SUPERVISOR_GRAPH = "supervisor"
 JOB_SEARCH_GRAPH = "job_search"
+FILE_TASK_GRAPH = "file_task"
 
 
 def _must_be_empty(value: Any) -> Any:
@@ -162,6 +165,15 @@ class RunJobSubgraphInput(NodeInput):
 
 
 class RunJobSubgraphOutput(NodeOutput):
+    result: dict[str, Any]
+
+
+class RunFileSubgraphInput(NodeInput):
+    task_dag: TaskDAG
+    message: str = ""
+
+
+class RunFileSubgraphOutput(NodeOutput):
     result: dict[str, Any]
 
 
@@ -463,6 +475,86 @@ class PlanInterviewScheduleOutput(NodeOutput):
 
 
 # ---------------------------------------------------------------------------
+# File subgraph
+# ---------------------------------------------------------------------------
+
+
+class DiscoverFilesInput(NodeInput):
+    """Reads no state: what it lists is the server's allowed roots."""
+
+
+class DiscoverFilesOutput(NodeOutput):
+    inventory: FileInventory
+
+
+class PlanFileTaskInput(NodeInput):
+    request: str = ""
+    inventory: FileInventory
+
+
+class PlanFileTaskOutput(NodeOutput):
+    plan: FilePlan | None
+    plan_source: str
+    plan_errors: list[str]
+    approval_reasons: list[str]
+    pending_actions: list[ActionIntent]
+    #: Set only when the plan needs approval.
+    approval_stage: Literal["file_plan"] | None = None
+
+
+class ReadDocumentsInput(NodeInput):
+    plan: FilePlan | None = None
+    inventory: FileInventory | None = None
+
+
+class ReadDocumentsOutput(NodeOutput):
+    read_receipts: list[FileReceipt]
+
+
+class RequestFileApprovalInput(NodeInput):
+    pending_actions: list[ActionIntent] = Field(min_length=1)
+    approval_requests: list[ApprovalRequest] = []
+
+
+class RequestFileApprovalOutput(NodeOutput):
+    approval_requests: list[ApprovalRequest]
+
+
+class FileApprovalCheckpointInput(NodeInput):
+    pending_actions: list[ActionIntent] = []
+    approval_requests: list[ApprovalRequest] = []
+    approvals: list[ApprovalDecision] = []
+
+
+class FileApprovalCheckpointOutput(NodeOutput):
+    approvals: list[ApprovalDecision] | None = None
+
+
+class ApplyFileChangesInput(NodeInput):
+    plan: FilePlan | None = None
+    inventory: FileInventory | None = None
+    pending_actions: list[ActionIntent] = []
+    approval_requests: list[ApprovalRequest] = []
+    approvals: list[ApprovalDecision] = []
+    approval_refusals: list[ApprovalRefusal] = []
+
+
+class ApplyFileChangesOutput(NodeOutput):
+    change_receipts: list[FileReceipt]
+    approval_refusals: list[ApprovalRefusal]
+
+
+class VerifyFileChangesInput(NodeInput):
+    plan: FilePlan | None = None
+    change_receipts: list[FileReceipt] = []
+
+
+class VerifyFileChangesOutput(NodeOutput):
+    verifications: list[FileVerification]
+    verified: bool
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -498,7 +590,63 @@ NODE_CONTRACTS: Mapping[tuple[str, str], NodeContract] = dict(
             RunJobSubgraphInput,
             RunJobSubgraphOutput,
         ),
+        _contract(
+            SUPERVISOR_GRAPH,
+            sup.RUN_FILE_SUBGRAPH,
+            "_run_file_subgraph",
+            RunFileSubgraphInput,
+            RunFileSubgraphOutput,
+        ),
         _contract(SUPERVISOR_GRAPH, sup.CLARIFY, "_clarify", ClarifyInput, ClarifyOutput),
+        _contract(
+            FILE_TASK_GRAPH,
+            fsg.DISCOVER_FILES,
+            "discover_files",
+            DiscoverFilesInput,
+            DiscoverFilesOutput,
+        ),
+        _contract(
+            FILE_TASK_GRAPH,
+            fsg.PLAN_FILE_TASK,
+            "plan_file_task",
+            PlanFileTaskInput,
+            PlanFileTaskOutput,
+        ),
+        _contract(
+            FILE_TASK_GRAPH,
+            fsg.READ_DOCUMENTS,
+            "read_documents",
+            ReadDocumentsInput,
+            ReadDocumentsOutput,
+        ),
+        _contract(
+            FILE_TASK_GRAPH,
+            fsg.REQUEST_FILE_APPROVAL,
+            "request_file_approval",
+            RequestFileApprovalInput,
+            RequestFileApprovalOutput,
+        ),
+        _contract(
+            FILE_TASK_GRAPH,
+            fsg.FILE_APPROVAL_CHECKPOINT,
+            "file_approval_checkpoint",
+            FileApprovalCheckpointInput,
+            FileApprovalCheckpointOutput,
+        ),
+        _contract(
+            FILE_TASK_GRAPH,
+            fsg.APPLY_FILE_CHANGES,
+            "apply_file_changes",
+            ApplyFileChangesInput,
+            ApplyFileChangesOutput,
+        ),
+        _contract(
+            FILE_TASK_GRAPH,
+            fsg.VERIFY_FILE_CHANGES,
+            "verify_file_changes",
+            VerifyFileChangesInput,
+            VerifyFileChangesOutput,
+        ),
         _contract(
             JOB_SEARCH_GRAPH,
             jsg.LOAD_SEARCH_PROFILE,
@@ -666,6 +814,7 @@ def contracts_for(graph: str) -> dict[str, NodeContract]:
 
 __all__ = [
     "SUPERVISOR_GRAPH",
+    "FILE_TASK_GRAPH",
     "JOB_SEARCH_GRAPH",
     "Consumed",
     "ConsumedMapping",

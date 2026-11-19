@@ -484,7 +484,7 @@ PersonalOS/
 │   ├── policy/                    # default-deny engine: allow / require_approval / deny
 │   ├── tools/                     # the tool gateway (the only way to a tool) and registry
 │   ├── executor/                  # runs approved intents: idempotency, retries, credential broker
-│   ├── graphs/                    # LangGraph Supervisor and Job Search subgraph, node contracts
+│   ├── graphs/                    # LangGraph Supervisor, Job Search and File subgraphs, node contracts
 │   ├── persistence/               # ORM, repositories, checkpointer, outbox, audit, leases
 │   ├── events/                    # event bus and the in-memory event transport
 │   ├── mcp/                       # MCP server base, manager, cache, gateway adapter
@@ -737,11 +737,37 @@ python -m personalos.cli mcp-google               # serve the Google MCP server 
 **`supervisor.py` — the top-level graph.** Loads the actor's long-term facts,
 classifies the request into a typed `RouteDecision`, and either asks for
 clarification or plans a bounded `TaskDAG` and hands it to a domain subgraph. It
-holds no tool and no repository: `IntentClassifier` and `JobSubgraphRunner` are
-injected ports.
+holds no tool and no repository: `IntentClassifier`, `JobSubgraphRunner` and
+`FileSubgraphRunner` are injected ports. `JOB` and `FILE` are routable;
+`COMMUNICATIONS` and `CALENDAR` are reserved and asked back.
 
-**`job_search.py` — the Job Search subgraph**, the one domain subgraph this
-build implements:
+**`file_task.py` — the File subgraph** (K1). Finds, reads, summarizes and
+organizes job-search documents (resumes, cover letters, application
+documents):
+
+```
+discover_files -> plan_file_task -> read_documents
+-> [needs approval] request_file_approval -> file_approval_checkpoint (interrupts)
+-> apply_file_changes -> verify_file_changes -> END
+```
+
+| Property | How it holds |
+| --- | --- |
+| No raw filesystem access | The graph's only way out is the `FileOperations` port, bound to `executor/file_operations.py:GatewayFileOperations`. Every call is a `files.*` intent through the policy gateway to the sandboxed files MCP server, which resolves paths canonically (after `..` and symlinks) and refuses, and audits (`files.path_denied` in `audit_events`), anything outside `FILES_ALLOWED_ROOTS`. |
+| Permission classes | `list_files`, `stat_file`, `read_file` are `READ_LOCAL`; `write_file` and `move_file` are `WRITE_REVERSIBLE` (a move returns its undo record); `delete_file` is `DESTRUCTIVE` and always needs approval. |
+| Typed, validated plan | `plan_file_task` asks the `ResilientFilePlanner` (a model constrained to `FilePlan`, re-asked with the error, then the deterministic `RuleBasedFilePlanner`) and re-validates the result against `FILE_PLAN_JSON_SCHEMA` and the inventory. The planner sees metadata only, never content. The fallback never plans a delete. |
+| Approval shows exact paths | A plan with a delete, an overwrite, or more changed files than `FILES_MAX_UNATTENDED` is proposed as one `APPLY_FILE_PLAN` action listing every step and path and pinning the plan's hash. It uses the same approval triple and inbox as job search; at redemption both the action hash and the plan hash are recomputed. Policy holds moves from larger plans (`FileBulkMutationRule`) and every delete (`DestructiveFileRule`) on its own. |
+| Idempotent mutations | Each mutating step carries `step_idempotency_key(plan, step)` and the hash discovery saw. Before each write, move or delete the apply node checks the disk: a file already in its goal state (a crash after the write, before the checkpoint) is `RECONCILED`, not written again. |
+| Documents are data | Content reaches only `read_documents`, whose `requested_by` may call `read_file`/`stat_file` and nothing else (`FILE_TASK_NODE_TOOL_ALLOWLISTS`); it goes to the summarizer as quoted data and comes back as a `DocumentSummary`, which has no field for steps or tool calls. Moves and deletes are reserved for File subgraph nodes. |
+| Redaction and scoping | Read results are redacted by the gateway and again before they become state; only hashes, summaries and short excerpts are kept, and the durable checkpointer redacts every checkpoint. A Supervisor run's file task runs on a `file_task` thread of the same workflow, owned by the conversation's candidate. |
+
+Tests: `tests/adversarial/test_file_task_boundaries.py` (traversal and
+symlinks denied and audited, deletes and bulk moves refused without approval,
+crash-after-write replay, prompt injection in a resume, Supervisor routing),
+`tests/unit/test_file_task_nodes.py`, `tests/unit/test_file_planning.py`,
+`tests/unit/test_files_server_tools.py`.
+
+**`job_search.py` — the Job Search subgraph**:
 
 ```
 load_search_profile -> search_providers -> normalize_jobs -> deduplicate
@@ -1260,7 +1286,7 @@ models changes no graph, node or prompt.
 
 | File | Cases | Expected |
 | --- | --- | --- |
-| `routing_requests.json` | user requests | Supervisor route (`job_search` / `clarify`) and domain |
+| `routing_requests.json` | user requests | Supervisor route (`job_search` / `file_task` / `clarify`) and domain |
 | `recruiter_emails.json` | 35 emails | event classification |
 | `candidate_profiles.json`, `job_descriptions.json` | 2 candidates × 10 postings | acceptable recommendations, top-k relevance |
 | `scenarios.json` | end-to-end runs | classification, tool intents, approval pause, final application status |
@@ -1619,7 +1645,7 @@ These fill in the ports the worker reports as unbound at startup.
 
 | # | Issue | Done when |
 | --- | --- | --- |
-| K1 | File subgraph and planner | `RouteDomain.FILE` is supported, and reads and writes go through the sandboxed files MCP |
+| K1 | File subgraph and planner | Done (`personalos/graphs/file_task.py`; see [Orchestration Graphs](#11-orchestration-graphs-personalosgraphs)). `RouteDomain.FILE` routes to it, and every read, write, move and delete goes through the sandboxed files MCP |
 | K2 | Communications subgraph | Triage, summary and draft-reply flows run over the Gmail adapter, with approval before send |
 | K3 | Calendar subgraph | Availability queries and event create or move, with approval before write |
 | K4 | Cross-domain task DAGs | The Supervisor plans a DAG that spans two domains |
@@ -1687,6 +1713,7 @@ Settings come from the environment, then `.env` in the working directory.
 | `API_MAX_BODY_BYTES` / `API_MAX_RESUME_BODY_BYTES` | 1 MiB / 10 MiB | Body caps; the second only for `POST /v1/evidence/documents`. |
 | `API_LIMITS_ENABLED` | `true` | Per-actor rates, concurrency caps and the auth throttle. Every `API_RATE_*`, `API_MAX_*` and `API_AUTH_*` limit setting is in [docs/LIMITS.md](docs/LIMITS.md). |
 | `FILES_ALLOWED_ROOTS` | `[]` | JSON list of absolute paths. If empty, every file read and write is refused. |
+| `FILES_MAX_UNATTENDED` | `3` | The most files a File subgraph plan may change before it needs approval. Deletes and overwrites always do. |
 | `WORKER_GRAPHS` | `apps.worker.graphs:build_worker_graphs` | `module:callable`. Empty runs no graphs. |
 | `GREENHOUSE_BOARDS` | `{}` | JSON, board token to employer name. |
 | `LEVER_SITES` | `{}` | JSON, Lever site (`jobs.lever.co/<site>`; prefix `eu/` for EU-hosted) to employer name. |

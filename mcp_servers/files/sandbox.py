@@ -19,11 +19,17 @@ Three checks, in this order:
    nor a symlink out of one gets through.
 """
 
+import logging
 import os
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
+from uuid import UUID
 
 from personalos.domain.errors import PolicyDeniedError, ValidationFailed
+from personalos.domain.redaction import redact_text
+
+logger = logging.getLogger(__name__)
 
 
 class PathNotAllowed(PolicyDeniedError):
@@ -127,11 +133,12 @@ class PathSandbox:
                 return root
         return None
 
-    def resolve(self, requested: str) -> Path:
+    def resolve(self, requested: str, *, allow_root: bool = False) -> Path:
         """Return the canonical path for `requested`, or raise `PathNotAllowed`.
 
         The target does not have to exist (a write may be creating it), but
         every symlink on the way to it is followed, including a dangling one.
+        `allow_root` admits an allowed root itself, for a directory listing.
         """
         if not isinstance(requested, str) or not requested.strip():
             raise PathNotAllowed("path must be a non-empty string")
@@ -155,9 +162,13 @@ class PathSandbox:
         if root is None:
             raise PathNotAllowed(f"path {requested!r} resolves outside the allowed roots")
         self._refuse_denied_parts(requested, canonical.relative_to(root).parts)
-        if canonical == root:
+        if canonical == root and not allow_root:
             raise PathNotAllowed(f"path {requested!r} is an allowed root, not a file")
         return canonical
+
+    def is_denied_name(self, name: str) -> bool:
+        """True for a directory or file name no listing may descend into or report."""
+        return self._is_denied(name)
 
     def _refuse_denied_parts(self, requested: str, parts: tuple[str, ...]) -> None:
         for part in parts:
@@ -165,4 +176,75 @@ class PathSandbox:
                 raise PathNotAllowed(f"path {requested!r} is inside a denied directory ({part!r})")
 
 
-__all__ = ["DEFAULT_DENIED_NAMES", "PathNotAllowed", "PathSandbox", "StaleWrite"]
+@dataclass(frozen=True)
+class PathDenial:
+    """One path the sandbox refused, as the audit trail records it.
+
+    `requested_path` is what the caller sent, redacted: it is model-authored
+    text and is about to be written to a log and an audit row.
+    """
+
+    tool: str
+    requested_path: str
+    reason: str
+    actor_id: str = "system"
+    workflow_id: UUID | None = None
+    correlation_id: UUID | None = None
+
+
+#: Receives every `PathDenial`. Must not raise; the call is refused either way.
+DenialSink = Callable[[PathDenial], None]
+
+
+def log_path_denial(denial: PathDenial) -> None:
+    """The default sink: one structured WARNING per refused path."""
+    logger.warning(
+        "files.%s refused path %r for %s: %s",
+        denial.tool,
+        denial.requested_path,
+        denial.actor_id,
+        denial.reason,
+        extra={
+            key: value
+            for key, value in {
+                "event": "files.path_denied",
+                "tool_name": f"files.{denial.tool}",
+                "actor_id": denial.actor_id,
+                "workflow_id": denial.workflow_id,
+                "correlation_id": denial.correlation_id,
+            }.items()
+            if value is not None
+        },
+    )
+
+
+def path_denial(
+    tool: str,
+    requested: object,
+    reason: str,
+    *,
+    actor_id: str = "system",
+    workflow_id: UUID | None = None,
+    correlation_id: UUID | None = None,
+) -> PathDenial:
+    """Build a `PathDenial`, redacting what the caller sent."""
+    return PathDenial(
+        tool=tool,
+        requested_path=redact_text(str(requested))[:500],
+        reason=redact_text(reason)[:500],
+        actor_id=actor_id,
+        workflow_id=workflow_id,
+        correlation_id=correlation_id,
+    )
+
+
+__all__ = [
+    "DEFAULT_DENIED_NAMES",
+    "DenialSink",
+    "PathDenial",
+    "PathNotAllowed",
+    "PathSandbox",
+    "StaleWrite",
+    "log_path_denial",
+    "path_denial",
+]

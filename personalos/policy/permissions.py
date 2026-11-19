@@ -106,6 +106,9 @@ DEFAULT_TOOL_PERMISSIONS: Mapping[str, ToolPermission] = MappingProxyType(
         # READ_LOCAL
         "jobs.filter_jobs": _permission(PermissionClass.READ_LOCAL, {"jobs:read"}),
         "files.read_file": _permission(PermissionClass.READ_LOCAL, {"artifacts:read"}),
+        # Names, sizes, times and hashes inside the allowed roots; never content.
+        "files.list_files": _permission(PermissionClass.READ_LOCAL, {"artifacts:read"}),
+        "files.stat_file": _permission(PermissionClass.READ_LOCAL, {"artifacts:read"}),
         # READ_EXTERNAL
         "jobs.search_jobs": _permission(PermissionClass.READ_EXTERNAL, {"jobs:read"}),
         "jobs.scrape_job_details": _permission(PermissionClass.READ_EXTERNAL, {"jobs:read"}),
@@ -141,6 +144,9 @@ DEFAULT_TOOL_PERMISSIONS: Mapping[str, ToolPermission] = MappingProxyType(
         # Hash-guarded: it can create a file or replace the exact version the
         # caller read, never one it has not seen.
         "files.write_file": _permission(PermissionClass.WRITE_REVERSIBLE, {"artifacts:write"}),
+        # A move or rename inside the roots. Hash-guarded, never clobbers, and
+        # its result carries the inverse move: undoable, so reversible.
+        "files.move_file": _permission(PermissionClass.WRITE_REVERSIBLE, {"artifacts:write"}),
         # A new `artifact_versions` row in this system's own database. Earlier
         # versions are kept, so a draft can always be superseded or ignored.
         "artifacts.create_draft": _permission(

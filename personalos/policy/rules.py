@@ -10,6 +10,7 @@ layer cheap to test exhaustively.
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 
+from personalos.domain.files import DEFAULT_MAX_FILES_WITHOUT_APPROVAL
 from personalos.policy.intents import Decision, IntentOrigin, PolicyDecision, ToolIntent
 
 IDEMPOTENCY_KEY_ARG = "idempotency_key"
@@ -188,6 +189,124 @@ class NodeToolAllowlistRule(PolicyRule):
         return None
 
 
+class RequesterToolScopeRule(PolicyRule):
+    """Confine one family of requesters to their own tools, and some tools to them.
+
+    Two checks, both keyed on `requested_by`, which a node's own code sets:
+
+    - a requester whose id starts with `requester_prefix` may call only the
+      tools listed for it -- on any server. A File subgraph node that reads
+      documents cannot move or delete one, whatever the document asked for;
+    - a tool in `exclusive_tools` may be called only by a requester listed
+      for it, so no other part of the system can borrow the File subgraph's
+      move and delete.
+
+    Abstains otherwise. A denial outranks any approval grant.
+    """
+
+    name = "requester_tool_scope"
+
+    def __init__(
+        self,
+        allowlists: Mapping[str, Iterable[str]],
+        *,
+        requester_prefix: str,
+        exclusive_tools: Iterable[str] = (),
+    ):
+        """Map each requester to the `server.tool` refs it may call."""
+        self.allowlists: dict[str, frozenset[str]] = {
+            requester: frozenset(tools) for requester, tools in allowlists.items()
+        }
+        self.requester_prefix = requester_prefix
+        self.exclusive_tools: frozenset[str] = frozenset(exclusive_tools)
+
+    def evaluate(self, intent: ToolIntent) -> PolicyDecision | None:
+        """Deny a tool outside the requester's list, or an exclusive tool to an outsider."""
+        allowed = self.allowlists.get(intent.requested_by, frozenset())
+        if intent.requested_by.startswith(self.requester_prefix):
+            if intent.tool_ref not in allowed:
+                return self.deny(
+                    intent,
+                    f"node '{intent.requested_by}' is not allowed to call '{intent.tool_ref}'",
+                )
+            return None
+        if intent.tool_ref in self.exclusive_tools:
+            return self.deny(
+                intent,
+                f"'{intent.tool_ref}' is reserved for the File subgraph; "
+                f"'{intent.requested_by}' may not call it",
+            )
+        return None
+
+
+class FileBulkMutationRule(PolicyRule):
+    """A move that is part of a large plan needs a person, like the plan did.
+
+    Moves name `plan_size`, the number of files their plan touches, and the
+    files server requires it, so a bulk reorganization cannot be broken into
+    moves that each look like one. Missing or malformed, it is denied; above
+    `max_unattended`, approval is required.
+    """
+
+    name = "file_bulk_mutation"
+
+    def __init__(
+        self,
+        max_unattended: int,
+        tools: Iterable[str] = ("files.move_file",),
+        size_arg: str = "plan_size",
+    ):
+        """Take the most files a plan may touch unattended, and the tools it covers."""
+        self.max_unattended = max_unattended
+        self.tools: frozenset[str] = frozenset(tools)
+        self.size_arg = size_arg
+
+    def evaluate(self, intent: ToolIntent) -> PolicyDecision | None:
+        """Deny a move with no plan size; hold one from a large plan for approval."""
+        if intent.tool_ref not in self.tools:
+            return None
+        size = intent.arguments.get(self.size_arg)
+        if isinstance(size, bool) or not isinstance(size, int) or size < 1:
+            return self.deny(
+                intent,
+                f"'{intent.tool_ref}' requires {self.size_arg}: how many files its plan touches",
+            )
+        if size > self.max_unattended:
+            return self.require_approval(
+                intent,
+                f"'{intent.tool_ref}' is part of a plan touching {size} files, more than "
+                f"the {self.max_unattended} allowed without approval",
+            )
+        return None
+
+
+class DestructiveFileRule(PolicyRule):
+    """Deleting a file names the version deleted, and always waits for a person."""
+
+    name = "destructive_file"
+
+    def __init__(
+        self,
+        tools: Iterable[str] = ("files.delete_file",),
+        precondition_arg: str = "expected_sha256",
+    ):
+        """Take the deleting tools and the argument naming the version deleted."""
+        self.tools: frozenset[str] = frozenset(tools)
+        self.precondition_arg = precondition_arg
+
+    def evaluate(self, intent: ToolIntent) -> PolicyDecision | None:
+        """Deny a delete with no precondition; hold every other one for approval."""
+        if intent.tool_ref not in self.tools:
+            return None
+        if not intent.arguments.get(self.precondition_arg):
+            return self.deny(
+                intent,
+                f"'{intent.tool_ref}' requires {self.precondition_arg}: the hash of the "
+                f"version being deleted",
+            )
+        return self.require_approval(intent, f"'{intent.tool_ref}' deletes a file")
+
+
 class UntrustedOriginRule(PolicyRule):
     """Escalate anything a model proposed.
 
@@ -294,6 +413,13 @@ JOB_PROVIDER_TOOL_ARGUMENTS = {
 #: policy question: the server confines them to its allowed roots itself.
 FILE_TOOL_ARGUMENTS = {
     "files.read_file": {"path"},
+    "files.list_files": {"directory", "recursive", "documents_only", "max_entries"},
+    "files.stat_file": {"path"},
+    # Reversible: hash-guarded and never clobbers. Large plans are held for
+    # approval by FileBulkMutationRule.
+    "files.move_file": {"source", "destination", "expected_sha256", "plan_size"},
+    # Destructive: held for approval by its class and by DestructiveFileRule.
+    "files.delete_file": {"path", "expected_sha256"},
     # Mutating: reachable, but MutatingToolRule holds it for approval.
     "files.write_file": {"path", "content", "encoding", "expected_sha256"},
     # Destructive: replaces an existing file, after backing it up. Held for
@@ -381,7 +507,49 @@ GMAIL_SENDER = "executor:gmail_send"
 #: Drafts folder and reaches nobody. A model-originated intent for one is still
 #: held by `UntrustedOriginRule`, and which node may ask is still
 #: `GOOGLE_NODE_TOOL_ALLOWLISTS`.
-AUTO_APPROVED_MUTATING_TOOLS: frozenset[str] = frozenset({"google.gmail_create_draft"})
+#:
+#: `files.write_file` and `files.move_file` are `WRITE_REVERSIBLE` and
+#: hash-guarded: a write here can only *create* unattended (replacing a file
+#: is held by `DocumentOverwriteRule`), and a move from a plan larger than the
+#: unattended limit is held by `FileBulkMutationRule`. Only File subgraph
+#: nodes may move (`FILE_TASK_EXCLUSIVE_TOOLS`).
+AUTO_APPROVED_MUTATING_TOOLS: frozenset[str] = frozenset(
+    {"google.gmail_create_draft", "files.write_file", "files.move_file"}
+)
+
+#: The `requested_by` prefix every File subgraph node stamps on its intents.
+FILE_TASK_REQUESTER_PREFIX = "graph:file_task#"
+
+
+def _file_task_node(node: str) -> str:
+    return f"{FILE_TASK_REQUESTER_PREFIX}{node}"
+
+
+#: Which File subgraph node may call which tool. Discovery lists; reading
+#: documents reads and nothing else; only the apply node writes, moves or
+#: deletes; the verifier only looks. A document's content reaches
+#: `read_documents` and no further, so nothing it says can reach a write.
+FILE_TASK_NODE_TOOL_ALLOWLISTS: Mapping[str, frozenset[str]] = {
+    _file_task_node("discover_files"): frozenset({"files.list_files"}),
+    _file_task_node("read_documents"): frozenset({"files.read_file", "files.stat_file"}),
+    _file_task_node("apply_file_changes"): frozenset(
+        {
+            "files.stat_file",
+            "files.write_file",
+            "files.move_file",
+            "files.delete_file",
+        }
+    ),
+    _file_task_node("verify_file_changes"): frozenset({"files.stat_file"}),
+}
+
+#: Tools only File subgraph nodes may call.
+FILE_TASK_EXCLUSIVE_TOOLS: frozenset[str] = frozenset({"files.move_file", "files.delete_file"})
+
+#: The most files a plan's moves may touch before policy holds them for
+#: approval: the limit the File subgraph's own approval step applies, so the
+#: plan-level and call-level checks agree. `default_rules` takes another.
+DEFAULT_MAX_UNATTENDED_FILES = DEFAULT_MAX_FILES_WITHOUT_APPROVAL
 
 
 def _job_search_node(node: str) -> str:
@@ -447,13 +615,17 @@ GOOGLE_NODE_TOOL_ALLOWLISTS: Mapping[str, frozenset[str]] = {
 
 def default_rules(
     node_tool_allowlists: Mapping[str, Iterable[str]] | None = None,
+    *,
+    max_unattended_files: int = DEFAULT_MAX_UNATTENDED_FILES,
 ) -> list[PolicyRule]:
     """The rule chain the application boots with.
 
     Job search, job provider, file and Google tools are allowlisted; nothing
     else can run until it is added here deliberately. Google tools are further
     confined per node by `node_tool_allowlists` (default
-    `GOOGLE_NODE_TOOL_ALLOWLISTS`).
+    `GOOGLE_NODE_TOOL_ALLOWLISTS`), and File subgraph nodes by
+    `FILE_TASK_NODE_TOOL_ALLOWLISTS`. Moves from a plan touching more than
+    `max_unattended_files` files are held for approval.
     """
     tool_arguments = {
         **JOB_SEARCH_TOOL_ARGUMENTS,
@@ -468,8 +640,15 @@ def default_rules(
         NodeToolAllowlistRule(
             GOOGLE_NODE_TOOL_ALLOWLISTS if node_tool_allowlists is None else node_tool_allowlists
         ),
+        RequesterToolScopeRule(
+            FILE_TASK_NODE_TOOL_ALLOWLISTS,
+            requester_prefix=FILE_TASK_REQUESTER_PREFIX,
+            exclusive_tools=FILE_TASK_EXCLUSIVE_TOOLS,
+        ),
         MutatingToolRule(AUTO_APPROVED_MUTATING_TOOLS),
         DocumentOverwriteRule(),
+        DestructiveFileRule(),
+        FileBulkMutationRule(max_unattended_files),
         UntrustedOriginRule(),
     ]
 
@@ -483,6 +662,13 @@ __all__ = [
     "NodeToolAllowlistRule",
     "DocumentOverwriteRule",
     "UntrustedOriginRule",
+    "RequesterToolScopeRule",
+    "FileBulkMutationRule",
+    "DestructiveFileRule",
+    "FILE_TASK_REQUESTER_PREFIX",
+    "FILE_TASK_NODE_TOOL_ALLOWLISTS",
+    "FILE_TASK_EXCLUSIVE_TOOLS",
+    "DEFAULT_MAX_UNATTENDED_FILES",
     "JOB_SEARCH_TOOL_ARGUMENTS",
     "JOB_PROVIDER_TOOL_ARGUMENTS",
     "FILE_TOOL_ARGUMENTS",

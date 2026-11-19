@@ -10,7 +10,8 @@
           "overwrite_document",
           "create_calendar_event",
           "update_calendar_event",
-          "cancel_calendar_event"
+          "cancel_calendar_event",
+          "apply_file_plan"
         ],
         "title": "ActionKind",
         "type": "string"

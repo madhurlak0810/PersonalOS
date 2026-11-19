@@ -806,6 +806,11 @@ class ActionKind(str, Enum):
     UPDATE_CALENDAR_EVENT = "update_calendar_event"
     #: Remove an event this system created. Never one it did not create.
     CANCEL_CALENDAR_EVENT = "cancel_calendar_event"
+    #: Run a File subgraph plan (`personalos.domain.files.FilePlan`) that needs
+    #: sign-off: one that deletes, overwrites, or touches more files than the
+    #: unattended limit. One approval covers the whole plan, and its payload
+    #: lists every affected path, so the hash a reviewer approves is the plan's.
+    APPLY_FILE_PLAN = "apply_file_plan"
 
 
 class RiskLevel(str, Enum):
@@ -917,6 +922,17 @@ ACTION_RISK_PROFILES: Mapping[ActionKind, ActionRiskProfile] = MappingProxyType(
             risk=RiskLevel.MEDIUM,
             scopes=("calendar:write",),
             approval_ttl=timedelta(days=2),
+        ),
+        ActionKind.APPLY_FILE_PLAN: ActionRiskProfile(
+            kind=ActionKind.APPLY_FILE_PLAN,
+            # Local, and moves come with an undo record -- but a plan that
+            # reaches approval is one that deletes or replaces a document, or
+            # reorganizes many at once.
+            risk=RiskLevel.HIGH,
+            scopes=("artifacts:write", "artifacts:delete"),
+            # Short: the approval is of exact paths and hashes, and the
+            # candidate's files are theirs to change in the meantime.
+            approval_ttl=timedelta(days=1),
         ),
     }
 )

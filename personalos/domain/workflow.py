@@ -92,6 +92,7 @@ JOB_SEARCH_THREAD_NAMESPACE = "job_search"
 SUPERVISOR_THREAD_NAMESPACE = "supervisor"
 RECRUITER_INBOX_THREAD_NAMESPACE = "recruiter_inbox"
 EVENT_HANDLER_THREAD_NAMESPACE = "event_handler"
+FILE_TASK_THREAD_NAMESPACE = "file_task"
 
 
 def thread_namespace(thread_id: str) -> str | None:
@@ -142,6 +143,17 @@ def recruiter_inbox_thread_id(user_id: Any) -> str:
     thread would overwrite the pending actions of a run parked at an approval.
     """
     return derive_thread_id(RECRUITER_INBOX_THREAD_NAMESPACE, user_id)
+
+
+def file_task_thread_id(user_id: Any, task_key: str | None = None) -> str:
+    """The thread one File subgraph task runs on, for one candidate.
+
+    Like a job search, a file task is its own resumable unit: it can park at
+    an approval for a day. `task_key` distinguishes concurrent tasks; the
+    Supervisor passes its workflow id, so each conversation's file task has a
+    thread of its own that a restarted worker finds again.
+    """
+    return derive_thread_id(FILE_TASK_THREAD_NAMESPACE, user_id, task_key or "")
 
 
 def supervisor_thread_id(conversation_key: Any) -> str:
@@ -607,6 +619,8 @@ __all__ = [
     "SUPERVISOR_THREAD_NAMESPACE",
     "RECRUITER_INBOX_THREAD_NAMESPACE",
     "EVENT_HANDLER_THREAD_NAMESPACE",
+    "FILE_TASK_THREAD_NAMESPACE",
+    "file_task_thread_id",
     "InvalidWorkflowIdentity",
     "derive_thread_id",
     "thread_namespace",

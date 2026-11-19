@@ -57,12 +57,14 @@ from personalos.bootstrap import (
     build_application_lifecycle_store,
     build_approval_queue,
     build_checkpoint_condition_evaluator,
+    build_file_task_subgraph_runner,
     build_gmail_recruiter_inbox,
     build_integration_health_store,
     build_job_search_subgraph_runner,
     build_pending_checkpoint_store,
     build_worker_command_queue,
     build_workflow_thread_registry,
+    register_file_task_thread,
     register_job_search_thread,
     register_mcp_servers,
 )
@@ -183,6 +185,62 @@ class WorkflowScopedJobSubgraph:
         # Marked as `DurableWorkflowRunner` marks the threads it runs, since
         # this one is run from inside the Supervisor's step rather than by a
         # runner: the workflow's status is read from every thread's row.
+        self.registry.mark_status(thread.thread_id, RUN_STATUS_RUNNING, started=True)
+        try:
+            result = await runner(task_dag, state)
+        except Exception:
+            self.registry.mark_status(thread.thread_id, RUN_STATUS_FAILED, finished=True)
+            raise
+        stored = await self.subgraph.aget_state(thread.config())
+        if not stored.next:
+            self.registry.mark_status(thread.thread_id, RUN_STATUS_COMPLETED, finished=True)
+        return result
+
+
+class WorkflowScopedFileSubgraph:
+    """The Supervisor's file port, bound per run to that run's own workflow.
+
+    The file-task analogue of `WorkflowScopedJobSubgraph`: the task goes on a
+    `file_task` thread of the *same* workflow, keyed by the workflow id and
+    owned by the conversation's candidate, so its approval is that actor's to
+    answer and a restarted worker continues it rather than starting over.
+    """
+
+    def __init__(
+        self,
+        compiled_subgraph: Any,
+        registry: WorkflowThreadRegistry,
+        *,
+        default_user_id: UUID | None = None,
+    ):
+        self.subgraph = compiled_subgraph
+        self.registry = registry
+        self.default_user_id = default_user_id
+
+    async def __call__(self, task_dag: dict[str, Any], state: Any) -> dict[str, Any]:
+        """Run the file task for the Supervisor run currently executing."""
+        configurable = get_config().get("configurable") or {}
+        supervisor_thread_id = configurable.get("thread_id")
+        workflow_id = configurable.get("workflow_id")
+        if not supervisor_thread_id or not workflow_id:
+            raise ValidationFailed("the file port was called outside a registered Supervisor run")
+        workflow_id = UUID(str(workflow_id))
+        user_id = self.registry.user_id_for(supervisor_thread_id) or self.default_user_id
+        if user_id is None:
+            raise ValidationFailed(
+                f"workflow {workflow_id} names no candidate whose files to work on; start "
+                f"the conversation with a user_id"
+            )
+        correlation_id = configurable.get("correlation_id")
+        thread = register_file_task_thread(
+            user_id=user_id,
+            registry=self.registry,
+            workflow_id=workflow_id,
+            task_key=str(workflow_id),
+            actor_id=configurable.get("actor_id") or "system",
+            correlation_id=UUID(str(correlation_id)) if correlation_id else None,
+        )
+        runner = build_file_task_subgraph_runner(self.subgraph, user_id=user_id, thread=thread)
         self.registry.mark_status(thread.thread_id, RUN_STATUS_RUNNING, started=True)
         try:
             result = await runner(task_dag, state)
@@ -438,6 +496,7 @@ __all__ = [
     "Worker",
     "WorkerGraphs",
     "WorkflowScopedJobSubgraph",
+    "WorkflowScopedFileSubgraph",
     "build_health_gate",
     "build_scheduler",
     "build_worker",

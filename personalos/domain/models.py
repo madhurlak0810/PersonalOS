@@ -302,6 +302,9 @@ class ToolCallErrorCode(str, Enum):
     MISSING_OPERATION_STORE = "missing_operation_store"
     MISSING_AUTHORIZATION = "missing_authorization"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
+    #: The tool refused the call itself: a path outside its sandbox, say.
+    #: Distinct from a policy denial, which never reaches the tool.
+    PERMISSION_DENIED = "permission_denied"
     EXECUTION_ERROR = "execution_error"
 
 

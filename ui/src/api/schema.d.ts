@@ -654,7 +654,7 @@ export interface components {
          *     kind is reviewable code rather than a generic passthrough.
          * @enum {string}
          */
-        ActionKind: "submit_application" | "send_recruiter_message" | "send_email" | "overwrite_document" | "create_calendar_event" | "update_calendar_event" | "cancel_calendar_event";
+        ActionKind: "submit_application" | "send_recruiter_message" | "send_email" | "overwrite_document" | "create_calendar_event" | "update_calendar_event" | "cancel_calendar_event" | "apply_file_plan";
         /**
          * ActionLinks
          * @description Where to read more about an action: its execution row and its audit trail.

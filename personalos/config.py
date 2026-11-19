@@ -180,6 +180,10 @@ class Settings(BaseSettings):
     # Empty means the file tools reject every path. Set from the environment
     # as a JSON list: FILES_ALLOWED_ROOTS=["/home/me/job-search"]
     files_allowed_roots: list[str] = []
+    # The most files a File subgraph plan may change (write, move or delete)
+    # before a person must approve it. Deletes and overwrites always need
+    # approval. Policy holds moves from larger plans to the same limit.
+    files_max_unattended: int = 3
 
     # Job providers. Greenhouse boards to watch, as board token -> employer
     # name; a board belongs to one company, so there is no global search.

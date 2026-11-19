@@ -34,6 +34,7 @@ from personalos.domain.job_search import FollowUpKind
 from personalos.domain.recruiter_events import CommitmentActor, ExtractedCommitment
 from personalos.graphs import job_search as jsg
 from personalos.graphs.contracts import (
+    FILE_TASK_GRAPH,
     JOB_SEARCH_GRAPH,
     NODE_CONTRACTS,
     SUPERVISOR_GRAPH,
@@ -44,6 +45,7 @@ from personalos.graphs.contracts import (
 from personalos.graphs.job_search import JobSearchGraph
 from personalos.graphs.supervisor import SupervisorGraph
 from personalos.models.routing import KeywordIntentClassifier
+from tests.fixtures import file_task as file_fixtures
 from tests.fixtures import job_search_fakes as fakes
 from tests.fixtures.node_contracts import CONTRACT_TESTS, enforce_contracts
 
@@ -51,6 +53,11 @@ from tests.fixtures.node_contracts import CONTRACT_TESTS, enforce_contracts
 class _JobSubgraph:
     async def __call__(self, task_dag, state):
         return {"shortlist": []}
+
+
+class _FileSubgraph:
+    async def __call__(self, task_dag, state):
+        return {"plan": None}
 
 
 def _job_search(**overrides) -> JobSearchGraph:
@@ -93,7 +100,19 @@ def _job_search(**overrides) -> JobSearchGraph:
 
 
 def _supervisor() -> SupervisorGraph:
-    return SupervisorGraph(KeywordIntentClassifier(), _JobSubgraph())
+    return SupervisorGraph(KeywordIntentClassifier(), _JobSubgraph(), file_subgraph=_FileSubgraph())
+
+
+def _file_task():
+    """A File subgraph over a real files server on a fresh temporary directory."""
+    import tempfile
+    from pathlib import Path
+
+    root = Path(tempfile.mkdtemp(prefix="file-task-contracts-")) / "docs"
+    root.mkdir()
+    file_fixtures.seed_documents(root)
+    # An unattended limit of 1, so organizing three files reaches the approval nodes.
+    return file_fixtures.build_world(root, max_unattended=1).graph
 
 
 def _registered_nodes(compiled) -> set[str]:
@@ -104,6 +123,7 @@ def _registered_nodes(compiled) -> set[str]:
 GRAPHS = {
     SUPERVISOR_GRAPH: _supervisor,
     JOB_SEARCH_GRAPH: _job_search,
+    FILE_TASK_GRAPH: _file_task,
 }
 
 
@@ -134,9 +154,9 @@ def test_every_registered_node_has_a_contract_test(graph):
     registered = _registered_nodes(GRAPHS[graph]().build())
     covered = {node for (name, node) in CONTRACT_TESTS if name == graph}
 
-    assert (
-        registered <= covered
-    ), f"{graph}: node(s) with no @covers_node contract test: {sorted(registered - covered)}"
+    assert registered <= covered, (
+        f"{graph}: node(s) with no @covers_node contract test: {sorted(registered - covered)}"
+    )
     for node in registered:
         cls = CONTRACT_TESTS[(graph, node)]
         tests_in_class = [name for name in dir(cls) if name.startswith("test_")]
@@ -146,9 +166,9 @@ def test_every_registered_node_has_a_contract_test(graph):
 def test_every_contract_names_a_real_method_and_forbids_undeclared_keys():
     for (graph, node), contract in NODE_CONTRACTS.items():
         instance = GRAPHS[graph]()
-        assert callable(
-            getattr(instance, contract.method, None)
-        ), f"{graph}:{node} names method {contract.method!r}, which does not exist"
+        assert callable(getattr(instance, contract.method, None)), (
+            f"{graph}:{node} names method {contract.method!r}, which does not exist"
+        )
         assert contract.output.model_config.get("extra") == "forbid", f"{graph}:{node}"
 
 
@@ -202,12 +222,37 @@ async def test_supervisor_runs_satisfy_every_node_contract():
     graph = enforce_contracts(_supervisor(), SUPERVISOR_GRAPH, inputs=True, visited=visited)
     compiled = graph.build()
 
-    for message in ("find me a python job", "hmm, not sure"):
+    for message in ("find me a python job", "find my latest resume", "hmm, not sure"):
         await compiled.ainvoke(
             {"message": message}, config={"configurable": {"thread_id": f"t-{uuid4()}"}}
         )
 
     assert visited == set(contracts_for(SUPERVISOR_GRAPH))
+
+
+async def test_file_task_runs_satisfy_every_node_contract():
+    """Find, summarize, and an organize that parks for approval and is then approved."""
+    from langgraph.types import Command
+
+    visited: set[str] = set()
+    graph = enforce_contracts(_file_task(), FILE_TASK_GRAPH, inputs=True, visited=visited)
+    compiled = graph.build()
+
+    for request in ("find my latest resume", "summarize my cover letter"):
+        await compiled.ainvoke({"request": request}, config=file_fixtures.thread())
+
+    config = file_fixtures.thread()
+    parked = await compiled.ainvoke({"request": "organize my documents"}, config=config)
+    decisions = [
+        file_fixtures.approve(request).model_dump(mode="json")
+        for request in file_fixtures.interrupt_requests(parked)
+    ]
+    final = await compiled.ainvoke(Command(resume=decisions), config=config)
+    assert final["verified"] is True
+
+    assert visited == set(contracts_for(FILE_TASK_GRAPH)), (
+        f"not reached by any run: {sorted(set(contracts_for(FILE_TASK_GRAPH)) - visited)}"
+    )
 
 
 async def test_job_search_runs_satisfy_every_node_contract():
@@ -254,6 +299,6 @@ async def test_job_search_runs_satisfy_every_node_contract():
         config=inbox,
     )
 
-    assert visited == set(
-        contracts_for(JOB_SEARCH_GRAPH)
-    ), f"not reached by any run: {sorted(set(contracts_for(JOB_SEARCH_GRAPH)) - visited)}"
+    assert visited == set(contracts_for(JOB_SEARCH_GRAPH)), (
+        f"not reached by any run: {sorted(set(contracts_for(JOB_SEARCH_GRAPH)) - visited)}"
+    )
