@@ -35,10 +35,11 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from apps.api.auth import current_access, current_principal, requires_scope
+from apps.api.limits import MAX_PAGE_SIZE, LimitName, rate_limited_deps
 from apps.api.routes.workflows import WorkflowServices, get_workflow_services
 from personalos.domain.action_status import ActionStatus, consequences
 from personalos.domain.auth import Principal, Scope
@@ -127,7 +128,7 @@ class DecisionRequest(BaseModel):
 
     approved: bool
     #: The `action_hash` the approval was listed with.
-    action_hash: str = Field(min_length=1)
+    action_hash: str = Field(min_length=1, max_length=255)
 
 
 class DecisionResponse(BaseModel):
@@ -164,19 +165,24 @@ class DecisionResponse(BaseModel):
 
 @router.get("/approvals", response_model=PendingApprovalsResponse)
 async def list_approvals(
+    limit: int = Query(default=MAX_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     services: WorkflowServices = Depends(get_workflow_services),
     access: ActorScope = Depends(current_access),
 ):
-    """Every approval of the caller's still owed an answer, oldest first; expired ones marked."""
+    """The caller's approvals still owed an answer, oldest first (at most `limit`); expired ones marked."""
     return PendingApprovalsResponse(
         approvals=[
             PendingApprovalItem.from_pending(approval)
-            for approval in services.approvals.list_pending(access=access)
+            for approval in services.approvals.list_pending(access=access)[:limit]
         ]
     )
 
 
-@router.post("/approvals/{approval_id}/decision", response_model=DecisionResponse)
+@router.post(
+    "/approvals/{approval_id}/decision",
+    response_model=DecisionResponse,
+    dependencies=rate_limited_deps(LimitName.APPROVAL_DECISION),
+)
 @requires_scope(Scope.APPROVE)
 async def decide_approval(
     approval_id: UUID,

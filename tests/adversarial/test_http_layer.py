@@ -11,7 +11,9 @@ Acceptance criteria covered:
 
 - a request from a disallowed origin gets no CORS allow headers;
 - the configured UI origin completes a preflight and an authenticated request;
-- the security headers are present on representative responses.
+- the security headers are present on representative responses;
+- an oversized body is refused at the caps `apps.api.limits` defines (1 MiB,
+  10 MiB for resume ingestion), and malformed JSON is a 422.
 """
 
 from uuid import uuid4
@@ -440,20 +442,14 @@ MALFORMED_BODIES = {
 }
 
 
-#: Bodies the JSON decoder itself gives up on (bytes that are not UTF-8), which
-#: FastAPI answers with its own 400 "error parsing the body" rather than a
-#: `RequestValidationError`. Still a refusal, still not a 500.
-UNDECODABLE = {"not-utf8"}
-
-#: Bodies whose outcome depends on the Python version: the JSON decoder's
-#: recursion limit is lower on older interpreters (3.11 gives up on 1500
-#: levels, 3.14 parses them). Either answer -- FastAPI's 400 or the 422
-#: envelope -- is a clean refusal; what must never happen is a 500.
-DEPTH_DEPENDENT = {"deeply-nested"}
-
-
 @pytest.mark.parametrize("name", MALFORMED_BODIES.keys())
 def test_malformed_json_is_refused_cleanly_not_a_500(client, name):
+    """Every malformed body is the same 422 envelope, whatever part of it is wrong.
+
+    Bytes that are not UTF-8 and nesting past `API_MAX_JSON_DEPTH` are refused
+    by `JsonLimitsMiddleware` before any parser runs, so the answer no longer
+    depends on the interpreter's recursion limit or FastAPI's own 400.
+    """
     body = MALFORMED_BODIES[name]
     response = client.post(
         "/v1/auth/stream-tickets",
@@ -462,19 +458,81 @@ def test_malformed_json_is_refused_cleanly_not_a_500(client, name):
     )
 
     _assert_security_headers(response)
-    if name in DEPTH_DEPENDENT:
-        assert response.status_code in (400, 422)
-        assert body.decode() not in response.text
-        return
-    if name in UNDECODABLE:
-        assert response.status_code == 400
-        assert response.json() == {"detail": "There was an error parsing the body"}
-        return
     assert response.status_code == 422
     envelope = response.json()
     assert envelope["error_code"] == "validation"
     # Only the stable fields: the parser's view of the input is not echoed.
     assert set(envelope) == {"error_code", "message", "context_id"}
+
+
+# --- The caps themselves ----------------------------------------------------------
+
+MiB = 1024 * 1024
+
+
+def test_the_default_caps_are_the_documented_ones():
+    from personalos.config import Settings
+
+    defaults = Settings()
+    assert defaults.api_max_body_bytes == 1 * MiB
+    assert defaults.api_max_resume_body_bytes == 10 * MiB
+    assert defaults.api_max_json_depth == 32
+    assert defaults.api_max_json_string_bytes == 64 * 1024
+
+
+@pytest.fixture
+def default_caps_client():
+    """The production app with the default caps, not this module's small one."""
+    from personalos.config import Settings
+
+    defaults = Settings()
+    original = (settings.api_max_body_bytes, settings.api_max_resume_body_bytes)
+    settings.api_max_body_bytes = defaults.api_max_body_bytes
+    settings.api_max_resume_body_bytes = defaults.api_max_resume_body_bytes
+    try:
+        app = install_test_auth(create_app())
+        app.dependency_overrides[get_progress_log] = lambda: _EveryWorkflowIsYours()
+        yield TestClient(app)
+    finally:
+        settings.api_max_body_bytes, settings.api_max_resume_body_bytes = original
+
+
+def _padded(payload: bytes, size: int) -> bytes:
+    return payload + b" " * (size - len(payload))
+
+
+def test_the_default_body_cap_is_one_mebibyte_exactly(default_caps_client):
+    payload = b'{"workflow_id": "%s"}' % str(uuid4()).encode()
+    headers = {"Content-Type": "application/json", **bearer()}
+
+    at_cap = default_caps_client.post(
+        "/v1/auth/stream-tickets", content=_padded(payload, MiB), headers=headers
+    )
+    over = default_caps_client.post(
+        "/v1/auth/stream-tickets", content=_padded(payload, MiB + 1), headers=headers
+    )
+
+    assert at_cap.status_code == 201
+    assert over.status_code == 413
+    assert over.json()["error_code"] == "payload_too_large"
+
+
+def test_only_resume_ingestion_gets_the_ten_mebibyte_cap(default_caps_client):
+    headers = {"Content-Type": "application/json", **bearer()}
+    body = _padded(b'{"path": ""}', 2 * MiB)
+
+    # Over the default cap but under the resume cap: past the middleware, to
+    # the route's own validation (an empty path is a 422).
+    resume = default_caps_client.post("/v1/evidence/documents", content=body, headers=headers)
+    # The same size anywhere else is a 413.
+    elsewhere = default_caps_client.post("/v1/auth/stream-tickets", content=body, headers=headers)
+    beyond = default_caps_client.post(
+        "/v1/evidence/documents", content=_padded(b'{"path": ""}', 10 * MiB + 1), headers=headers
+    )
+
+    assert resume.status_code == 422
+    assert elsewhere.status_code == 413
+    assert beyond.status_code == 413
 
 
 def test_json_sent_as_another_content_type_is_not_parsed(client):

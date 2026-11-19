@@ -403,10 +403,19 @@ kept outside the repository, in a `0600` file
   that loads nothing and forbids framing (`/docs` and `/redoc` get one that
   admits their CDN), `X-Content-Type-Options: nosniff`,
   `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`.
-- **Request bodies are capped** at `API_MAX_BODY_BYTES` (1 MiB). A bigger
-  body, declared or chunked, is a 413 `payload_too_large` before
-  authentication runs. `tests/adversarial/test_http_layer.py` covers these
-  three, and malformed JSON.
+- **Request bodies are capped** at `API_MAX_BODY_BYTES` (1 MiB). Resume
+  ingestion is the one exception, at `API_MAX_RESUME_BODY_BYTES` (10 MiB). A
+  bigger body, declared or chunked, is a 413 `payload_too_large` before
+  authentication runs. JSON nested deeper than 32 levels, with a string over
+  64 KiB, or not valid UTF-8 is a 422 before it is parsed.
+  `tests/adversarial/test_http_layer.py` covers these, and malformed JSON.
+- **Callers are rate-limited per actor.** Workflow starts, resumes, approval
+  decisions, retries and dismissals, and evidence ingestion each have a
+  per-minute budget. Each actor may have up to 5 active workflows and 5 open
+  event streams. Repeated bad tokens from one address back off exponentially,
+  and a single typo doesn't lock the user out. Every refusal is a 429 with
+  `Retry-After`, and is counted at `GET /v1/failures/limits`. See
+  [docs/LIMITS.md](docs/LIMITS.md).
 - **The quick start's PostgreSQL publishes only on `127.0.0.1`.** Its
   password is a placeholder, so keep it off the network.
 - **Approvals are the only control on outside effects.** The policy engine
@@ -514,6 +523,7 @@ PersonalOS/
 ├── docs/
 │   ├── ARCHITECTURE_BOUNDARIES.md # layer ownership and enforced import rules
 │   ├── AUTHORIZATION.md           # scopes, system identities, actor-scoped stores
+│   ├── LIMITS.md                  # rate limits, concurrency caps, request limits
 │   ├── EVENT_TRANSPORT.md         # the outbox transport and how to swap it
 │   └── quickstart/                # sample resume and profile for the quick start
 │
@@ -1621,8 +1631,8 @@ These fill in the ports the worker reports as unbound at startup.
 | --- | --- | --- |
 | L1 | Authentication | Done (local token; see [Security Posture](#security-posture)). OIDC replaces `LocalTokenVerifier` behind the same `TokenVerifier` seam |
 | L2 | Actor-scoped authorization | Done ([docs/AUTHORIZATION.md](docs/AUTHORIZATION.md)). Scoped stores return 404 across actors, tokens carry `read`/`write`/`approve`/`admin`, system identities cannot approve, and denials are audited |
-| L3 | Rate limiting and request limits | Per-actor limits on workflow starts and approvals. The body-size cap landed with L4 |
-| L4 | CORS and security headers | Done (`apps/api/security.py`; see [Security Posture](#security-posture)). Body caps are in; per-actor rate limits are still L3 |
+| L3 | Rate limiting and request limits | Done ([docs/LIMITS.md](docs/LIMITS.md)). Per-actor token buckets, active-workflow and SSE caps, auth-failure backoff, JSON depth/string caps, bounded page sizes, idempotent chat replays. The buckets are per process for now, behind `RateLimitStore` |
+| L4 | CORS and security headers | Done (`apps/api/security.py`; see [Security Posture](#security-posture)) |
 
 ### Phase M: Operator UI
 
@@ -1674,6 +1684,8 @@ Settings come from the environment, then `.env` in the working directory.
 | `API_ACTOR` | `api` | The actor the local token authenticates as. |
 | `API_TOKEN_SCOPES` | `read,write,approve,admin` | Scopes the local token carries; see [docs/AUTHORIZATION.md](docs/AUTHORIZATION.md). |
 | `API_STREAM_TICKET_SECONDS` | `60` | Lifetime of an event-stream ticket. |
+| `API_MAX_BODY_BYTES` / `API_MAX_RESUME_BODY_BYTES` | 1 MiB / 10 MiB | Body caps; the second only for `POST /v1/evidence/documents`. |
+| `API_LIMITS_ENABLED` | `true` | Per-actor rates, concurrency caps and the auth throttle. Every `API_RATE_*`, `API_MAX_*` and `API_AUTH_*` limit setting is in [docs/LIMITS.md](docs/LIMITS.md). |
 | `FILES_ALLOWED_ROOTS` | `[]` | JSON list of absolute paths. If empty, every file read and write is refused. |
 | `WORKER_GRAPHS` | `apps.worker.graphs:build_worker_graphs` | `module:callable`. Empty runs no graphs. |
 | `GREENHOUSE_BOARDS` | `{}` | JSON, board token to employer name. |

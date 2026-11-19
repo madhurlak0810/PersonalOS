@@ -43,6 +43,7 @@ class ErrorCode(str, Enum):
     APPROVAL_REQUIRED = "approval_required"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
     CONFLICT = "conflict"
+    RATE_LIMITED = "rate_limited"
     TOOL_FAILURE = "tool_failure"
     RETRYABLE = "retryable"
     INTERNAL = "internal"
@@ -155,6 +156,37 @@ class PayloadTooLarge(PersonalOSError):
     code = ErrorCode.PAYLOAD_TOO_LARGE
     http_status = 413
     default_message = "request body is too large"
+
+
+class RateLimited(PersonalOSError):
+    """The caller is over one of the API's limits; try again after `retry_after` seconds.
+
+    `limit` names which one (`workflow_start`, `active_workflows`, ...). The
+    API answers with a 429 and a `Retry-After` header; the envelope is the
+    usual three fields.
+    """
+
+    code = ErrorCode.RATE_LIMITED
+    http_status = 429
+    retryable = True
+    default_message = "too many requests; try again later"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        limit: str,
+        retry_after: float,
+        context_id: UUID | None = None,
+        details: dict[str, Any] | None = None,
+    ):
+        super().__init__(
+            message,
+            context_id=context_id,
+            details={"limit": limit, **(details or {})},
+            retry_after=retry_after,
+        )
+        self.limit = limit
 
 
 class Unauthenticated(PersonalOSError):
@@ -374,6 +406,7 @@ __all__ = [
     "PersonalOSError",
     "ValidationFailed",
     "PayloadTooLarge",
+    "RateLimited",
     "Forbidden",
     "NotFound",
     "PolicyDeniedError",

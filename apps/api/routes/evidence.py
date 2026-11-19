@@ -11,6 +11,10 @@
 path is resolved against the first root. Anything outside them -- including by
 `..` or a symlink -- is a 403 and nothing is read. Nothing is uploaded.
 
+This is the one route allowed a body bigger than `API_MAX_BODY_BYTES`
+(`API_MAX_RESUME_BODY_BYTES`), and its rate is `API_RATE_EVIDENCE_INGEST_PER_MINUTE`
+per actor: ingesting embeds every chunk, which is model time.
+
 Like `/v1/profile`, the evidence belongs to the authenticated actor
 (`apps.api.auth.current_actor`); a caller cannot name another.
 """
@@ -19,6 +23,7 @@ from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from apps.api.auth import current_actor
+from apps.api.limits import LimitName, rate_limited_deps
 from personalos.bootstrap import build_resume_ingestor
 from personalos.domain.evidence import IngestionResult, IngestionStatus
 from personalos.domain.search_profiles import actor_user_id
@@ -41,7 +46,11 @@ def get_resume_ingestor() -> ResumeIngestor:
     return build_resume_ingestor(SessionLocal, requested_by="api:ingest_resume")
 
 
-@router.post("/evidence/documents", response_model=IngestionResult)
+@router.post(
+    "/evidence/documents",
+    response_model=IngestionResult,
+    dependencies=rate_limited_deps(LimitName.EVIDENCE_INGEST),
+)
 async def ingest_resume(
     body: IngestResumeRequest,
     http_response: Response,

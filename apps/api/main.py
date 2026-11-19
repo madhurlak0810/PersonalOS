@@ -16,8 +16,10 @@ from apps.api.auth import (
     require_stream_principal,
 )
 from apps.api.errors import register_error_handlers
+from apps.api.limits import build_api_limits
 from apps.api.security import (
     BodySizeLimitMiddleware,
+    JsonLimitsMiddleware,
     SecurityHeadersMiddleware,
     StrictCORSMiddleware,
     validate_cors_origins,
@@ -118,13 +120,25 @@ def create_app() -> FastAPI:
     # Starlette runs the most recently added middleware first, so these are
     # listed innermost to outermost (see `apps.api.security`):
     #
-    # - the body cap, innermost, so its 413 still gets a correlation id;
+    # - the JSON shape check (depth, string length, UTF-8), innermost, so the
+    #   body it buffers is already bounded by the cap;
+    # - the body cap, so its 413 still gets a correlation id;
     # - the correlation id, assigned for every route to see;
     # - CORS, restricted to `API_CORS_ORIGINS`, wrapping every response so an
     #   allowed UI can read errors too;
     # - the security headers, outermost, so preflights and CORS refusals
     #   carry them as well.
-    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.api_max_body_bytes)
+    app.add_middleware(
+        JsonLimitsMiddleware,
+        max_depth=settings.api_max_json_depth,
+        max_string_bytes=settings.api_max_json_string_bytes,
+    )
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_bytes=settings.api_max_body_bytes,
+        # Resume ingestion is the one route allowed a bigger body.
+        route_caps={("POST", "/v1/evidence/documents"): settings.api_max_resume_body_bytes},
+    )
     app.add_middleware(CorrelationIdMiddleware)
     app.add_middleware(
         StrictCORSMiddleware,
@@ -182,6 +196,9 @@ def create_app() -> FastAPI:
     )
 
     register_error_handlers(app)
+    # Per-actor rates, concurrency caps and the auth-failure throttle, as
+    # configured; see `apps.api.limits`. A test may replace it.
+    app.state.api_limits = build_api_limits()
 
     return app
 

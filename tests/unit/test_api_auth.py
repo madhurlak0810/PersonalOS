@@ -145,6 +145,10 @@ def _protected_routes(app) -> list[tuple[str, str]]:
     ],
 )
 def test_every_non_health_route_is_a_401_without_a_valid_token(app, headers):
+    # One bad token per route, all from one address: more than the throttle
+    # allows for free (`tests/unit/test_api_limits.py` covers that). Here the
+    # point is that every route authenticates, so the throttle is made lenient.
+    app.state.api_limits.auth_failures.free_failures = 10_000
     client = TestClient(app, raise_server_exceptions=False)
     for method, path in _protected_routes(app):
         response = client.request(method, path, headers=headers)

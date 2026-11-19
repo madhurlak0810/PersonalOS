@@ -20,9 +20,10 @@ when no `user_id` is given. A caller cannot name another actor.
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path, Response
+from fastapi import APIRouter, Depends, Path, Query, Response
 
 from apps.api.auth import current_actor
+from apps.api.limits import MAX_PAGE_SIZE
 from personalos.bootstrap import build_search_profile_store
 from personalos.domain.search_profiles import (
     CandidateProfileInput,
@@ -84,12 +85,14 @@ async def update_profile(
 
 @router.get(f"{_PROFILE_PATH}/versions", response_model=CandidateProfileVersions)
 async def list_profile_versions(
+    limit: int = Query(default=MAX_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     store: SqlSearchProfileStore = Depends(get_profile_store),
     actor_id: str = Depends(current_actor),
 ):
-    """Every version of the actor's profile, newest first."""
+    """The actor's profile versions, newest first, at most `limit` of them."""
     _, user_id = _actor(actor_id)
-    return store.versions(user_id)
+    versions = store.versions(user_id)
+    return versions.model_copy(update={"versions": versions.versions[:limit]})
 
 
 @router.get(f"{_PROFILE_PATH}/versions/{{profile_version}}", response_model=CandidateProfileVersion)

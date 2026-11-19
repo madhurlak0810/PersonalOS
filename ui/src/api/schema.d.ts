@@ -101,7 +101,7 @@ export interface paths {
         };
         /**
          * List Approvals
-         * @description Every approval of the caller's still owed an answer, oldest first; expired ones marked.
+         * @description The caller's approvals still owed an answer, oldest first (at most `limit`); expired ones marked.
          */
         get: operations["list_approvals_v1_approvals_get"];
         put?: never;
@@ -217,6 +217,12 @@ export interface paths {
          *     Continuing a conversation whose workflow is parked on an approval is a
          *     409: a new message would start the thread over and strand the question it
          *     is waiting on. Answer it through the resume endpoint first.
+         *
+         *     With an `Idempotency-Key`, a repeat of a request already answered returns
+         *     that answer (`Idempotent-Replayed: true`) without spending the actor's
+         *     `workflow_start` budget or starting anything. Without one, every request
+         *     spends one; starting a new workflow while `API_MAX_ACTIVE_WORKFLOWS` are
+         *     queued or running is a 429.
          */
         post: operations["chat_v1_chat_post"];
         delete?: never;
@@ -300,6 +306,29 @@ export interface paths {
          * @description Every degraded or down integration, with its reason and what fixes it.
          */
         get: operations["list_integration_failures_v1_failures_integrations_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/failures/limits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Limit Hits
+         * @description Limit hits, most first: the caller's own, or everyone's (and anonymous ones) for `admin`.
+         *
+         *     Counted in this process (`personalos.observability.limits`); the
+         *     `personalos.api.limit_hits` metric is the cross-process view.
+         */
+        get: operations["list_limit_hits_v1_failures_limits_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -425,7 +454,7 @@ export interface paths {
         };
         /**
          * List Profile Versions
-         * @description Every version of the actor's profile, newest first.
+         * @description The actor's profile versions, newest first, at most `limit` of them.
          */
         get: operations["list_profile_versions_v1_profile_versions_get"];
         put?: never;
@@ -1734,6 +1763,33 @@ export interface components {
             };
         };
         /**
+         * LimitHitView
+         * @description How often one actor was refused by one limit on one route.
+         */
+        LimitHitView: {
+            /** Actor Id */
+            actor_id: string;
+            /** Count */
+            count: number;
+            /**
+             * Last Hit At
+             * Format: date-time
+             */
+            last_hit_at: string;
+            /** Limit */
+            limit: string;
+            /** Route */
+            route: string;
+        };
+        /**
+         * LimitHitsResponse
+         * @description Requests refused by the API's limits, in this API process since it started.
+         */
+        LimitHitsResponse: {
+            /** Hits */
+            hits?: components["schemas"]["LimitHitView"][];
+        };
+        /**
          * LinkedApproval
          * @description The `approvals` row an entry belongs to.
          */
@@ -2717,7 +2773,9 @@ export interface operations {
     };
     list_approvals_v1_approvals_get: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -2731,6 +2789,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PendingApprovalsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2864,7 +2931,10 @@ export interface operations {
     chat_v1_chat_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Makes the request safe to retry: the same key returns the same answer. */
+                "Idempotency-Key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -3005,6 +3075,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["IntegrationFailuresResponse"];
+                };
+            };
+        };
+    };
+    list_limit_hits_v1_failures_limits_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LimitHitsResponse"];
                 };
             };
         };
@@ -3216,7 +3306,9 @@ export interface operations {
     };
     list_profile_versions_v1_profile_versions_get: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3230,6 +3322,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CandidateProfileVersions"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
