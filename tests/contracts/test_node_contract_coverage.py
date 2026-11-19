@@ -34,6 +34,7 @@ from personalos.domain.job_search import FollowUpKind
 from personalos.domain.recruiter_events import CommitmentActor, ExtractedCommitment
 from personalos.graphs import job_search as jsg
 from personalos.graphs.contracts import (
+    COMMUNICATIONS_GRAPH,
     FILE_TASK_GRAPH,
     JOB_SEARCH_GRAPH,
     NODE_CONTRACTS,
@@ -45,6 +46,7 @@ from personalos.graphs.contracts import (
 from personalos.graphs.job_search import JobSearchGraph
 from personalos.graphs.supervisor import SupervisorGraph
 from personalos.models.routing import KeywordIntentClassifier
+from tests.fixtures import communications as comms_fixtures
 from tests.fixtures import file_task as file_fixtures
 from tests.fixtures import job_search_fakes as fakes
 from tests.fixtures.node_contracts import CONTRACT_TESTS, enforce_contracts
@@ -58,6 +60,11 @@ class _JobSubgraph:
 class _FileSubgraph:
     async def __call__(self, task_dag, state):
         return {"plan": None}
+
+
+class _CommunicationsSubgraph:
+    async def __call__(self, task_dag, state):
+        return {"triage": []}
 
 
 def _job_search(**overrides) -> JobSearchGraph:
@@ -100,7 +107,12 @@ def _job_search(**overrides) -> JobSearchGraph:
 
 
 def _supervisor() -> SupervisorGraph:
-    return SupervisorGraph(KeywordIntentClassifier(), _JobSubgraph(), file_subgraph=_FileSubgraph())
+    return SupervisorGraph(
+        KeywordIntentClassifier(),
+        _JobSubgraph(),
+        file_subgraph=_FileSubgraph(),
+        communications_subgraph=_CommunicationsSubgraph(),
+    )
 
 
 def _file_task():
@@ -115,6 +127,11 @@ def _file_task():
     return file_fixtures.build_world(root, max_unattended=1).graph
 
 
+def _communications():
+    """A Communications subgraph over the real Gmail tool path and a fake Google API."""
+    return comms_fixtures.build_world_in_process().graph
+
+
 def _registered_nodes(compiled) -> set[str]:
     return {name for name in compiled.get_graph().nodes if name not in ("__start__", "__end__")}
 
@@ -124,6 +141,7 @@ GRAPHS = {
     SUPERVISOR_GRAPH: _supervisor,
     JOB_SEARCH_GRAPH: _job_search,
     FILE_TASK_GRAPH: _file_task,
+    COMMUNICATIONS_GRAPH: _communications,
 }
 
 
@@ -222,7 +240,12 @@ async def test_supervisor_runs_satisfy_every_node_contract():
     graph = enforce_contracts(_supervisor(), SUPERVISOR_GRAPH, inputs=True, visited=visited)
     compiled = graph.build()
 
-    for message in ("find me a python job", "find my latest resume", "hmm, not sure"):
+    for message in (
+        "find me a python job",
+        "find my latest resume",
+        "summarize the email thread t-acme",
+        "hmm, not sure",
+    ):
         await compiled.ainvoke(
             {"message": message}, config={"configurable": {"thread_id": f"t-{uuid4()}"}}
         )
@@ -252,6 +275,38 @@ async def test_file_task_runs_satisfy_every_node_contract():
 
     assert visited == set(contracts_for(FILE_TASK_GRAPH)), (
         f"not reached by any run: {sorted(set(contracts_for(FILE_TASK_GRAPH)) - visited)}"
+    )
+
+
+async def test_communications_runs_satisfy_every_node_contract():
+    """Triage, a summary, and a reply that parks for approval and is then sent."""
+    from langgraph.types import Command
+
+    world = comms_fixtures.build_world_in_process()
+    user_id, _ = comms_fixtures.applied_application(world.factory)
+    world.add_mail("m-1")
+    visited: set[str] = set()
+    graph = enforce_contracts(world.graph, COMMUNICATIONS_GRAPH, inputs=True, visited=visited)
+    compiled = graph.build()
+
+    for request in ("triage my inbox", "summarize thread t-acme"):
+        await compiled.ainvoke(
+            {"request": request, "user_id": str(user_id)}, config=comms_fixtures.thread()
+        )
+
+    config = comms_fixtures.thread()
+    parked = await compiled.ainvoke(
+        {"request": "draft a reply to thread t-acme", "user_id": str(user_id)}, config=config
+    )
+    decisions = [
+        comms_fixtures.approve(request).model_dump(mode="json")
+        for request in comms_fixtures.interrupt_requests(parked)
+    ]
+    final = await compiled.ainvoke(Command(resume=decisions), config=config)
+    assert [receipt["ok"] for receipt in final["action_receipts"]] == [True]
+
+    assert visited == set(contracts_for(COMMUNICATIONS_GRAPH)), (
+        f"not reached by any run: {sorted(set(contracts_for(COMMUNICATIONS_GRAPH)) - visited)}"
     )
 
 

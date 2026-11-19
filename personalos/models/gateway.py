@@ -58,6 +58,17 @@ from personalos.models.artifact_drafting import (
     DRAFT_WRITER_SYSTEM_PROMPT,
     StructuredLLMDraftWriter,
 )
+from personalos.models.communications import (
+    ANALYZER_SYSTEM_PROMPT,
+    THREAD_REPLY_SYSTEM_PROMPT,
+    TRIAGER_SYSTEM_PROMPT,
+    ResilientThreadAnalyzer,
+    ResilientTriager,
+    RuleBasedTriager,
+    StructuredLLMThreadAnalyzer,
+    StructuredLLMThreadReplyWriter,
+    StructuredLLMTriager,
+)
 from personalos.models.embedding import (
     DEFAULT_EMBEDDING_DIMENSION,
     CloudInferenceNotAllowed,
@@ -119,6 +130,15 @@ class ModelRole(str, Enum):
     #: Summarizes one document, given as quoted data, into a schema with no
     #: field for instructions. Extractive under `rules`.
     DOCUMENT_SUMMARIZER = "document_summarizer"
+    #: Triages one inbox message (headers and snippet) into closed enums.
+    #: Output that will not validate becomes `needs_review`.
+    MESSAGE_TRIAGER = "message_triager"
+    #: Summarizes one email thread and lists its action items, citing message
+    #: ids. Extractive under `rules`, and when its output will not validate.
+    THREAD_ANALYZER = "thread_analyzer"
+    #: Writes the body of a reply to any in-scope thread. Like
+    #: `REPLY_DRAFTER`: no tool, no recipient, checked against the evidence.
+    THREAD_REPLY_DRAFTER = "thread_reply_drafter"
 
 
 class ModelSpec(BaseModel):
@@ -181,6 +201,9 @@ def _system_prompts() -> dict[ModelRole, str]:
         ModelRole.REPLY_DRAFTER: REPLY_DRAFTER_SYSTEM_PROMPT,
         ModelRole.FILE_PLANNER: PLANNER_SYSTEM_PROMPT,
         ModelRole.DOCUMENT_SUMMARIZER: SUMMARIZER_SYSTEM_PROMPT,
+        ModelRole.MESSAGE_TRIAGER: TRIAGER_SYSTEM_PROMPT,
+        ModelRole.THREAD_ANALYZER: ANALYZER_SYSTEM_PROMPT,
+        ModelRole.THREAD_REPLY_DRAFTER: THREAD_REPLY_SYSTEM_PROMPT,
     }
 
 
@@ -355,6 +378,33 @@ class ModelGateway:
         if spec.provider == "rules":
             return ExtractiveDocumentSummarizer()
         return StructuredLLMDocumentSummarizer(self._chat_model(spec), **kwargs)
+
+    def message_triager(self) -> RuleBasedTriager | ResilientTriager:
+        """The Communications triager: the model, falling back to `needs_review`; or the rules."""
+        spec, kwargs = self._spec(ModelRole.MESSAGE_TRIAGER)
+        if spec.provider == "rules":
+            return RuleBasedTriager()
+        return ResilientTriager(StructuredLLMTriager(self._chat_model(spec), **kwargs))
+
+    def thread_analyzer(self) -> ResilientThreadAnalyzer:
+        """Thread summaries and action items: the model, then the extractive rules."""
+        spec, kwargs = self._spec(ModelRole.THREAD_ANALYZER)
+        if spec.provider == "rules":
+            return ResilientThreadAnalyzer(None)
+        return ResilientThreadAnalyzer(
+            StructuredLLMThreadAnalyzer(self._chat_model(spec), **kwargs)
+        )
+
+    def thread_reply_writer(self) -> StructuredLLMThreadReplyWriter | None:
+        """The thread-reply writer, or None under `rules` (the template reply is drafted)."""
+        spec, kwargs = self._spec(ModelRole.THREAD_REPLY_DRAFTER)
+        if spec.provider == "rules":
+            return None
+        if "temperature" not in spec.params:
+            spec = spec.model_copy(
+                update={"params": {**spec.params, "temperature": DEFAULT_REPLY_TEMPERATURE}}
+            )
+        return StructuredLLMThreadReplyWriter(self._chat_model(spec), **kwargs)
 
     def health_checks(self, *, get: HttpGet) -> list[LocalModelServerCheck]:
         """One check per local model server any role runs on (see `personalos.models.health`).

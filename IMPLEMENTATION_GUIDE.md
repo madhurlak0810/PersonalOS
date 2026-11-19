@@ -737,9 +737,10 @@ python -m personalos.cli mcp-google               # serve the Google MCP server 
 **`supervisor.py` — the top-level graph.** Loads the actor's long-term facts,
 classifies the request into a typed `RouteDecision`, and either asks for
 clarification or plans a bounded `TaskDAG` and hands it to a domain subgraph. It
-holds no tool and no repository: `IntentClassifier`, `JobSubgraphRunner` and
-`FileSubgraphRunner` are injected ports. `JOB` and `FILE` are routable;
-`COMMUNICATIONS` and `CALENDAR` are reserved and asked back.
+holds no tool and no repository: `IntentClassifier`, `JobSubgraphRunner`,
+`FileSubgraphRunner` and `CommunicationsSubgraphRunner` are injected ports.
+`JOB`, `FILE` and `COMMUNICATIONS` are routable; `CALENDAR` is reserved and
+asked back.
 
 **`file_task.py` — the File subgraph** (K1). Finds, reads, summarizes and
 organizes job-search documents (resumes, cover letters, application
@@ -766,6 +767,40 @@ symlinks denied and audited, deletes and bulk moves refused without approval,
 crash-after-write replay, prompt injection in a resume, Supervisor routing),
 `tests/unit/test_file_task_nodes.py`, `tests/unit/test_file_planning.py`,
 `tests/unit/test_files_server_tools.py`.
+
+**`communications.py` — the Communications subgraph** (K2). Triages the
+in-scope inbox, summarizes a thread, extracts its action items and drafts a
+reply, over the J2 Google tools, the J3 mailbox scope and the J5 drafting and
+send path. It adds no provider code.
+
+```
+parse_request -> triage_inbox -> END
+parse_request -> load_thread -> link_application -> END             (summary, action items)
+              -> load_thread -> link_application -> draft_reply
+              -> request_send_approval -> send_approval_checkpoint (interrupts)
+              -> execute_send -> END                                (draft a reply)
+```
+
+| Property | How it holds |
+| --- | --- |
+| Scoped reads | `executor/gmail_threads.py:GmailThreadReader` searches only the `MailboxScope` rules the inbox poller uses (`GMAIL_RECRUITER_LABELS`, `GMAIL_RECRUITER_QUERIES`). A thread with no message matching a rule is not read (`ThreadNotInScope`), and an empty scope reads nothing. Spam, trash and drafts are never read; the candidate's sent mail is read inside a thread but never triaged. |
+| Permission classes | Listings and reads are `READ_EXTERNAL`. The Gmail draft and the `artifact_versions` row are `WRITE_REVERSIBLE`. `gmail_send_message` stays `WRITE_EXTERNAL` with `require_approval`, and no node of this subgraph may call it (`COMMUNICATIONS_NODE_TOOL_ALLOWLISTS`): an approved reply is sent by `GmailSendExecutor` as `GMAIL_SENDER`, journaled and reconciled against the Sent folder. A second `RequesterToolScopeRule` keeps these nodes off every other server. |
+| Typed triage | `TriageResult`: category, urgency and suggested action from closed enums. A model answer that will not validate as `TriageProposal`, after the repair attempt, becomes `needs_review` (`ResilientTriager`); a provider error does too. Under `rules`, `RuleBasedTriager` answers. |
+| Summaries cite messages | `ThreadSummary.message_ids` lists every message covered, and each key point and action item names the message ids it came from. `digest_from_proposal` refuses an id that is not in the thread, and the analyzer then falls back to the extractive digest. |
+| No invented claims | `retrieval/thread_reply_drafting.py:ThreadReplyDrafter` writes a `ReplyProposal` from the candidate's evidence and checks it with `finalize_reply` (the Phase E validator). A rejected draft is recorded as a `DraftRejection` and none of it is kept. The neutral template reply is drafted instead. A thread tied to an application is grounded in that application's company, role and skills, and an application belonging to another user is refused. |
+| The approval shows the message and is bound to it | One `SEND_EMAIL` intent. Its `ApprovalRequest.preview` has the recipient, subject, body diff, attachments and `in_reply_to` (a reply or a new thread). Recipient and subject are set by code from the message being answered. `execute_send` recomputes the hash, so an edited body or recipient is refused with `action_hash_mismatch`. Nothing is sent without a person's answer. |
+| Mail is data | Bodies reach the triager, analyzer, extractor and writer as quoted JSON, and each one returns a closed schema. Routing reads only the parsed request and the nodes' conclusions. Bodies are not checkpointed: `load_thread` keeps the thread without them and `draft_reply` reads it again. Links are stored as inert strings (`EmailMessage.links`). No reachable tool fetches a URL or downloads an attachment. |
+| Applications | Inbound messages are classified (`RecruiterEventExtractor`), correlated (`correlate_application`, deterministic) and triaged exactly as J3 mail is. `link_application` records matched mail through `SqlRecruiterEventStore`, writing one `communication_events` row and at most one lifecycle transition per message, through the lifecycle's rules. A refused transition or a weak match becomes a review. Reprocessing a thread records nothing new. |
+| Actors and limits | A Supervisor run's task runs on a `communications` thread of the same workflow, owned by the conversation's candidate, so the send approval is that actor's. It is reached through `POST /v1/chat`, so the Phase L per-actor rate and active-workflow limits apply. Each run reads at most `MAX_TRIAGE_ITEMS` listings and `MAX_THREAD_MESSAGES` messages. |
+
+Models: `message_triager`, `thread_analyzer` and `thread_reply_drafter`
+roles in the model configuration. All three fall back to the rules (or the
+template reply) under `rules`.
+
+Tests: `tests/adversarial/test_communications_boundaries.py` (routing and a
+typed summary, no send without approval, a hash mismatch after an edit, the
+claim validator, prompt injection, recruiter events exactly once, scope and
+actors) and `tests/unit/test_communications_nodes.py`.
 
 **`job_search.py` — the Job Search subgraph**:
 
@@ -1005,8 +1040,10 @@ a seven-day wait is a seven-day test only in the fiction.
 
 ### 14. Recruiter Events: Classification, Commitments and Correlation
 
-Inbound recruiter mail is handled by two nodes of the Job Search graph, not by
-a Communications agent:
+Inbound recruiter mail the poller finds is handled by two nodes of the Job
+Search graph. A thread someone asks the Communications subgraph about is
+recorded the same way, with the same store and dedupe key, by its
+`link_application` node:
 
 ```
 START -> classify_recruiter_events -> record_recruiter_events
@@ -1646,7 +1683,7 @@ These fill in the ports the worker reports as unbound at startup.
 | # | Issue | Done when |
 | --- | --- | --- |
 | K1 | File subgraph and planner | Done (`personalos/graphs/file_task.py`; see [Orchestration Graphs](#11-orchestration-graphs-personalosgraphs)). `RouteDomain.FILE` routes to it, and every read, write, move and delete goes through the sandboxed files MCP |
-| K2 | Communications subgraph | Triage, summary and draft-reply flows run over the Gmail adapter, with approval before send |
+| K2 | Communications subgraph | Done (`personalos/graphs/communications.py`; see [Orchestration Graphs](#11-orchestration-graphs-personalosgraphs)). `RouteDomain.COMMUNICATIONS` routes to it. Triage, thread summaries, action items and reply drafts run over the J2/J3/J5 Gmail pieces, and a send needs approval |
 | K3 | Calendar subgraph | Availability queries and event create or move, with approval before write |
 | K4 | Cross-domain task DAGs | The Supervisor plans a DAG that spans two domains |
 | K5 | Classifier and evals for new domains | Each domain has routing golden cases, and the quality report covers them |

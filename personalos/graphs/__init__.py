@@ -1,5 +1,6 @@
 """Graphs package."""
 
+from .communications import CommunicationsGraph, CommunicationsState, CommunicationsSubgraphRunner
 from .file_task import FileTaskGraph, FileTaskState, FileTaskSubgraphRunner
 from .job_search import JobSearchGraph, JobSearchState, JobSearchSubgraphRunner
 from .supervisor import FileSubgraphRunner, JobSubgraphRunner, SupervisorGraph, SupervisorState
@@ -15,4 +16,7 @@ __all__ = [
     "FileTaskGraph",
     "FileTaskState",
     "FileTaskSubgraphRunner",
+    "CommunicationsGraph",
+    "CommunicationsState",
+    "CommunicationsSubgraphRunner",
 ]

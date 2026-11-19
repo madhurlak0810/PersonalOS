@@ -1,5 +1,5 @@
 {
-  "description": "User requests to the Supervisor, each with the route a careful reader would take. `route` is `job_search` (planned and handed to the Job Search subgraph), `file_task` (handed to the File subgraph) or `clarify` (asked back). `domain` is the domain the request is really about, checked when set: a clarify for an unsupported domain should still name the right one. Synthetic.",
+  "description": "User requests to the Supervisor, each with the route a careful reader would take. `route` is `job_search` (planned and handed to the Job Search subgraph), `file_task` (handed to the File subgraph), `communications` (handed to the Communications subgraph) or `clarify` (asked back). `domain` is the domain the request is really about, checked when set: a clarify for an unsupported domain should still name the right one. Synthetic.",
   "cases": [
     {"id": "route-01", "message": "Find me senior backend jobs that use Python and Postgres.", "expected": {"route": "job_search", "domain": "job"}},
     {"id": "route-02", "message": "Are there any remote platform engineering positions open right now?", "expected": {"route": "job_search", "domain": "job"}},
@@ -9,14 +9,17 @@
     {"id": "route-06", "message": "I want to apply to more ML engineering openings, can you search?", "expected": {"route": "job_search", "domain": "job"}},
     {"id": "route-07", "message": "Move my Thursday dentist appointment to next week.", "expected": {"route": "clarify", "domain": "calendar"}},
     {"id": "route-08", "message": "What does my calendar look like on Friday afternoon?", "expected": {"route": "clarify", "domain": "calendar"}},
-    {"id": "route-09", "message": "Summarise the unread email in my inbox from this morning.", "expected": {"route": "clarify", "domain": "communications"}},
-    {"id": "route-10", "message": "Reply to my landlord's message and say the rent is sent.", "expected": {"route": "clarify", "domain": "communications"}},
+    {"id": "route-09", "message": "Summarise the unread email in my inbox from this morning.", "expected": {"route": "communications", "domain": "communications"}},
+    {"id": "route-10", "message": "Reply to my landlord's message and say the rent is sent.", "expected": {"route": "communications", "domain": "communications"}},
     {"id": "route-11", "message": "Put the tax documents into a folder called 2026.", "expected": {"route": "file_task", "domain": "file"}},
     {"id": "route-12", "message": "hmm", "expected": {"route": "clarify"}},
     {"id": "route-13", "message": "Can you help me with something?", "expected": {"route": "clarify"}},
     {"id": "route-14", "message": "", "expected": {"route": "clarify"}},
     {"id": "route-15", "message": "Find my latest resume.", "expected": {"route": "file_task", "domain": "file"}},
     {"id": "route-16", "message": "Summarize my cover letter for the Initech application.", "expected": {"route": "file_task", "domain": "file"}},
-    {"id": "route-17", "message": "Organize my application documents into folders by kind.", "expected": {"route": "file_task", "domain": "file"}}
+    {"id": "route-17", "message": "Organize my application documents into folders by kind.", "expected": {"route": "file_task", "domain": "file"}},
+    {"id": "route-18", "message": "Summarize the email thread from the Acme recruiter.", "expected": {"route": "communications", "domain": "communications"}},
+    {"id": "route-19", "message": "Triage my inbox and tell me what needs a reply.", "expected": {"route": "communications", "domain": "communications"}},
+    {"id": "route-20", "message": "What are the action items in the Globex interview thread?", "expected": {"route": "communications", "domain": "communications"}}
   ]
 }
