@@ -239,7 +239,7 @@ async def routing(gateway: ModelGateway) -> SuiteResult:
     cases = dataset.load("routing_requests.json")["cases"]
 
     async def one(case: dict[str, Any]) -> CaseResult:
-        graph, job_subgraph, file_subgraph = world.supervisor(gateway)
+        graph, job_subgraph, file_subgraph, communications_subgraph = world.supervisor(gateway)
         final = await graph.ainvoke({"message": case["message"]}, world.thread(case["id"]))
         decision = final.get("route_decision") or {}
         actual = {
@@ -248,6 +248,8 @@ async def routing(gateway: ModelGateway) -> SuiteResult:
                 if job_subgraph.calls
                 else "file_task"
                 if file_subgraph.calls
+                else "communications"
+                if communications_subgraph.calls
                 else "clarify"
             ),
             "domain": decision.get("domain"),

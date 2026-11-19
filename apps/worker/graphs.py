@@ -42,7 +42,12 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from apps.worker.health_monitor import http_get_ok
-from apps.worker.main import WorkerGraphs, WorkflowScopedFileSubgraph, WorkflowScopedJobSubgraph
+from apps.worker.main import (
+    WorkerGraphs,
+    WorkflowScopedCommunicationsSubgraph,
+    WorkflowScopedFileSubgraph,
+    WorkflowScopedJobSubgraph,
+)
 from apps.worker.unconfigured import (
     NotConfiguredApplicationStore,
     NotConfiguredApplicationSubmitter,
@@ -59,6 +64,7 @@ from personalos.bootstrap import (
     build_application_transitioner,
     build_artifact_packet_builder,
     build_calendar_action_executor,
+    build_communications_graph,
     build_document_overwrite_executor,
     build_durable_checkpointer,
     build_embedder,
@@ -68,6 +74,7 @@ from personalos.bootstrap import (
     build_gmail_recruiter_inbox,
     build_gmail_send_executor,
     build_gmail_send_reconcilers,
+    build_gmail_thread_reader,
     build_google_calendar,
     build_integration_health_store,
     build_job_matcher,
@@ -94,6 +101,7 @@ from personalos.domain.job_search import (
     JobSearchContractError,
 )
 from personalos.domain.workflow import (
+    COMMUNICATIONS_THREAD_NAMESPACE,
     FILE_TASK_THREAD_NAMESPACE,
     JOB_SEARCH_THREAD_NAMESPACE,
     SUPERVISOR_THREAD_NAMESPACE,
@@ -296,13 +304,22 @@ def _configured_embedder() -> Any:
         return None
 
 
+def _communications_mailbox(session_factory: Callable[[], Any]) -> Any:
+    """The Gmail thread reader, or the mailbox stand-in while Gmail is not configured."""
+    try:
+        return build_gmail_thread_reader(policy=build_policy_engine(session_factory))
+    except PortNotConfigured as exc:
+        logger.info("the Communications mailbox is not wired: %s", exc)
+        return NotConfiguredMailbox()
+
+
 def build_worker_graphs(
     session_factory: Callable[[], Any],
     *,
     overrides: Mapping[str, Any] | None = None,
     lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
 ) -> WorkerGraphs:
-    """The Supervisor, the Job Search subgraph and the File subgraph, durable.
+    """The Supervisor and the Job Search, File and Communications subgraphs, durable.
 
     `overrides` replaces `JobSearchGraph` arguments by name; an argument it
     replaces no longer counts towards `unbound_ports`. `lease_ttl_seconds`
@@ -323,10 +340,18 @@ def build_worker_graphs(
         gateway=build_tool_gateway(policy=build_policy_engine(session_factory)),
         checkpointer=checkpointer,
     ).build()
+    communications = build_communications_graph(
+        mailbox=_communications_mailbox(session_factory),
+        action_executor=ports["action_executor"],
+        session_factory=session_factory,
+        recruiter_event_extractor=ports.get("recruiter_event_extractor"),
+        checkpointer=checkpointer,
+    ).build()
     supervisor = SupervisorGraph(
         build_model_gateway().intent_classifier(),
         WorkflowScopedJobSubgraph(job_search, registry, prepare_application=True),
         file_subgraph=WorkflowScopedFileSubgraph(file_task, registry),
+        communications_subgraph=WorkflowScopedCommunicationsSubgraph(communications, registry),
         checkpointer=checkpointer,
     ).build()
 
@@ -344,6 +369,7 @@ def build_worker_graphs(
             SUPERVISOR_THREAD_NAMESPACE: runner(supervisor),
             JOB_SEARCH_THREAD_NAMESPACE: runner(job_search),
             FILE_TASK_THREAD_NAMESPACE: runner(file_task),
+            COMMUNICATIONS_THREAD_NAMESPACE: runner(communications),
         },
         unbound_ports=tuple(sorted({stub.port for group in stubs.values() for stub in group})),
         health_checks=tuple(health_checks),

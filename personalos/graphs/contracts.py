@@ -34,6 +34,13 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validat
 
 from personalos.domain.applications import RequestedTransition, TransitionOutcome
 from personalos.domain.checkpoints import PendingCheckpoint
+from personalos.domain.communications import (
+    CommunicationsRequest,
+    EmailThread,
+    ThreadDigest,
+    ThreadReplyDraft,
+    TriageResult,
+)
 from personalos.domain.files import FileInventory, FilePlan, FileReceipt, FileVerification
 from personalos.domain.interview_scheduling import (
     CalendarEvent,
@@ -69,6 +76,7 @@ from personalos.domain.recruiter_events import (
 )
 from personalos.domain.routing import RouteDecision
 from personalos.domain.tasks import TaskDAG
+from personalos.graphs import communications as csg
 from personalos.graphs import file_task as fsg
 from personalos.graphs import job_search as jsg
 from personalos.graphs import supervisor as sup
@@ -77,6 +85,7 @@ from personalos.graphs import supervisor as sup
 SUPERVISOR_GRAPH = "supervisor"
 JOB_SEARCH_GRAPH = "job_search"
 FILE_TASK_GRAPH = "file_task"
+COMMUNICATIONS_GRAPH = "communications"
 
 
 def _must_be_empty(value: Any) -> Any:
@@ -174,6 +183,15 @@ class RunFileSubgraphInput(NodeInput):
 
 
 class RunFileSubgraphOutput(NodeOutput):
+    result: dict[str, Any]
+
+
+class RunCommunicationsSubgraphInput(NodeInput):
+    task_dag: TaskDAG
+    message: str = ""
+
+
+class RunCommunicationsSubgraphOutput(NodeOutput):
     result: dict[str, Any]
 
 
@@ -559,6 +577,101 @@ class VerifyFileChangesOutput(NodeOutput):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Communications subgraph
+# ---------------------------------------------------------------------------
+
+
+class ParseRequestInput(NodeInput):
+    request: str = ""
+    thread_id: str | None = None
+
+
+class ParseRequestOutput(NodeOutput):
+    comms_request: CommunicationsRequest
+    errors: list[str]
+
+
+class TriageInboxInput(NodeInput):
+    comms_request: CommunicationsRequest
+    errors: list[str] = []
+
+
+class TriageInboxOutput(NodeOutput):
+    triage: list[TriageResult]
+    errors: list[str] | None = None
+
+
+class LoadThreadInput(NodeInput):
+    comms_request: CommunicationsRequest
+    user_id: UUID | None = None
+    errors: list[str] = []
+
+
+class LoadThreadOutput(NodeOutput):
+    #: Without bodies; `None` when no in-scope thread matched.
+    thread: EmailThread | None
+    digest: ThreadDigest | None
+    recruiter_events: list[RecruiterEvent]
+    errors: list[str]
+
+
+class LinkApplicationInput(NodeInput):
+    recruiter_events: list[RecruiterEvent] = []
+
+
+class LinkApplicationOutput(NodeOutput):
+    recruiter_event_records: list[RecruiterEventRecord]
+    recruiter_event_reviews: list[RecruiterEventReview]
+    application_id: UUID | None
+    recruiter_events: Consumed
+
+
+class DraftReplyInput(NodeInput):
+    thread: EmailThread
+    user_id: UUID
+    application_id: UUID | None = None
+    errors: list[str] = []
+
+
+class DraftReplyOutput(NodeOutput):
+    reply_draft: ThreadReplyDraft | None
+    pending_actions: list[ActionIntent]
+    errors: list[str]
+    approval_stage: Literal["send_reply"] | None = None
+
+
+class RequestSendApprovalInput(NodeInput):
+    pending_actions: list[ActionIntent] = Field(min_length=1)
+    approval_requests: list[ApprovalRequest] = []
+
+
+class RequestSendApprovalOutput(NodeOutput):
+    approval_requests: list[ApprovalRequest]
+
+
+class SendApprovalCheckpointInput(NodeInput):
+    pending_actions: list[ActionIntent] = []
+    approval_requests: list[ApprovalRequest] = []
+    approvals: list[ApprovalDecision] = []
+
+
+class SendApprovalCheckpointOutput(NodeOutput):
+    approvals: list[ApprovalDecision] | None = None
+
+
+class ExecuteSendInput(NodeInput):
+    pending_actions: list[ActionIntent] = []
+    approval_requests: list[ApprovalRequest] = []
+    approvals: list[ApprovalDecision] = []
+    approval_refusals: list[ApprovalRefusal] = []
+
+
+class ExecuteSendOutput(NodeOutput):
+    action_receipts: list[ActionReceipt]
+    approval_refusals: list[ApprovalRefusal]
+
+
 def _contract(
     graph: str, node: str, method: str, input: type[NodeInput], output: type[NodeOutput]
 ) -> tuple[tuple[str, str], NodeContract]:
@@ -597,7 +710,42 @@ NODE_CONTRACTS: Mapping[tuple[str, str], NodeContract] = dict(
             RunFileSubgraphInput,
             RunFileSubgraphOutput,
         ),
+        _contract(
+            SUPERVISOR_GRAPH,
+            sup.RUN_COMMUNICATIONS_SUBGRAPH,
+            "_run_communications_subgraph",
+            RunCommunicationsSubgraphInput,
+            RunCommunicationsSubgraphOutput,
+        ),
         _contract(SUPERVISOR_GRAPH, sup.CLARIFY, "_clarify", ClarifyInput, ClarifyOutput),
+        *(
+            _contract(COMMUNICATIONS_GRAPH, node, method, node_input, node_output)
+            for node, method, node_input, node_output in (
+                (csg.PARSE_REQUEST, "parse_request", ParseRequestInput, ParseRequestOutput),
+                (csg.TRIAGE_INBOX, "triage_inbox", TriageInboxInput, TriageInboxOutput),
+                (csg.LOAD_THREAD, "load_thread", LoadThreadInput, LoadThreadOutput),
+                (
+                    csg.LINK_APPLICATION,
+                    "link_application",
+                    LinkApplicationInput,
+                    LinkApplicationOutput,
+                ),
+                (csg.DRAFT_REPLY, "draft_reply", DraftReplyInput, DraftReplyOutput),
+                (
+                    csg.REQUEST_SEND_APPROVAL,
+                    "request_send_approval",
+                    RequestSendApprovalInput,
+                    RequestSendApprovalOutput,
+                ),
+                (
+                    csg.SEND_APPROVAL_CHECKPOINT,
+                    "send_approval_checkpoint",
+                    SendApprovalCheckpointInput,
+                    SendApprovalCheckpointOutput,
+                ),
+                (csg.EXECUTE_SEND, "execute_send", ExecuteSendInput, ExecuteSendOutput),
+            )
+        ),
         _contract(
             FILE_TASK_GRAPH,
             fsg.DISCOVER_FILES,
@@ -815,6 +963,7 @@ def contracts_for(graph: str) -> dict[str, NodeContract]:
 __all__ = [
     "SUPERVISOR_GRAPH",
     "FILE_TASK_GRAPH",
+    "COMMUNICATIONS_GRAPH",
     "JOB_SEARCH_GRAPH",
     "Consumed",
     "ConsumedMapping",

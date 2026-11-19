@@ -309,6 +309,54 @@ class TestRunFileSubgraph:
             CONTRACTS[sup.RUN_FILE_SUBGRAPH].validate_input({"message": "find my resume"})
 
 
+# --- run_communications_subgraph ----------------------------------------------
+
+
+@covers_node(SUPERVISOR_GRAPH, sup.RUN_COMMUNICATIONS_SUBGRAPH)
+class TestRunCommunicationsSubgraph:
+    async def test_hands_the_request_over_and_records_only_the_result(self):
+        comms = RecordingJobSubgraph(result={"domain": "communications", "summary": None})
+        graph = supervisor(communications_subgraph=comms)
+        message = "summarize the email thread t-acme"
+        dag = graph._plan_work(
+            {"message": message, "route_decision": decided(RouteDomain.COMMUNICATIONS)}
+        )["task_dag"]
+
+        update = await graph._run_communications_subgraph({"message": message, "task_dag": dag})
+
+        assert update == {"result": {"domain": "communications", "summary": None}}
+        ((handed, state),) = comms.calls
+        assert handed == dag
+        assert TaskDAG.model_validate(dag).goal == f"communications: {message}"
+        # The plan is bounded, and its last step is a send that waits for approval.
+        assert [task["id"] for task in dag["tasks"]] == ["read", "analyze", "draft", "send"]
+        assert state["message"] == message
+
+    def test_a_communications_decision_routes_to_its_subgraph_after_planning(self):
+        graph = supervisor(communications_subgraph=RecordingJobSubgraph())
+
+        assert (
+            graph._route_after_planning({"route_decision": decided(RouteDomain.COMMUNICATIONS)})
+            == sup.RUN_COMMUNICATIONS_SUBGRAPH
+        )
+
+    def test_without_a_communications_subgraph_the_domain_is_clarified_not_planned(self):
+        graph = supervisor()
+
+        assert (
+            graph._route_after_classification(
+                {"route_decision": decided(RouteDomain.COMMUNICATIONS)}
+            )
+            == sup.CLARIFY
+        )
+        with pytest.raises(UnsupportedRouteDomain):
+            graph._plan_work({"route_decision": decided(RouteDomain.COMMUNICATIONS)})
+
+    def test_its_input_contract_requires_a_task_dag(self):
+        with pytest.raises(ValidationError):
+            CONTRACTS[sup.RUN_COMMUNICATIONS_SUBGRAPH].validate_input({"message": "triage"})
+
+
 # --- clarify -------------------------------------------------------------------
 
 

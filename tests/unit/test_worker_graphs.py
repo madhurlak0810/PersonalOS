@@ -51,6 +51,7 @@ from personalos.domain.errors import FailureClass, PortNotConfigured
 from personalos.domain.failures import classify, parse_stored_error
 from personalos.domain.models import ArtifactType, OutboxEventStatus
 from personalos.domain.workflow import (
+    COMMUNICATIONS_THREAD_NAMESPACE,
     FILE_TASK_THREAD_NAMESPACE,
     JOB_SEARCH_THREAD_NAMESPACE,
     SUPERVISOR_THREAD_NAMESPACE,
@@ -132,6 +133,7 @@ def test_the_default_factory_compiles_both_graphs_on_the_durable_checkpointer(fa
         SUPERVISOR_THREAD_NAMESPACE,
         JOB_SEARCH_THREAD_NAMESPACE,
         FILE_TASK_THREAD_NAMESPACE,
+        COMMUNICATIONS_THREAD_NAMESPACE,
     }
     for runner in graphs.runners.values():
         assert isinstance(runner.graph.checkpointer, SqlAlchemyCheckpointSaver)
@@ -177,6 +179,7 @@ def test_the_fake_provider_factory_binds_the_job_board_and_draft_writer(factory)
         SUPERVISOR_THREAD_NAMESPACE,
         JOB_SEARCH_THREAD_NAMESPACE,
         FILE_TASK_THREAD_NAMESPACE,
+        COMMUNICATIONS_THREAD_NAMESPACE,
     }
     assert JOB_BOARDS_PORT not in graphs.unbound_ports
     assert DRAFT_WRITER_PORT not in graphs.unbound_ports
@@ -216,8 +219,8 @@ def test_startup_logs_the_wired_graphs_and_the_unbound_ports(factory, caplog):
         log_wired_graphs(DEFAULT_FACTORY, graphs)
 
     assert (
-        "wired graphs from 'apps.worker.graphs:build_worker_graphs': file_task, job_search, supervisor"
-        in (caplog.text)
+        "wired graphs from 'apps.worker.graphs:build_worker_graphs': "
+        "communications, file_task, job_search, supervisor" in (caplog.text)
     )
     assert "unbound ports (steps that need them fail with a retryable PortNotConfigured): " in (
         caplog.text

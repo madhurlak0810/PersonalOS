@@ -65,7 +65,8 @@ class NotConfiguredJobBoard(_NotConfigured):
 
 
 class NotConfiguredMailbox(_NotConfigured):
-    """`RecruiterInbox`, `InboundMessageReader`, and the executor for `send_recruiter_message`."""
+    """`RecruiterInbox`, `InboundMessageReader`, the Communications `MailboxReader`, and the
+    executor for `send_recruiter_message`."""
 
     port = MAILBOX_PORT
     hint = "set GMAIL_RECRUITER_LABELS or GMAIL_RECRUITER_QUERIES and MCP_GOOGLE_ENABLED"
@@ -78,6 +79,16 @@ class NotConfiguredMailbox(_NotConfigured):
 
     async def execute(self, intent: Any, decision: Any) -> Any:
         raise self._refuse(f"execute {intent.kind.value}")
+
+    # The Communications subgraph's `MailboxReader`.
+    async def list_inbox(self, *, requested_by: str, limit: int = 0) -> Sequence[Any]:
+        raise self._refuse("list_inbox")
+
+    async def find_thread(self, *, sender_hint: str | None, requested_by: str) -> Any:
+        raise self._refuse("find_thread")
+
+    async def read_thread(self, thread_id: str, *, requested_by: str) -> Any:
+        raise self._refuse("read_thread")
 
 
 class NotConfiguredCalendar(_NotConfigured):

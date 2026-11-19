@@ -65,7 +65,15 @@ _DOMAIN_KEYWORDS: dict[RouteDomain, tuple[str, ...]] = {
         "organise my",
         "rename",
     ),
-    RouteDomain.COMMUNICATIONS: ("email", "message", "inbox", "reply", "thread"),
+    RouteDomain.COMMUNICATIONS: (
+        "email",
+        "message",
+        "inbox",
+        "reply",
+        "thread",
+        "triage",
+        "action item",
+    ),
     RouteDomain.CALENDAR: ("calendar", "schedule", "meeting", "availability", "event"),
 }
 

@@ -6,7 +6,7 @@ validated structure. `RouteDomain` is the closed set of domains a decision is
 allowed to name.
 
 The enum already reserves members for domains this build does not implement
-(Communications, Calendar) so that turning one on later is additive --
+(Calendar) so that turning one on later is additive --
 the structured-output schema a model is constrained to does not change shape,
 only `SUPPORTED_ROUTE_DOMAINS` grows. Until a domain is added there, any
 `RouteDecision` naming it is schema-valid but must still be rejected by
@@ -25,7 +25,7 @@ from personalos.domain.errors import ValidationFailed
 class RouteDomain(str, Enum):
     """The closed set of domains a routing decision may name.
 
-    `JOB` and `FILE` are supported; the others are reserved for later phases and are deliberately
+    `JOB`, `FILE` and `COMMUNICATIONS` are supported; the others are reserved for later phases and are deliberately
     declared now so the schema a model is constrained to never needs to
     change shape when one of them is turned on -- only `SUPPORTED_ROUTE_DOMAINS`
     does.
@@ -42,7 +42,9 @@ class RouteDomain(str, Enum):
 #: `ensure_supported_domain`. Enabling a reserved domain later means adding it
 #: here (and wiring its subgraph) -- not changing the enum or breaking callers
 #: that already validate against it.
-SUPPORTED_ROUTE_DOMAINS: frozenset[RouteDomain] = frozenset({RouteDomain.JOB, RouteDomain.FILE})
+SUPPORTED_ROUTE_DOMAINS: frozenset[RouteDomain] = frozenset(
+    {RouteDomain.JOB, RouteDomain.FILE, RouteDomain.COMMUNICATIONS}
+)
 
 #: Below this confidence, the Supervisor routes to clarification instead of
 #: guessing at a domain.

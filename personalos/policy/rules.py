@@ -556,6 +556,37 @@ def _job_search_node(node: str) -> str:
     return f"graph:job_search#{node}"
 
 
+#: The `requested_by` prefix every Communications subgraph node stamps.
+COMMUNICATIONS_REQUESTER_PREFIX = "graph:communications#"
+
+
+def _communications_node(node: str) -> str:
+    return f"{COMMUNICATIONS_REQUESTER_PREFIX}{node}"
+
+
+#: Which Communications subgraph node may call which tool. Triage lists and
+#: searches (headers and snippets, inside the mailbox scope); `load_thread`
+#: and `draft_reply` read message bodies; only `draft_reply` writes, and what
+#: it writes is a draft. No node of this subgraph may send: an approved reply is
+#: sent by the send executor as `GMAIL_SENDER`. Mail is read by these nodes
+#: and by nothing downstream of them, so no email -- whatever it says -- can
+#: put a tool in front of a node that lacks it. There is no tool here that
+#: fetches a URL or downloads an attachment.
+COMMUNICATIONS_NODE_TOOL_ALLOWLISTS: Mapping[str, frozenset[str]] = {
+    _communications_node("triage_inbox"): frozenset(
+        {"google.gmail_search", "google.gmail_list_labels"}
+    ),
+    _communications_node("load_thread"): frozenset(
+        {"google.gmail_search", "google.gmail_read_message", "google.gmail_list_labels"}
+    ),
+    # Reads the thread again (bodies are never checkpointed) and saves the
+    # reply to the Drafts folder. Cannot send.
+    _communications_node("draft_reply"): frozenset(
+        {"google.gmail_search", "google.gmail_read_message", "google.gmail_create_draft"}
+    ),
+}
+
+
 #: Which job-search node may call which Google tool, keyed by the
 #: `requested_by` the node stamps on its intents. Deliberately narrow:
 #: only the recruiter-response node and the send executor can send mail, and
@@ -610,6 +641,7 @@ GOOGLE_NODE_TOOL_ALLOWLISTS: Mapping[str, frozenset[str]] = {
             "google.calendar_delete_event",
         }
     ),
+    **COMMUNICATIONS_NODE_TOOL_ALLOWLISTS,
 }
 
 
@@ -623,8 +655,9 @@ def default_rules(
     Job search, job provider, file and Google tools are allowlisted; nothing
     else can run until it is added here deliberately. Google tools are further
     confined per node by `node_tool_allowlists` (default
-    `GOOGLE_NODE_TOOL_ALLOWLISTS`), and File subgraph nodes by
-    `FILE_TASK_NODE_TOOL_ALLOWLISTS`. Moves from a plan touching more than
+    `GOOGLE_NODE_TOOL_ALLOWLISTS`), File subgraph nodes by
+    `FILE_TASK_NODE_TOOL_ALLOWLISTS`, and Communications subgraph nodes by
+    `COMMUNICATIONS_NODE_TOOL_ALLOWLISTS` on every server. Moves from a plan touching more than
     `max_unattended_files` files are held for approval.
     """
     tool_arguments = {
@@ -644,6 +677,12 @@ def default_rules(
             FILE_TASK_NODE_TOOL_ALLOWLISTS,
             requester_prefix=FILE_TASK_REQUESTER_PREFIX,
             exclusive_tools=FILE_TASK_EXCLUSIVE_TOOLS,
+        ),
+        # Communications nodes reach their Gmail tools and nothing on any
+        # other server: no file, no job board, no calendar.
+        RequesterToolScopeRule(
+            COMMUNICATIONS_NODE_TOOL_ALLOWLISTS,
+            requester_prefix=COMMUNICATIONS_REQUESTER_PREFIX,
         ),
         MutatingToolRule(AUTO_APPROVED_MUTATING_TOOLS),
         DocumentOverwriteRule(),
@@ -668,6 +707,8 @@ __all__ = [
     "FILE_TASK_REQUESTER_PREFIX",
     "FILE_TASK_NODE_TOOL_ALLOWLISTS",
     "FILE_TASK_EXCLUSIVE_TOOLS",
+    "COMMUNICATIONS_REQUESTER_PREFIX",
+    "COMMUNICATIONS_NODE_TOOL_ALLOWLISTS",
     "DEFAULT_MAX_UNATTENDED_FILES",
     "JOB_SEARCH_TOOL_ARGUMENTS",
     "JOB_PROVIDER_TOOL_ARGUMENTS",

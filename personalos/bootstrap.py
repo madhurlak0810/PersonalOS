@@ -33,6 +33,7 @@ from personalos.domain.ownership import SYSTEM_ACCESS
 from personalos.domain.workflow import (
     WorkflowThread,
     application_transition_thread_id,
+    communications_thread_id,
     event_handler_thread_id,
     file_task_thread_id,
     job_search_thread_id,
@@ -54,6 +55,7 @@ from personalos.executor.document_reader import GatewayDocumentReader
 from personalos.executor.file_operations import GatewayFileOperations
 from personalos.executor.gmail_inbox import GmailRecruiterInbox
 from personalos.executor.gmail_outbound import GmailOutbound, GmailSendExecutor, GmailSentReconciler
+from personalos.executor.gmail_threads import GmailThreadReader
 from personalos.executor.google_calendar import CalendarChangeScanner, GoogleCalendar
 from personalos.executor.google_connect import GoogleConnectionReader, GoogleConnector
 from personalos.executor.job_discovery import GatewayJobProvider
@@ -62,6 +64,11 @@ from personalos.executor.tool_executor import (
     ProviderReconciler,
     ToolExecutor,
 )
+from personalos.graphs.communications import (
+    CommunicationsGraph,
+    CommunicationsSubgraphRunner,
+)
+from personalos.graphs.communications import requester as communications_requester
 from personalos.graphs.file_task import FileTaskGraph, FileTaskSubgraphRunner
 from personalos.graphs.job_search import JobSearchSubgraphRunner
 from personalos.mcp.adapter import Authorizer, MCPToolInvoker
@@ -180,6 +187,9 @@ EVENT_HANDLER_WORKFLOW = "event_handler"
 
 #: `workflows.name` for a File subgraph task run on its own (not under a Supervisor).
 FILE_TASK_WORKFLOW = "file_task"
+
+#: `workflows.name` for a Communications subgraph task run on its own.
+COMMUNICATIONS_WORKFLOW = "communications"
 
 
 def build_operation_store(session_factory=SessionLocal) -> OperationStore:
@@ -1095,6 +1105,111 @@ def build_reply_drafter(
     )
 
 
+def build_gmail_thread_reader(
+    gateway: ToolGateway | None = None,
+    *,
+    policy: PolicyEngine | None = None,
+    scope: MailboxScope | None = None,
+) -> GmailThreadReader:
+    """The Communications subgraph's mailbox: scoped inbox listings and thread reads.
+
+    Sees exactly what the Gmail inbox poller sees (`build_mailbox_scope`).
+    Raises `PortNotConfigured` while that scope is empty or the Google server
+    is off.
+    """
+    scope = scope if scope is not None else build_mailbox_scope()
+    if scope.is_empty:
+        raise PortNotConfigured(
+            "GMAIL_RECRUITER_LABELS and GMAIL_RECRUITER_QUERIES are both empty; name the "
+            "labels or Gmail searches the Communications subgraph may read",
+            port="mailbox",
+        )
+    if gateway is None:
+        if not settings.mcp_google_enabled:
+            raise PortNotConfigured(
+                "MCP_GOOGLE_ENABLED is off; connect Google (`personalos.cli auth google`) "
+                "and enable it",
+                port="mailbox",
+            )
+        gateway = build_tool_gateway(policy=policy or build_policy_engine())
+    return GmailThreadReader(gateway, scope=scope)
+
+
+def build_thread_reply_drafter(
+    session_factory: Callable[[], object] = SessionLocal,
+    *,
+    writer: Any = None,
+    gateway: ToolGateway | None = None,
+    policy: PolicyEngine | None = None,
+    workflow_id: UUID | None = None,
+    context_terms: Iterable[str] = (),
+):
+    """The Communications subgraph's `ReplyDrafter`.
+
+    Grounded in the candidate's evidence, checked by the Phase E validator,
+    kept as a `recruiter_reply` artifact version (when the thread is about an
+    application) under a recorded `WRITE_REVERSIBLE` decision, and saved as a
+    Gmail draft by the `draft_reply` node -- whose allowlist cannot send.
+    `writer` defaults to the configured thread-reply model, or the template.
+    """
+    from personalos.retrieval.thread_reply_drafting import ThreadReplyDrafter
+
+    drafting_node = communications_requester("draft_reply")
+    policy = policy or build_policy_engine(session_factory)
+    mailbox = None
+    if gateway is not None or settings.mcp_google_enabled:
+        mailbox = GmailOutbound(
+            gateway or build_tool_gateway(policy=policy), drafting_node=drafting_node
+        )
+    return ThreadReplyDrafter(
+        evidence=SqlEvidenceSource(session_factory),
+        writer=writer if writer is not None else build_model_gateway().thread_reply_writer(),
+        applications=SqlReplyApplicationLookup(session_factory),
+        store=PolicyGatedReplyDraftStore(
+            SqlReplyDraftStore(session_factory),
+            policy,
+            workflow_id=workflow_id,
+            requested_by=drafting_node,
+        ),
+        mailbox=mailbox,
+        context_terms=tuple(context_terms),
+    )
+
+
+def build_communications_graph(
+    *,
+    mailbox: Any,
+    action_executor: Any,
+    session_factory: Callable[[], object] = SessionLocal,
+    reply_drafter: Any = None,
+    recruiter_event_extractor: Any = None,
+    model_gateway: ModelGateway | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
+    event_emitter: Any = None,
+) -> CommunicationsGraph:
+    """The Communications subgraph over the configured triager, analyzer and drafter.
+
+    `action_executor` is the one the Job Search graph sends approved email
+    with (`ToolExecutor` around `GmailSendExecutor`), so a reply is journaled,
+    reconciled against the Sent folder and sent at most once. Recruiter mail is
+    recorded through `build_recruiter_event_store`, as the inbox poller's is.
+    """
+    models = model_gateway or build_model_gateway()
+    recruiter_events = build_recruiter_event_store(session_factory)
+    return CommunicationsGraph(
+        mailbox,
+        triager=models.message_triager(),
+        analyzer=models.thread_analyzer(),
+        reply_drafter=reply_drafter or build_thread_reply_drafter(session_factory),
+        action_executor=action_executor,
+        recruiter_event_extractor=recruiter_event_extractor or models.recruiter_event_extractor(),
+        application_directory=recruiter_events,
+        recruiter_event_recorder=recruiter_events,
+        event_emitter=event_emitter or build_event_emitter(session_factory),
+        checkpointer=checkpointer,
+    )
+
+
 def build_google_calendar(
     gateway: ToolGateway | None = None,
     *,
@@ -1444,6 +1559,49 @@ def build_file_task_subgraph_runner(
     )
 
 
+def register_communications_thread(
+    *,
+    user_id: UUID,
+    registry: WorkflowThreadRegistry,
+    workflow_id: UUID | None = None,
+    task_key: str | None = None,
+    actor_id: str = "system",
+    correlation_id: UUID | None = None,
+) -> WorkflowThread:
+    """Derive and register the stable thread a Communications task runs on.
+
+    Owned by the candidate (`user_id`), so the task, its send approval and
+    its audit trail are that actor's and no other's.
+    """
+    thread_id = communications_thread_id(user_id, task_key)
+    existing = registry.resolve(thread_id)
+    if existing is not None:
+        return existing
+    return registry.register(
+        thread_id=thread_id,
+        workflow_name=COMMUNICATIONS_WORKFLOW,
+        workflow_id=workflow_id,
+        user_id=user_id,
+        actor_id=actor_id,
+        correlation_id=correlation_id,
+    )
+
+
+def build_communications_subgraph_runner(
+    compiled_subgraph,
+    *,
+    user_id: UUID,
+    thread: WorkflowThread,
+) -> CommunicationsSubgraphRunner:
+    """Bind the Supervisor's `CommunicationsSubgraphRunner` port to a registered thread."""
+    return CommunicationsSubgraphRunner(
+        compiled_subgraph,
+        user_id=user_id,
+        thread_id=thread.thread_id,
+        workflow_id=thread.workflow_id,
+    )
+
+
 def register_supervisor_thread(
     *,
     conversation_key: str,
@@ -1608,6 +1766,12 @@ __all__ = [
     "register_file_task_thread",
     "build_file_task_subgraph_runner",
     "FILE_TASK_WORKFLOW",
+    "COMMUNICATIONS_WORKFLOW",
+    "build_gmail_thread_reader",
+    "build_thread_reply_drafter",
+    "build_communications_graph",
+    "register_communications_thread",
+    "build_communications_subgraph_runner",
     "build_google_mcp_server",
     "connected_google_credential",
     "google_authorizer",
