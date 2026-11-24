@@ -33,6 +33,7 @@ from uuid import UUID
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from personalos.domain.applications import RequestedTransition, TransitionOutcome
+from personalos.domain.calendar import CalendarChangePlan, CalendarRequest, TimeSlot
 from personalos.domain.checkpoints import PendingCheckpoint
 from personalos.domain.communications import (
     CommunicationsRequest,
@@ -76,6 +77,7 @@ from personalos.domain.recruiter_events import (
 )
 from personalos.domain.routing import RouteDecision
 from personalos.domain.tasks import TaskDAG
+from personalos.graphs import calendar as cal
 from personalos.graphs import communications as csg
 from personalos.graphs import file_task as fsg
 from personalos.graphs import job_search as jsg
@@ -86,6 +88,7 @@ SUPERVISOR_GRAPH = "supervisor"
 JOB_SEARCH_GRAPH = "job_search"
 FILE_TASK_GRAPH = "file_task"
 COMMUNICATIONS_GRAPH = "communications"
+CALENDAR_GRAPH = "calendar"
 
 
 def _must_be_empty(value: Any) -> Any:
@@ -192,6 +195,15 @@ class RunCommunicationsSubgraphInput(NodeInput):
 
 
 class RunCommunicationsSubgraphOutput(NodeOutput):
+    result: dict[str, Any]
+
+
+class RunCalendarSubgraphInput(NodeInput):
+    task_dag: TaskDAG
+    message: str = ""
+
+
+class RunCalendarSubgraphOutput(NodeOutput):
     result: dict[str, Any]
 
 
@@ -672,6 +684,80 @@ class ExecuteSendOutput(NodeOutput):
     approval_refusals: list[ApprovalRefusal]
 
 
+# ---------------------------------------------------------------------------
+# Calendar subgraph
+# ---------------------------------------------------------------------------
+
+
+class CalendarParseRequestInput(NodeInput):
+    request: str = ""
+    application_id: UUID | None = None
+    event_id: str | None = None
+
+
+class CalendarParseRequestOutput(NodeOutput):
+    calendar_request: CalendarRequest
+    errors: list[str]
+    #: Cleared: a previous run's writes on the thread are settled.
+    pending_actions: Consumed
+    change_plan: None = None
+
+
+class CheckAvailabilityInput(NodeInput):
+    calendar_request: CalendarRequest
+    errors: list[str] = []
+
+
+class CheckAvailabilityOutput(NodeOutput):
+    availability: list[TimeSlot]
+    proposals: list[TimeSlot]
+    errors: list[str]
+
+
+class PlanCalendarChangeInput(NodeInput):
+    calendar_request: CalendarRequest
+    user_id: UUID
+    errors: list[str] = []
+
+
+class PlanCalendarChangeOutput(NodeOutput):
+    change_plan: CalendarChangePlan | None
+    pending_actions: list[ActionIntent]
+    errors: list[str]
+    approval_stage: Literal["calendar_change"] | None = None
+
+
+class RequestCalendarApprovalInput(NodeInput):
+    pending_actions: list[ActionIntent] = Field(min_length=1)
+    approval_requests: list[ApprovalRequest] = []
+
+
+class RequestCalendarApprovalOutput(NodeOutput):
+    approval_requests: list[ApprovalRequest]
+
+
+class CalendarApprovalCheckpointInput(NodeInput):
+    pending_actions: list[ActionIntent] = []
+    approval_requests: list[ApprovalRequest] = []
+    approvals: list[ApprovalDecision] = []
+
+
+class CalendarApprovalCheckpointOutput(NodeOutput):
+    approvals: list[ApprovalDecision] | None = None
+
+
+class ExecuteCalendarChangesInput(NodeInput):
+    pending_actions: list[ActionIntent] = []
+    approval_requests: list[ApprovalRequest] = []
+    approvals: list[ApprovalDecision] = []
+    approval_refusals: list[ApprovalRefusal] = []
+
+
+class ExecuteCalendarChangesOutput(NodeOutput):
+    action_receipts: list[ActionReceipt]
+    approval_refusals: list[ApprovalRefusal]
+
+
 def _contract(
     graph: str, node: str, method: str, input: type[NodeInput], output: type[NodeOutput]
 ) -> tuple[tuple[str, str], NodeContract]:
@@ -717,7 +803,55 @@ NODE_CONTRACTS: Mapping[tuple[str, str], NodeContract] = dict(
             RunCommunicationsSubgraphInput,
             RunCommunicationsSubgraphOutput,
         ),
+        _contract(
+            SUPERVISOR_GRAPH,
+            sup.RUN_CALENDAR_SUBGRAPH,
+            "_run_calendar_subgraph",
+            RunCalendarSubgraphInput,
+            RunCalendarSubgraphOutput,
+        ),
         _contract(SUPERVISOR_GRAPH, sup.CLARIFY, "_clarify", ClarifyInput, ClarifyOutput),
+        *(
+            _contract(CALENDAR_GRAPH, node, method, node_input, node_output)
+            for node, method, node_input, node_output in (
+                (
+                    cal.PARSE_REQUEST,
+                    "parse_request",
+                    CalendarParseRequestInput,
+                    CalendarParseRequestOutput,
+                ),
+                (
+                    cal.CHECK_AVAILABILITY,
+                    "check_availability",
+                    CheckAvailabilityInput,
+                    CheckAvailabilityOutput,
+                ),
+                (
+                    cal.PLAN_CALENDAR_CHANGE,
+                    "plan_calendar_change",
+                    PlanCalendarChangeInput,
+                    PlanCalendarChangeOutput,
+                ),
+                (
+                    cal.REQUEST_CALENDAR_APPROVAL,
+                    "request_calendar_approval",
+                    RequestCalendarApprovalInput,
+                    RequestCalendarApprovalOutput,
+                ),
+                (
+                    cal.CALENDAR_APPROVAL_CHECKPOINT,
+                    "calendar_approval_checkpoint",
+                    CalendarApprovalCheckpointInput,
+                    CalendarApprovalCheckpointOutput,
+                ),
+                (
+                    cal.EXECUTE_CALENDAR_CHANGES,
+                    "execute_calendar_changes",
+                    ExecuteCalendarChangesInput,
+                    ExecuteCalendarChangesOutput,
+                ),
+            )
+        ),
         *(
             _contract(COMMUNICATIONS_GRAPH, node, method, node_input, node_output)
             for node, method, node_input, node_output in (
@@ -964,6 +1098,7 @@ __all__ = [
     "SUPERVISOR_GRAPH",
     "FILE_TASK_GRAPH",
     "COMMUNICATIONS_GRAPH",
+    "CALENDAR_GRAPH",
     "JOB_SEARCH_GRAPH",
     "Consumed",
     "ConsumedMapping",

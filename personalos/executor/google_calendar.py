@@ -208,6 +208,11 @@ class GoogleCalendar:
             busy=bool(raw.get("busy", True)),
             etag=raw.get("etag"),
             time_zone=zone_name or None,
+            attendees=tuple(
+                str(a["email"])
+                for a in raw.get("attendees") or ()
+                if isinstance(a, dict) and a.get("email")
+            ),
         )
 
     async def _list(self, **filters: Any) -> list[CalendarEvent]:
@@ -351,23 +356,26 @@ class GoogleCalendar:
         properties: dict[str, str],
         authority: WriteAuthority,
         time_zone: str | None = None,
+        attendees: Sequence[str] = (),
     ) -> CalendarEvent:
-        """Insert an event, stamped with `properties`, and return it as stored."""
+        """Insert an event, stamped with `properties`, and return it as stored.
+
+        Attendees are added without being notified (the tool sends no updates).
+        """
         zone = time_zone or self.time_zone
         _zone(zone)
-        answer = await self._write(
-            "calendar_create_event",
-            {
-                "calendar_id": self.calendar_id,
-                "summary": title[:998] or "Event",
-                "start": as_utc(starts_at).isoformat(),
-                "end": as_utc(ends_at).isoformat(),
-                "description": description[:8000],
-                "private_properties": dict(properties),
-                "time_zone": zone,
-            },
-            authority,
-        )
+        arguments: dict[str, Any] = {
+            "calendar_id": self.calendar_id,
+            "summary": title[:998] or "Event",
+            "start": as_utc(starts_at).isoformat(),
+            "end": as_utc(ends_at).isoformat(),
+            "description": description[:8000],
+            "private_properties": dict(properties),
+            "time_zone": zone,
+        }
+        if attendees:
+            arguments["attendees"] = list(attendees)[:50]
+        answer = await self._write("calendar_create_event", arguments, authority)
         return self._written(answer)
 
     async def update_event(

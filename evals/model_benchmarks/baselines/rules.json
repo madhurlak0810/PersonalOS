@@ -28,21 +28,21 @@
       "thread_reply_drafter": "rules"
     },
     "config_sha256": "afa267e893d0ade89043e04609ab729505cb751cba7079697bd27c001cc2b22e",
-    "dataset_sha256": "f7eeb77e6d22b7165c0cf32e0189511200d02d7f604b5411ddc6fce653f7b112",
-    "git_commit": "4fac9d0",
-    "started_at": "2026-11-19T07:59:44+00:00",
-    "duration_s": 1.43
+    "dataset_sha256": "60d5810f26c8d9caefd224748f851baaaddbb6063259054eac03ec648ddb9eb7",
+    "git_commit": "8f8d756",
+    "started_at": "2026-11-24T01:23:16+00:00",
+    "duration_s": 1.41
   },
   "suites": {
     "routing": {
       "metrics": {
         "route_accuracy": 1.0,
-        "domain_accuracy": 0.9412,
-        "pass_rate": 0.95
+        "domain_accuracy": 1.0,
+        "pass_rate": 1.0
       },
       "counts": {
-        "pass": 19,
-        "fail": 1,
+        "pass": 23,
+        "fail": 0,
         "error": 0,
         "skipped": 0,
         "review": 0
@@ -257,30 +257,28 @@
     {
       "suite": "routing",
       "case_id": "route-07",
-      "status": "fail",
+      "status": "pass",
       "expected": {
-        "route": "clarify",
+        "route": "calendar",
         "domain": "calendar"
       },
       "actual": {
-        "route": "clarify",
-        "domain": "job",
-        "confidence": 0.2
+        "route": "calendar",
+        "domain": "calendar",
+        "confidence": 0.85
       },
-      "failures": [
-        "domain 'job', expected 'calendar'"
-      ]
+      "failures": []
     },
     {
       "suite": "routing",
       "case_id": "route-08",
       "status": "pass",
       "expected": {
-        "route": "clarify",
+        "route": "calendar",
         "domain": "calendar"
       },
       "actual": {
-        "route": "clarify",
+        "route": "calendar",
         "domain": "calendar",
         "confidence": 0.85
       },
@@ -459,6 +457,51 @@
       "actual": {
         "route": "communications",
         "domain": "communications",
+        "confidence": 0.85
+      },
+      "failures": []
+    },
+    {
+      "suite": "routing",
+      "case_id": "route-21",
+      "status": "pass",
+      "expected": {
+        "route": "calendar",
+        "domain": "calendar"
+      },
+      "actual": {
+        "route": "calendar",
+        "domain": "calendar",
+        "confidence": 0.85
+      },
+      "failures": []
+    },
+    {
+      "suite": "routing",
+      "case_id": "route-22",
+      "status": "pass",
+      "expected": {
+        "route": "calendar",
+        "domain": "calendar"
+      },
+      "actual": {
+        "route": "calendar",
+        "domain": "calendar",
+        "confidence": 0.85
+      },
+      "failures": []
+    },
+    {
+      "suite": "routing",
+      "case_id": "route-23",
+      "status": "pass",
+      "expected": {
+        "route": "calendar",
+        "domain": "calendar"
+      },
+      "actual": {
+        "route": "calendar",
+        "domain": "calendar",
         "confidence": 0.85
       },
       "failures": []

@@ -44,6 +44,7 @@ from typing import Any
 from apps.worker.health_monitor import http_get_ok
 from apps.worker.main import (
     WorkerGraphs,
+    WorkflowScopedCalendarSubgraph,
     WorkflowScopedCommunicationsSubgraph,
     WorkflowScopedFileSubgraph,
     WorkflowScopedJobSubgraph,
@@ -64,6 +65,8 @@ from personalos.bootstrap import (
     build_application_transitioner,
     build_artifact_packet_builder,
     build_calendar_action_executor,
+    build_calendar_graph,
+    build_calendar_reader,
     build_communications_graph,
     build_document_overwrite_executor,
     build_durable_checkpointer,
@@ -101,6 +104,7 @@ from personalos.domain.job_search import (
     JobSearchContractError,
 )
 from personalos.domain.workflow import (
+    CALENDAR_THREAD_NAMESPACE,
     COMMUNICATIONS_THREAD_NAMESPACE,
     FILE_TASK_THREAD_NAMESPACE,
     JOB_SEARCH_THREAD_NAMESPACE,
@@ -313,13 +317,38 @@ def _communications_mailbox(session_factory: Callable[[], Any]) -> Any:
         return NotConfiguredMailbox()
 
 
+def _calendar_graph(
+    session_factory: Callable[[], Any], ports: Mapping[str, Any], checkpointer: Any
+) -> Any:
+    """The compiled Calendar subgraph, or `None` while the calendar is not configured.
+
+    Not wired at all without `CALENDAR_TIME_ZONE` and the Google server: a
+    calendar question then gets the Supervisor's clarification rather than an
+    answer in some zone nobody chose.
+    """
+    try:
+        reader = build_calendar_reader(policy=build_policy_engine(session_factory))
+        return build_calendar_graph(
+            calendar=reader,
+            action_executor=ports["action_executor"],
+            session_factory=session_factory,
+            application_directory=ports.get("application_directory"),
+            checkpointer=checkpointer,
+        ).build()
+    except PortNotConfigured as exc:
+        logger.info("the Calendar subgraph is not wired: %s", exc)
+        return None
+
+
 def build_worker_graphs(
     session_factory: Callable[[], Any],
     *,
     overrides: Mapping[str, Any] | None = None,
     lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
 ) -> WorkerGraphs:
-    """The Supervisor and the Job Search, File and Communications subgraphs, durable.
+    """The Supervisor and the Job Search, File, Communications and Calendar subgraphs, durable.
+
+    The Calendar subgraph is wired only once the calendar is configured.
 
     `overrides` replaces `JobSearchGraph` arguments by name; an argument it
     replaces no longer counts towards `unbound_ports`. `lease_ttl_seconds`
@@ -347,11 +376,15 @@ def build_worker_graphs(
         recruiter_event_extractor=ports.get("recruiter_event_extractor"),
         checkpointer=checkpointer,
     ).build()
+    calendar = _calendar_graph(session_factory, ports, checkpointer)
     supervisor = SupervisorGraph(
         build_model_gateway().intent_classifier(),
         WorkflowScopedJobSubgraph(job_search, registry, prepare_application=True),
         file_subgraph=WorkflowScopedFileSubgraph(file_task, registry),
         communications_subgraph=WorkflowScopedCommunicationsSubgraph(communications, registry),
+        calendar_subgraph=(
+            WorkflowScopedCalendarSubgraph(calendar, registry) if calendar is not None else None
+        ),
         checkpointer=checkpointer,
     ).build()
 
@@ -370,6 +403,7 @@ def build_worker_graphs(
             JOB_SEARCH_THREAD_NAMESPACE: runner(job_search),
             FILE_TASK_THREAD_NAMESPACE: runner(file_task),
             COMMUNICATIONS_THREAD_NAMESPACE: runner(communications),
+            **({CALENDAR_THREAD_NAMESPACE: runner(calendar)} if calendar is not None else {}),
         },
         unbound_ports=tuple(sorted({stub.port for group in stubs.values() for stub in group})),
         health_checks=tuple(health_checks),

@@ -587,13 +587,48 @@ COMMUNICATIONS_NODE_TOOL_ALLOWLISTS: Mapping[str, frozenset[str]] = {
 }
 
 
+#: The `requested_by` prefix every Calendar subgraph identity stamps.
+CALENDAR_REQUESTER_PREFIX = "graph:calendar#"
+
+
+def _calendar_node(node: str) -> str:
+    return f"{CALENDAR_REQUESTER_PREFIX}{node}"
+
+
+#: Which Calendar subgraph identity may call which tool. Its reader
+#: (`read_calendar`: free/busy, listings, single events) reads and nothing
+#: else. Writes are made by the calendar executor under the `requested_by` of
+#: the node that proposed them, `plan_calendar_change`, which may create,
+#: move and delete -- each `WRITE_EXTERNAL` or `DESTRUCTIVE`, so each still
+#: needs the approval it carries, and `CalendarActionExecutor` refuses any
+#: event without the PersonalOS stamp. No other node of this subgraph reaches
+#: a tool, and none reaches Gmail, files or job boards.
+CALENDAR_NODE_TOOL_ALLOWLISTS: Mapping[str, frozenset[str]] = {
+    _calendar_node("read_calendar"): frozenset(
+        {
+            "google.calendar_list_events",
+            "google.calendar_get_event",
+            "google.calendar_freebusy",
+        }
+    ),
+    _calendar_node("plan_calendar_change"): frozenset(
+        {
+            "google.calendar_create_event",
+            "google.calendar_update_event",
+            "google.calendar_delete_event",
+        }
+    ),
+}
+
+
 #: Which job-search node may call which Google tool, keyed by the
 #: `requested_by` the node stamps on its intents. Deliberately narrow:
 #: only the recruiter-response node and the send executor can send mail, and
-#: only interview scheduling touches the calendar. That node may delete an
+#: only interview scheduling and the Calendar subgraph
+#: (`CALENDAR_NODE_TOOL_ALLOWLISTS`) touch the calendar. Both may delete an
 #: event: a cancellation is DESTRUCTIVE, so it is held for approval like every
-#: write, and `CalendarActionExecutor` refuses to cancel an event this system
-#: did not stamp.
+#: write, and `CalendarActionExecutor` refuses to change or cancel an event this
+#: system did not stamp.
 GOOGLE_NODE_TOOL_ALLOWLISTS: Mapping[str, frozenset[str]] = {
     # Not a graph node: the worker sweep that watches the mailbox
     # (`personalos.executor.gmail_inbox`). It learns which messages arrived
@@ -642,6 +677,7 @@ GOOGLE_NODE_TOOL_ALLOWLISTS: Mapping[str, frozenset[str]] = {
         }
     ),
     **COMMUNICATIONS_NODE_TOOL_ALLOWLISTS,
+    **CALENDAR_NODE_TOOL_ALLOWLISTS,
 }
 
 
@@ -656,8 +692,9 @@ def default_rules(
     else can run until it is added here deliberately. Google tools are further
     confined per node by `node_tool_allowlists` (default
     `GOOGLE_NODE_TOOL_ALLOWLISTS`), File subgraph nodes by
-    `FILE_TASK_NODE_TOOL_ALLOWLISTS`, and Communications subgraph nodes by
-    `COMMUNICATIONS_NODE_TOOL_ALLOWLISTS` on every server. Moves from a plan touching more than
+    `FILE_TASK_NODE_TOOL_ALLOWLISTS`, and Communications and Calendar subgraph
+    nodes by `COMMUNICATIONS_NODE_TOOL_ALLOWLISTS` and
+    `CALENDAR_NODE_TOOL_ALLOWLISTS` on every server. Moves from a plan touching more than
     `max_unattended_files` files are held for approval.
     """
     tool_arguments = {
@@ -684,6 +721,12 @@ def default_rules(
             COMMUNICATIONS_NODE_TOOL_ALLOWLISTS,
             requester_prefix=COMMUNICATIONS_REQUESTER_PREFIX,
         ),
+        # Calendar subgraph identities reach their calendar tools and nothing
+        # on any other server.
+        RequesterToolScopeRule(
+            CALENDAR_NODE_TOOL_ALLOWLISTS,
+            requester_prefix=CALENDAR_REQUESTER_PREFIX,
+        ),
         MutatingToolRule(AUTO_APPROVED_MUTATING_TOOLS),
         DocumentOverwriteRule(),
         DestructiveFileRule(),
@@ -709,6 +752,8 @@ __all__ = [
     "FILE_TASK_EXCLUSIVE_TOOLS",
     "COMMUNICATIONS_REQUESTER_PREFIX",
     "COMMUNICATIONS_NODE_TOOL_ALLOWLISTS",
+    "CALENDAR_REQUESTER_PREFIX",
+    "CALENDAR_NODE_TOOL_ALLOWLISTS",
     "DEFAULT_MAX_UNATTENDED_FILES",
     "JOB_SEARCH_TOOL_ARGUMENTS",
     "JOB_PROVIDER_TOOL_ARGUMENTS",

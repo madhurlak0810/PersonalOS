@@ -625,8 +625,10 @@ Google tools are also allowlisted per node. `NodeToolAllowlistRule` checks the
 intent's `requested_by` (for example `graph:job_search#plan_interview_schedule`)
 against `GOOGLE_NODE_TOOL_ALLOWLISTS`. A node that is not listed for a tool is
 denied, even when the intent carries a matching human approval. By default only
-`handle_recruiter_response` may send mail, only `plan_interview_schedule` may
-write to the calendar, and no node may delete an event.
+`handle_recruiter_response` may send mail, and only `plan_interview_schedule`
+and the Calendar subgraph's `plan_calendar_change` may write to (or delete
+from) the calendar -- every such write still needs its approval, and the
+calendar executor refuses any event without the PersonalOS stamp.
 
 ### 4. Tools and Executor (`personalos/tools/`, `personalos/executor/`)
 
@@ -738,9 +740,10 @@ python -m personalos.cli mcp-google               # serve the Google MCP server 
 classifies the request into a typed `RouteDecision`, and either asks for
 clarification or plans a bounded `TaskDAG` and hands it to a domain subgraph. It
 holds no tool and no repository: `IntentClassifier`, `JobSubgraphRunner`,
-`FileSubgraphRunner` and `CommunicationsSubgraphRunner` are injected ports.
-`JOB`, `FILE` and `COMMUNICATIONS` are routable; `CALENDAR` is reserved and
-asked back.
+`FileSubgraphRunner`, `CommunicationsSubgraphRunner` and
+`CalendarSubgraphRunner` are injected ports. All four domains (`JOB`, `FILE`,
+`COMMUNICATIONS`, `CALENDAR`) are routable; a Supervisor built without one of
+the optional subgraphs asks that domain back.
 
 **`file_task.py` — the File subgraph** (K1). Finds, reads, summarizes and
 organizes job-search documents (resumes, cover letters, application
@@ -801,6 +804,40 @@ Tests: `tests/adversarial/test_communications_boundaries.py` (routing and a
 typed summary, no send without approval, a hash mismatch after an edit, the
 claim validator, prompt injection, recruiter events exactly once, scope and
 actors) and `tests/unit/test_communications_nodes.py`.
+
+**`calendar.py` — the Calendar subgraph** (K3). Answers availability
+questions, proposes interview times from free/busy, and creates, moves or
+cancels events, over the J4 `GoogleCalendar` reader and the J4 calendar
+executor. It adds no provider code.
+
+```
+parse_request -> check_availability -> END                (when am I free, propose times)
+parse_request -> plan_calendar_change -> END              (conflict, not found, not ours, ...)
+              -> plan_calendar_change -> request_calendar_approval
+              -> calendar_approval_checkpoint (interrupts)
+              -> execute_calendar_changes -> END          (create, move, cancel)
+```
+
+| Property | How it holds |
+| --- | --- |
+| Permission classes | Free/busy, listings and single-event reads are `READ_EXTERNAL` and need no approval; they are made as `graph:calendar#read_calendar`, whose allowlist cannot write. Creates and moves are `WRITE_EXTERNAL` and cancels `DESTRUCTIVE`, all `require_approval`, made by the calendar executor as `graph:calendar#plan_calendar_change` after `execute_calendar_changes` has checked the approval (`CALENDAR_NODE_TOOL_ALLOWLISTS`; a `RequesterToolScopeRule` keeps these identities off every other server). |
+| Explicit time zones | `parse_request` reads relative phrases ("next Tuesday afternoon", "Thursday at 2pm") against `CALENDAR_TIME_ZONE` and a pinned clock (`domain/calendar.py:resolve_when`). A DST gap moves the time forward, a DST overlap takes the first occurrence, and each reading -- which day "next Tuesday" was, which offset applied -- is recorded as a note. Availability windows are drawn per local date, so the working day stays 09:00-17:00 local across a DST change. The server's zone is never read. |
+| The approval shows the event | Each write's payload, hashed into its `ApprovalRequest`, has the title, attendees, start and end in UTC and local time with the IANA zone, the phrase the time was read from and the resolution notes; a move adds the previous times and a `changes` list. `ActionPreview` shows the attendees and a body diff of old and new times. An edited payload fails the hash at `execute_calendar_changes`. |
+| Exactly once | Each create carries a stable idempotency key (`calendar_create_key`), stamped by the executor in `extendedProperties.private`. Under `ToolExecutor`, an attempt with no recorded outcome is reconciled against the calendar by that stamp before any retry (`CalendarReconciler`), so a lost response becomes the found event, not a second insert. |
+| Never someone else's event | A move or cancel of an event without the PersonalOS stamp ends as `CalendarOutcome.NOT_MANAGED` with no write proposed, and `CalendarActionExecutor` refuses it again if one were ever approved. An unstamped event is planned around, never moved. |
+| Typed conflicts | A slot taken by an event (or by free/busy alone, e.g. another calendar) ends as `CalendarOutcome.CONFLICT` with a `CalendarConflict`: the requested slot, what is in the way, and up to three free alternatives of the same length. No intent is proposed and the run does not interrupt. Every outcome is a `CalendarOutcome`, never free text. |
+| Applications and prep blocks | A create or move of an interview linked to one of the candidate's applications (by id, or by company name) runs through the Phase E planner (`plan_interview_schedule`), so the interview and its prep blocks are proposed in one approval and a changed interview time moves its prep blocks with it. Cancelling an interview cancels its upcoming prep blocks. An application that is not the candidate's (`ApplicationDirectory`) is refused. |
+| Actors and limits | A Supervisor run's task runs on a `calendar` thread of the same workflow, owned by the conversation's candidate, so its approvals are that actor's. It is reached through `POST /v1/chat`, so the Phase L per-actor rate and active-workflow limits apply; approvals go through the rate-limited decision route. One run proposes at most `MAX_WRITES_PER_RUN` writes and `MAX_PROPOSALS` slots. |
+
+Wiring: `bootstrap.build_calendar_reader` and `build_calendar_graph`. The worker
+wires the subgraph only when `CALENDAR_TIME_ZONE` is set and the Google server
+is enabled; until then a calendar request is asked back.
+
+Tests: `tests/adversarial/test_calendar_boundaries.py` (availability from fake
+free/busy in the configured zone, no create without approval, exactly one event
+after a lost response, double-booking as a typed conflict, outside events never
+changed, DST boundaries, prep-block reconciliation, scoping, routing),
+`tests/unit/test_calendar_nodes.py` and `tests/unit/test_calendar_time.py`.
 
 **`job_search.py` — the Job Search subgraph**:
 
@@ -1177,9 +1214,10 @@ paging, the poller's allowlist, the handler).
 
 ### 15. Conditional Follow-ups and Interview Scheduling
 
-Calendar and task behaviour lives in the Job Search graph, not in a Calendar
-subgraph: a follow-up, an interview and its prep blocks all exist to move one
-application forward.
+Interview scheduling driven by recruiter mail and calendar changes lives in
+the Job Search graph: a follow-up, an interview and its prep blocks all exist
+to move one application forward. A person asking for a change directly goes
+to the Calendar subgraph (K3), which reuses the same planner.
 
 #### Follow-ups that cancel themselves
 
@@ -1684,7 +1722,7 @@ These fill in the ports the worker reports as unbound at startup.
 | --- | --- | --- |
 | K1 | File subgraph and planner | Done (`personalos/graphs/file_task.py`; see [Orchestration Graphs](#11-orchestration-graphs-personalosgraphs)). `RouteDomain.FILE` routes to it, and every read, write, move and delete goes through the sandboxed files MCP |
 | K2 | Communications subgraph | Done (`personalos/graphs/communications.py`; see [Orchestration Graphs](#11-orchestration-graphs-personalosgraphs)). `RouteDomain.COMMUNICATIONS` routes to it. Triage, thread summaries, action items and reply drafts run over the J2/J3/J5 Gmail pieces, and a send needs approval |
-| K3 | Calendar subgraph | Availability queries and event create or move, with approval before write |
+| K3 | Calendar subgraph | Done (`personalos/graphs/calendar.py`; see [Orchestration Graphs](#11-orchestration-graphs-personalosgraphs)). `RouteDomain.CALENDAR` routes to it. Availability and proposed times from free/busy in the configured zone; creates, moves and cancels need approval, are made exactly once, and never touch an event without the PersonalOS stamp |
 | K4 | Cross-domain task DAGs | The Supervisor plans a DAG that spans two domains |
 | K5 | Classifier and evals for new domains | Each domain has routing golden cases, and the quality report covers them |
 
@@ -1766,7 +1804,7 @@ Settings come from the environment, then `.env` in the working directory.
 | `GOOGLE_OAUTH_PUBLISHING_STATUS` | `testing` | `testing` records Google connections as expiring after 7 days, as Google does for unverified apps. |
 | `MCP_GOOGLE_ENABLED` | `false` | Registers the Gmail and Calendar MCP server. Connect an account first. |
 | `GOOGLE_ACCOUNT` | empty | Which connected Google account the tools act on. If empty, the most recently connected active account is used. |
-| `CALENDAR_TIME_ZONE` | empty | The IANA zone calendar events are written in. All-day events are also read in this zone. Interview scheduling on Google Calendar stays unbound until it is set. The server's local zone is never used. |
+| `CALENDAR_TIME_ZONE` | empty | The IANA zone calendar events are written in, and the zone the Calendar subgraph reads phrases like "next Tuesday afternoon" in. All-day events are also read in this zone. Interview scheduling on Google Calendar and the Calendar subgraph stay unbound until it is set. The server's local zone is never used. |
 | `CALENDAR_ID` | `primary` | The calendar that interview events and prep blocks go on. |
 | `GMAIL_RECRUITER_LABELS` / `GMAIL_RECRUITER_QUERIES` | `[]` / `[]` | JSON lists: the Gmail labels and searches recruiter mail is found by. The only mail PersonalOS looks at; both empty leaves the inbox off. |
 | `GMAIL_POLL_INTERVAL_SECONDS` | `300` | How often the worker reads the Gmail history. |

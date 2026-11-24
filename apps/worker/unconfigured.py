@@ -102,6 +102,10 @@ class NotConfiguredCalendar(_NotConfigured):
     async def events_for_application(self, user_id: UUID, application_id: UUID) -> Sequence[Any]:
         raise self._refuse("events_for_application")
 
+    # The Calendar subgraph's free/busy reads.
+    async def free_busy(self, start: datetime, end: datetime, **kwargs: Any) -> Any:
+        raise self._refuse("free_busy")
+
     async def find_by_property(self, name: str, value: str) -> Sequence[Any]:
         raise self._refuse("find_by_property")
 
