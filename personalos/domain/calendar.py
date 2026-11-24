@@ -619,7 +619,8 @@ _TITLED_RE = re.compile(
 _CANCEL_RE = re.compile(r"\b(cancel|delete|remove|drop)\b")
 _MOVE_RE = re.compile(r"\b(move|reschedule|push|shift|bring forward|change the time)\b")
 _CREATE_RE = re.compile(
-    r"\b(schedule|book|add|create|set up|put|block( out)?|arrange)\b(?!.*\bavailab)"
+    r"\b(schedule|book|add|create|set up|put|block( out)?|arrange|hold(?! off)|reserve|pencil in)\b"
+    r"(?!.*\bavailab)"
 )
 _PROPOSE_RE = re.compile(
     r"\b(propose|suggest|offer|options for|find (?:a |some )?(?:time|slot)s?|"

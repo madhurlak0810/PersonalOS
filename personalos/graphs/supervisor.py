@@ -28,7 +28,9 @@ Two things keep this graph honest to that boundary:
   `personalos.persistence.checkpointer`.
 """
 
+import hashlib
 import logging
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, TypedDict
 
 from langchain_core.runnables import RunnableConfig
@@ -38,6 +40,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
+from langgraph.types import interrupt
 
 from personalos.domain.routing import (
     DEFAULT_CONFIDENCE_THRESHOLD,
@@ -48,8 +51,30 @@ from personalos.domain.routing import (
     ensure_supported_domain,
     route_decision_from_mapping,
 )
+from personalos.domain.task_plan import (
+    DEFAULT_MAX_PLAN_STEPS,
+    MAX_PLAN_STEPS_CEILING,
+    PlanAuditEntry,
+    StepRecord,
+    TaskPlan,
+    awaiting_steps,
+    dangling_entries,
+    initial_records,
+    plan_compensations,
+    plan_finished_entry,
+    plan_proposed_entries,
+    plan_rejected_entry,
+    plan_view,
+    ready_steps,
+    settle_records,
+    step_audit_entries,
+    step_inputs,
+    with_steps,
+)
 from personalos.domain.tasks import InvalidTaskDAG, TaskDAG, TaskNode
+from personalos.graphs.plan_steps import PlanStepRunner, StepContext
 from personalos.models.routing import IntentClassifier
+from personalos.models.task_planning import ResilientTaskPlanner
 from personalos.observability.tracing import traced_node
 
 logger = logging.getLogger(__name__)
@@ -78,6 +103,19 @@ RUN_FILE_SUBGRAPH = "run_file_subgraph"
 RUN_COMMUNICATIONS_SUBGRAPH = "run_communications_subgraph"
 RUN_CALENDAR_SUBGRAPH = "run_calendar_subgraph"
 CLARIFY = "clarify"
+#: The cross-domain plan path (K4), present only when a planner and step
+#: runners are wired.
+PLAN_TASK = "plan_task"
+PUBLISH_PLAN = "publish_plan"
+RUN_PLAN_STEP = "run_plan_step"
+AWAIT_PLAN_STEPS = "await_plan_steps"
+COLLECT_PLAN_STEPS = "collect_plan_steps"
+SETTLE_PLAN = "settle_plan"
+
+#: The interrupt `stage` a Supervisor parked on its plan's steps raises. Not an
+#: approval: it carries no `requests`, so the approval queue lists nothing for
+#: it -- the approvals are the steps' own, on the steps' own threads.
+STAGE_PLAN_STEPS = "plan_steps"
 
 #: What each routable domain is called in a clarification.
 _DOMAIN_NAMES: dict[RouteDomain, str] = {
@@ -139,6 +177,22 @@ class CalendarSubgraphRunner(Protocol):
         ...
 
 
+class PlanAuditRecorder(Protocol):
+    """Port the Supervisor records a plan's story through, into the audit trail.
+
+    `entries` are recorded in order, and an entry whose `key` was recorded
+    before is not recorded again, so a re-run step cannot duplicate the trail.
+    """
+
+    def record(
+        self,
+        entries: Sequence[PlanAuditEntry],
+        *,
+        workflow_id: str | None,
+        actor_id: str,
+    ) -> None: ...
+
+
 class SupervisorState(TypedDict, total=False):
     """Graph state carried between Supervisor nodes.
 
@@ -154,6 +208,15 @@ class SupervisorState(TypedDict, total=False):
     task_dag: dict[str, Any] | None
     clarification: str | None
     result: dict[str, Any] | None
+    #: The plan path: `single` (one domain, the routing path), `plan`, or `invalid`.
+    plan_kind: str | None
+    #: The validated `TaskPlan`, and one `StepRecord` per step, by step id.
+    task_plan: dict[str, Any] | None
+    plan_records: dict[str, dict[str, Any]]
+    #: Why the plan was refused, every attempt.
+    plan_errors: list[str]
+    #: Audit entry keys already recorded, so nothing is recorded twice.
+    plan_audit_keys: list[str]
 
 
 def _build_job_search_dag(message: str) -> TaskDAG:
@@ -231,6 +294,59 @@ def _build_calendar_dag(message: str) -> TaskDAG:
     )
 
 
+def _request_key(message: str) -> str:
+    """A stable name for a request whose plan was refused: there is no plan id to use."""
+    return f"plan-request-{hashlib.sha256(message.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _load_plan(state: SupervisorState) -> TaskPlan:
+    raw = state.get("task_plan")
+    if not raw:  # pragma: no cover - the plan path only runs with a plan
+        raise InvalidTaskDAG("a plan step was reached without a validated plan")
+    return TaskPlan.model_validate(raw)
+
+
+def _load_records(state: SupervisorState) -> dict[str, StepRecord]:
+    return {
+        step_id: StepRecord.model_validate(raw)
+        for step_id, raw in (state.get("plan_records") or {}).items()
+    }
+
+
+def _dump_records(records: Mapping[str, StepRecord]) -> dict[str, dict[str, Any]]:
+    return {step_id: record.model_dump(mode="json") for step_id, record in records.items()}
+
+
+def _plan_as_dag(plan: TaskPlan) -> TaskDAG:
+    """The plan as the bounded `TaskDAG` every Supervisor run records."""
+    return TaskDAG(
+        goal=plan.goal,
+        tasks=tuple(
+            TaskNode(
+                id=step.id,
+                name=f"[{step.domain.value}] {step.instruction}"[:200],
+                depends_on=step.depends_on,
+            )
+            for step in plan.steps
+        ),
+    )
+
+
+def _plan_result(
+    plan: TaskPlan,
+    records: Mapping[str, StepRecord],
+    dangling: Sequence[Any] = (),
+) -> dict[str, Any]:
+    """What the Supervisor records of a plan: every step and where it stands. No content."""
+    view = plan_view(plan, records, dangling)
+    return {
+        "goal": plan.goal,
+        "domain": "plan",
+        "plan": view.model_dump(mode="json"),
+        "awaiting_approval": bool(view.awaiting_approval),
+    }
+
+
 class SupervisorGraph:
     """Builds and compiles the top-level Supervisor LangGraph graph."""
 
@@ -245,6 +361,10 @@ class SupervisorGraph:
         confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
         checkpointer: BaseCheckpointSaver | None = None,
         store: BaseStore | None = None,
+        task_planner: ResilientTaskPlanner | None = None,
+        step_runners: Mapping[RouteDomain, PlanStepRunner] | None = None,
+        plan_audit: PlanAuditRecorder | None = None,
+        max_plan_steps: int = DEFAULT_MAX_PLAN_STEPS,
     ):
         """Initialize with the ports this graph delegates to.
 
@@ -291,6 +411,22 @@ class SupervisorGraph:
         self.checkpointer = checkpointer or InMemorySaver()
         self.store = store or InMemoryStore()
 
+        if not 1 <= max_plan_steps <= MAX_PLAN_STEPS_CEILING:
+            raise ValueError(f"max_plan_steps must be between 1 and {MAX_PLAN_STEPS_CEILING}")
+        self.task_planner = task_planner
+        self.step_runners: dict[RouteDomain, PlanStepRunner] = {
+            domain: runner
+            for domain, runner in (step_runners or {}).items()
+            if domain in SUPPORTED_ROUTE_DOMAINS and runner is not None
+        }
+        self.plan_audit = plan_audit
+        self.max_plan_steps = max_plan_steps
+
+    @property
+    def plans_enabled(self) -> bool:
+        """True when a request may be planned across domains: a planner, and two domains to run."""
+        return self.task_planner is not None and len(self.step_runners) >= 2
+
     def build(self) -> CompiledStateGraph:
         """Assemble and compile the graph with this instance's checkpointer and store."""
         graph = StateGraph(SupervisorState)
@@ -323,7 +459,10 @@ class SupervisorGraph:
         graph.add_node(CLARIFY, traced_node(CLARIFY, self._clarify, graph="supervisor"))
 
         graph.add_edge(START, LOAD_CONTEXT)
-        graph.add_edge(LOAD_CONTEXT, CLASSIFY_INTENT)
+        if self.plans_enabled:
+            self._add_plan_nodes(graph)
+        else:
+            graph.add_edge(LOAD_CONTEXT, CLASSIFY_INTENT)
         graph.add_conditional_edges(
             CLASSIFY_INTENT,
             self._route_after_classification,
@@ -475,8 +614,275 @@ class SupervisorGraph:
         result = await self.calendar_subgraph(task_dag, state)
         return {"result": result}
 
+    # ------------------------------------------------------------------
+    # The cross-domain plan path
+    # ------------------------------------------------------------------
+    #
+    #   load_context -> plan_task -> classify_intent ...           (one domain: as before)
+    #                   plan_task -> clarify                       (no valid plan after repairs)
+    #                   plan_task -> publish_plan -> run_plan_step (one step per superstep)
+    #                                   run_plan_step -> await_plan_steps (interrupts)
+    #                                   -> collect_plan_steps -> ...
+    #                                   -> settle_plan -> run_plan_step (a proposed release)
+    #                                   -> settle_plan -> END
+    #
+    # Each step is its own superstep, so its record is checkpointed before the
+    # next one starts: a crash after a step resumes at the step after it.
+
+    def _add_plan_nodes(self, graph: StateGraph) -> None:
+        for name, node in (
+            (PLAN_TASK, self._plan_task),
+            (PUBLISH_PLAN, self._publish_plan),
+            (RUN_PLAN_STEP, self._run_plan_step),
+            (AWAIT_PLAN_STEPS, self._await_plan_steps),
+            (COLLECT_PLAN_STEPS, self._collect_plan_steps),
+            (SETTLE_PLAN, self._settle_plan),
+        ):
+            graph.add_node(name, traced_node(name, node, graph="supervisor"))
+        graph.add_edge(LOAD_CONTEXT, PLAN_TASK)
+        graph.add_conditional_edges(
+            PLAN_TASK,
+            self._route_after_plan_task,
+            {CLASSIFY_INTENT: CLASSIFY_INTENT, PUBLISH_PLAN: PUBLISH_PLAN, CLARIFY: CLARIFY},
+        )
+        graph.add_edge(PUBLISH_PLAN, RUN_PLAN_STEP)
+        routes = {
+            RUN_PLAN_STEP: RUN_PLAN_STEP,
+            AWAIT_PLAN_STEPS: AWAIT_PLAN_STEPS,
+            SETTLE_PLAN: SETTLE_PLAN,
+        }
+        graph.add_conditional_edges(RUN_PLAN_STEP, self._route_plan, routes)
+        graph.add_edge(AWAIT_PLAN_STEPS, COLLECT_PLAN_STEPS)
+        graph.add_conditional_edges(COLLECT_PLAN_STEPS, self._route_plan, routes)
+        graph.add_conditional_edges(
+            SETTLE_PLAN, self._route_after_settle, {RUN_PLAN_STEP: RUN_PLAN_STEP, END: END}
+        )
+
+    async def _plan_task(self, state: SupervisorState, config: RunnableConfig) -> dict[str, Any]:
+        """Plan the request across domains, or say it is one domain's work.
+
+        A plan that is still invalid after the planner's repair attempts is
+        not run, trimmed or guessed at: the person is asked to clarify, and
+        the refusal is recorded.
+        """
+        assert self.task_planner is not None
+        message = state.get("message", "")
+        try:
+            outcome = await self.task_planner.plan(
+                message, domains=self.step_runners.keys(), max_steps=self.max_plan_steps
+            )
+        except Exception:
+            logger.exception("task planning failed; routing the request to one domain")
+            return {"plan_kind": "single"}
+        if outcome.kind == "single":
+            return {"plan_kind": "single"}
+        if outcome.kind == "invalid" or outcome.plan is None:
+            logger.info("plan refused after %d attempt(s): %s", outcome.attempts, outcome.errors)
+            keys = self._audit(
+                state,
+                config,
+                [plan_rejected_entry(_request_key(message), outcome.errors)],
+            )
+            return {
+                "plan_kind": "invalid",
+                "plan_errors": list(outcome.errors),
+                "plan_audit_keys": keys,
+            }
+        plan = outcome.plan
+        return {
+            "plan_kind": "plan",
+            "task_plan": plan.model_dump(mode="json"),
+            "plan_records": _dump_records(initial_records(plan)),
+            "plan_errors": list(outcome.errors),
+        }
+
+    def _route_after_plan_task(self, state: SupervisorState) -> str:
+        kind = state.get("plan_kind")
+        if kind == "plan":
+            return PUBLISH_PLAN
+        if kind == "invalid":
+            return CLARIFY
+        return CLASSIFY_INTENT
+
+    def _publish_plan(self, state: SupervisorState, config: RunnableConfig) -> dict[str, Any]:
+        """Record the whole plan, and return it, before any step runs.
+
+        No step with an external effect has run yet, and none can without its
+        own approval; the plan the person is shown is the plan that runs.
+        """
+        plan = _load_plan(state)
+        records = _load_records(state)
+        keys = self._audit(state, config, plan_proposed_entries(plan))
+        return {
+            "task_dag": _plan_as_dag(plan).model_dump(mode="json"),
+            "result": _plan_result(plan, records),
+            "plan_audit_keys": keys,
+        }
+
+    async def _run_plan_step(
+        self, state: SupervisorState, config: RunnableConfig
+    ) -> dict[str, Any]:
+        """Run the next ready step through its domain's subgraph. One step, then a checkpoint."""
+        plan = _load_plan(state)
+        records = settle_records(plan, _load_records(state))
+        ready = ready_steps(plan, records)
+        if ready:
+            step = plan.step(ready[0])
+            runner = self.step_runners.get(step.domain)
+            if runner is None:  # pragma: no cover - validation only admits wired domains
+                raise UnsupportedRouteDomain(f"no step runner is wired for '{step.domain.value}'")
+            logger.info("running plan step '%s' (%s)", step.id, step.domain.value)
+            record = await runner.run(
+                step, step_inputs(plan, step, records), self._step_context(plan, config)
+            )
+            records[step.id] = record
+            records = settle_records(plan, records)
+        return self._plan_update(state, config, plan, records)
+
+    def _await_plan_steps(self, state: SupervisorState) -> dict[str, Any]:
+        """Park until a step's approval has been answered and its thread has moved.
+
+        The interrupt carries no approval request -- each step's own request
+        is on its own thread -- only which steps this run is waiting on.
+        """
+        plan = _load_plan(state)
+        records = _load_records(state)
+        interrupt(
+            {
+                "workflow": "supervisor",
+                "stage": STAGE_PLAN_STEPS,
+                "plan_id": plan.plan_id,
+                "waiting_on": [
+                    {"step_id": step_id, "thread_id": records[step_id].thread_id}
+                    for step_id in awaiting_steps(plan, records)
+                ],
+            }
+        )
+        return {}
+
+    async def _collect_plan_steps(
+        self, state: SupervisorState, config: RunnableConfig
+    ) -> dict[str, Any]:
+        """Read where each parked step stands now. Runs nothing."""
+        plan = _load_plan(state)
+        records = _load_records(state)
+        context = self._step_context(plan, config)
+        for step_id in awaiting_steps(plan, records):
+            step = plan.step(step_id)
+            runner = self.step_runners[step.domain]
+            records[step_id] = await runner.poll(step, records[step_id], context)
+        return self._plan_update(state, config, plan, settle_records(plan, records))
+
+    def _route_plan(self, state: SupervisorState) -> str:
+        plan = _load_plan(state)
+        records = settle_records(plan, _load_records(state))
+        if ready_steps(plan, records):
+            return RUN_PLAN_STEP
+        if awaiting_steps(plan, records):
+            return AWAIT_PLAN_STEPS
+        return SETTLE_PLAN
+
+    def _settle_plan(self, state: SupervisorState, config: RunnableConfig) -> dict[str, Any]:
+        """Every step has settled. Flag what dangles, propose its release, or finish.
+
+        A release is a step like any other: it runs through its domain's
+        subgraph and waits for its own approval. Nothing is removed here.
+        """
+        plan = _load_plan(state)
+        records = settle_records(plan, _load_records(state))
+        dangling, releases = plan_compensations(plan, records)
+        entries = dangling_entries(plan, dangling)
+        if releases:
+            plan = with_steps(plan, releases)
+            for release in releases:
+                records[release.id] = StepRecord(step_id=release.id)
+        update = self._plan_update(state, config, plan, records, extra_entries=entries)
+        if not releases:
+            view = plan_view(plan, records, dangling)
+            keys = self._audit(
+                {**state, "plan_audit_keys": update["plan_audit_keys"]},
+                config,
+                [plan_finished_entry(plan, view)],
+            )
+            update["plan_audit_keys"] = keys
+        return update
+
+    def _route_after_settle(self, state: SupervisorState) -> str:
+        plan = _load_plan(state)
+        records = settle_records(plan, _load_records(state))
+        return RUN_PLAN_STEP if ready_steps(plan, records) else END
+
+    # --- helpers ------------------------------------------------------------
+
+    def _step_context(self, plan: TaskPlan, config: RunnableConfig) -> StepContext:
+        configurable = config.get("configurable") or {}
+        return StepContext(
+            plan_id=plan.plan_id,
+            parent_thread_id=str(configurable.get("thread_id") or "supervisor"),
+            workflow_id=str(configurable["workflow_id"]) if configurable.get("workflow_id") else None,
+            actor_id=configurable.get("actor_id") or _DEFAULT_ACTOR_ID,
+            correlation_id=(
+                str(configurable["correlation_id"]) if configurable.get("correlation_id") else None
+            ),
+        )
+
+    def _plan_update(
+        self,
+        state: SupervisorState,
+        config: RunnableConfig,
+        plan: TaskPlan,
+        records: dict[str, StepRecord],
+        *,
+        extra_entries: Sequence[PlanAuditEntry] = (),
+    ) -> dict[str, Any]:
+        entries = [
+            entry
+            for step in plan.steps
+            if step.id in records
+            for entry in step_audit_entries(plan, step, records[step.id])
+        ]
+        keys = self._audit(state, config, [*entries, *extra_entries])
+        dangling, _ = plan_compensations(plan, records)
+        return {
+            "task_plan": plan.model_dump(mode="json"),
+            "plan_records": _dump_records(records),
+            "plan_audit_keys": keys,
+            "result": _plan_result(plan, records, dangling),
+        }
+
+    def _audit(
+        self,
+        state: SupervisorState,
+        config: RunnableConfig,
+        entries: Sequence[PlanAuditEntry],
+    ) -> list[str]:
+        """Record the entries not yet recorded; the keys recorded so far."""
+        keys = list(state.get("plan_audit_keys") or [])
+        seen = set(keys)
+        fresh = [entry for entry in entries if entry.key not in seen]
+        if not fresh:
+            return keys
+        if self.plan_audit is not None:
+            configurable = config.get("configurable") or {}
+            workflow_id = configurable.get("workflow_id")
+            self.plan_audit.record(
+                fresh,
+                workflow_id=str(workflow_id) if workflow_id else None,
+                actor_id=configurable.get("actor_id") or _DEFAULT_ACTOR_ID,
+            )
+        return [*keys, *(entry.key for entry in fresh)]
+
     def _clarify(self, state: SupervisorState) -> dict[str, Any]:
         """Ask for clarification instead of guessing at a low-confidence or unsupported route."""
+        if state.get("plan_kind") == "invalid":
+            issues = state.get("plan_errors") or []
+            shown = "; ".join(issues[-3:]) if issues else "the steps did not fit together"
+            return {
+                "clarification": (
+                    "I couldn't turn that into a plan I can run safely "
+                    f"({shown}). Could you split it up, or say which part to do first?"
+                )
+            }
         raw_decision = state.get("route_decision")
         decision = route_decision_from_mapping(raw_decision) if raw_decision else None
 
@@ -499,6 +905,14 @@ class SupervisorGraph:
 
 
 __all__ = [
+    "AWAIT_PLAN_STEPS",
+    "COLLECT_PLAN_STEPS",
+    "PLAN_TASK",
+    "PUBLISH_PLAN",
+    "RUN_PLAN_STEP",
+    "SETTLE_PLAN",
+    "STAGE_PLAN_STEPS",
+    "PlanAuditRecorder",
     "SupervisorGraph",
     "SupervisorState",
     "JobSubgraphRunner",

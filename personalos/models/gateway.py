@@ -54,6 +54,7 @@ from personalos.domain.job_search import (
     SearchProfile,
     SemanticAssessment,
 )
+from personalos.domain.task_plan import DEFAULT_PLAN_REPAIR_ATTEMPTS
 from personalos.models.artifact_drafting import (
     DRAFT_WRITER_SYSTEM_PROMPT,
     StructuredLLMDraftWriter,
@@ -107,6 +108,8 @@ from personalos.models.routing import (
     _render_system_prompt,
 )
 from personalos.models.structured import REPAIR_PROMPT
+from personalos.models.task_planning import PLANNER_SYSTEM_PROMPT as TASK_PLANNER_SYSTEM_PROMPT
+from personalos.models.task_planning import ResilientTaskPlanner, StructuredLLMTaskPlanner
 
 Provider = Literal["rules", "anthropic", "ollama", "openai_compatible"]
 
@@ -139,6 +142,10 @@ class ModelRole(str, Enum):
     #: Writes the body of a reply to any in-scope thread. Like
     #: `REPLY_DRAFTER`: no tool, no recipient, checked against the evidence.
     THREAD_REPLY_DRAFTER = "thread_reply_drafter"
+    #: Splits a request that spans domains into a `TaskPlan` of steps. Sees the
+    #: request only. Its drafts are validated and repaired; one that still will
+    #: not validate is asked back, never run.
+    TASK_PLANNER = "task_planner"
 
 
 class ModelSpec(BaseModel):
@@ -204,6 +211,7 @@ def _system_prompts() -> dict[ModelRole, str]:
         ModelRole.MESSAGE_TRIAGER: TRIAGER_SYSTEM_PROMPT,
         ModelRole.THREAD_ANALYZER: ANALYZER_SYSTEM_PROMPT,
         ModelRole.THREAD_REPLY_DRAFTER: THREAD_REPLY_SYSTEM_PROMPT,
+        ModelRole.TASK_PLANNER: TASK_PLANNER_SYSTEM_PROMPT,
     }
 
 
@@ -370,6 +378,18 @@ class ModelGateway:
         if spec.provider == "rules":
             return ResilientFilePlanner(primary=None)
         return ResilientFilePlanner(StructuredLLMFilePlanner(self._chat_model(spec), **kwargs))
+
+    def task_planner(
+        self, *, repair_attempts: int = DEFAULT_PLAN_REPAIR_ATTEMPTS
+    ) -> ResilientTaskPlanner:
+        """The Supervisor's cross-domain planner: the model, repaired; or the rules alone."""
+        spec, kwargs = self._spec(ModelRole.TASK_PLANNER)
+        if spec.provider == "rules":
+            return ResilientTaskPlanner(repair_attempts=repair_attempts)
+        return ResilientTaskPlanner(
+            StructuredLLMTaskPlanner(self._chat_model(spec), **kwargs),
+            repair_attempts=repair_attempts,
+        )
 
     def document_summarizer(
         self,

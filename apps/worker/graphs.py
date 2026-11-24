@@ -49,6 +49,7 @@ from apps.worker.main import (
     WorkflowScopedFileSubgraph,
     WorkflowScopedJobSubgraph,
 )
+from apps.worker.plan_steps import WorkflowScopedStepThreads
 from apps.worker.unconfigured import (
     NotConfiguredApplicationStore,
     NotConfiguredApplicationSubmitter,
@@ -103,6 +104,7 @@ from personalos.domain.job_search import (
     ApprovalDecision,
     JobSearchContractError,
 )
+from personalos.domain.routing import RouteDomain
 from personalos.domain.workflow import (
     CALENDAR_THREAD_NAMESPACE,
     COMMUNICATIONS_THREAD_NAMESPACE,
@@ -115,11 +117,13 @@ from personalos.graphs.job_search import (
     InterruptOnlyApprovalGate,
     JobSearchGraph,
 )
+from personalos.graphs.plan_steps import SubgraphStepRunner
 from personalos.graphs.supervisor import SupervisorGraph
 from personalos.mcp.health import MCPServerHealthCheck
 from personalos.mcp.manager import get_mcp_manager
 from personalos.models.embedding import PrivacyTier
 from personalos.persistence.leases import DEFAULT_LEASE_TTL_SECONDS
+from personalos.persistence.plan_audit import SqlPlanAuditRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -348,7 +352,10 @@ def build_worker_graphs(
 ) -> WorkerGraphs:
     """The Supervisor and the Job Search, File, Communications and Calendar subgraphs, durable.
 
-    The Calendar subgraph is wired only once the calendar is configured.
+    The Calendar subgraph is wired only once the calendar is configured. The
+    Supervisor can also plan a request across domains (K4): each step runs
+    through one of these subgraphs on a step thread of the same workflow, and
+    the plan is recorded in the audit trail.
 
     `overrides` replaces `JobSearchGraph` arguments by name; an argument it
     replaces no longer counts towards `unbound_ports`. `lease_ttl_seconds`
@@ -377,6 +384,13 @@ def build_worker_graphs(
         checkpointer=checkpointer,
     ).build()
     calendar = _calendar_graph(session_factory, ports, checkpointer)
+    step_threads = WorkflowScopedStepThreads(registry)
+    step_graphs = {
+        RouteDomain.JOB: job_search,
+        RouteDomain.FILE: file_task,
+        RouteDomain.COMMUNICATIONS: communications,
+        RouteDomain.CALENDAR: calendar,
+    }
     supervisor = SupervisorGraph(
         build_model_gateway().intent_classifier(),
         WorkflowScopedJobSubgraph(job_search, registry, prepare_application=True),
@@ -386,6 +400,16 @@ def build_worker_graphs(
             WorkflowScopedCalendarSubgraph(calendar, registry) if calendar is not None else None
         ),
         checkpointer=checkpointer,
+        task_planner=build_model_gateway().task_planner(
+            repair_attempts=settings.supervisor_plan_repair_attempts
+        ),
+        step_runners={
+            domain: SubgraphStepRunner(graph, domain, binder=step_threads)
+            for domain, graph in step_graphs.items()
+            if graph is not None
+        },
+        plan_audit=SqlPlanAuditRecorder(session_factory),
+        max_plan_steps=settings.supervisor_max_plan_steps,
     ).build()
 
     owner = f"worker:{socket.gethostname()}:{os.getpid()}"

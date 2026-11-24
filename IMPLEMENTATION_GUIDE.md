@@ -745,6 +745,41 @@ holds no tool and no repository: `IntentClassifier`, `JobSubgraphRunner`,
 `COMMUNICATIONS`, `CALENDAR`) are routable; a Supervisor built without one of
 the optional subgraphs asks that domain back.
 
+**Cross-domain plans** (K4; `domain/task_plan.py`, `models/task_planning.py`,
+`graphs/plan_steps.py`). A request that spans domains, such as "reply to the
+recruiter and hold Thursday at 2pm", is planned as a `TaskPlan`: a DAG of
+steps, each with a domain, an instruction, inputs, outputs and dependencies.
+Each step runs through that domain's existing subgraph. A request that is one
+domain's work takes the routing path above, unchanged.
+
+```
+load_context -> plan_task -> classify_intent -> ...            (one domain)
+                plan_task -> clarify                           (no valid plan after repairs)
+                plan_task -> publish_plan -> run_plan_step     (one step per superstep)
+                             run_plan_step -> await_plan_steps (interrupts)
+                             -> collect_plan_steps -> ...
+                             -> settle_plan -> run_plan_step   (a proposed release)
+                             -> settle_plan -> END
+```
+
+| Property | How it holds |
+| --- | --- |
+| Validated before it runs | `validate_task_plan` checks the planner's draft against `PLAN_DRAFT_JSON_SCHEMA`, then checks the step cap (`SUPERVISOR_MAX_PLAN_STEPS`), cycles, unknown or unwired domains, unknown dependencies, and that each input is a declared output of a dependency, of a kind the consuming domain accepts. It reports every issue at once. `ResilientTaskPlanner` hands an invalid draft back with those issues up to `SUPERVISOR_PLAN_REPAIR_ATTEMPTS` times. If the draft is still invalid, the request is asked back and the refusal is audited (`plan.rejected`). A plan is never trimmed or guessed into shape. A planner that raises falls back to `RuleBasedTaskPlanner`. |
+| One workflow, a thread per step | Each step runs on its own thread in the domain's namespace, keyed by the workflow, the plan and the step (`step_task_key`). The worker registers it under the Supervisor run's workflow, owned by the conversation's candidate (`apps/worker/plan_steps.py:WorkflowScopedStepThreads`). Actor scoping applies to every step, and the active-workflow cap counts the plan once. |
+| Durable, step by step | Each step is its own superstep, so its `StepRecord` is checkpointed before the next step starts. After a crash, the plan resumes at the step that was running. A re-run step reads its thread rather than starting the subgraph again, so a finished step's side effect is never repeated. |
+| One approval per effect | A plan has no approval of its own. Each step's subgraph raises its own `ApprovalRequest`, bound to its own `action_hash`, on the step's thread, and `GET /v1/approvals` lists them separately. The Supervisor parks on an interrupt with stage `plan_steps`, which carries no requests. After the worker runs a command that moves a step thread, `PlanStepResumer` queues one resume of the plan, deduplicated on the plan's checkpoint. |
+| Refusals stop dependents only | A rejected, expired or failed step skips its dependents, or pauses them when the step asks for `on_upstream_failure: pause`. Independent steps keep running. The plan view (`result.plan`) lists the steps that ran, are awaiting approval, were rejected, failed, were skipped, paused or are still pending. |
+| Partial failure | When a plan ends incomplete, `plan_compensations` lists every effect that did happen. A calendar step marked `propose_release` gets a release step, which proposes cancelling the event it made and waits for its own approval. Every other effect, such as a sent email, is left as is and listed. Nothing is removed without approval. |
+| By reference | Steps pass `StepRef`s (a kind and a bare id, such as a thread id or an event id), never content. The ids are mapped onto the subgraph's structured fields, and each step's instruction is the person's own words for that step. A ref read from outside, such as a mail thread, is flagged `untrusted`. The planner sees only the request. |
+| Shown and audited first | `publish_plan` records the whole plan (`plan.proposed`, `plan.step.planned`) and returns it as `result.plan` and `task_dag` before any step runs. Each step then records `plan.step.intent`, `plan.step.policy`, `plan.step.approval.<state>` and `plan.step.receipt`, in order, followed by `plan.effect.dangling` and `plan.finished` (`persistence/plan_audit.py`, with strictly increasing timestamps, recorded once per key). |
+
+Tests: `tests/adversarial/test_cross_domain_plans.py` (two-domain DAG with
+separate approvals, cyclic and over-length plans refused, a crash after step 1
+resumes at step 2, a rejected reply leaves the hold dangling with a proposed
+release, the audit order), `tests/graph_scenarios/test_cross_domain_plan_worker.py`
+(the same through the approval queue and the worker) and
+`tests/unit/test_task_plan.py`.
+
 **`file_task.py` — the File subgraph** (K1). Finds, reads, summarizes and
 organizes job-search documents (resumes, cover letters, application
 documents):
@@ -1723,7 +1758,7 @@ These fill in the ports the worker reports as unbound at startup.
 | K1 | File subgraph and planner | Done (`personalos/graphs/file_task.py`; see [Orchestration Graphs](#11-orchestration-graphs-personalosgraphs)). `RouteDomain.FILE` routes to it, and every read, write, move and delete goes through the sandboxed files MCP |
 | K2 | Communications subgraph | Done (`personalos/graphs/communications.py`; see [Orchestration Graphs](#11-orchestration-graphs-personalosgraphs)). `RouteDomain.COMMUNICATIONS` routes to it. Triage, thread summaries, action items and reply drafts run over the J2/J3/J5 Gmail pieces, and a send needs approval |
 | K3 | Calendar subgraph | Done (`personalos/graphs/calendar.py`; see [Orchestration Graphs](#11-orchestration-graphs-personalosgraphs)). `RouteDomain.CALENDAR` routes to it. Availability and proposed times from free/busy in the configured zone; creates, moves and cancels need approval, are made exactly once, and never touch an event without the PersonalOS stamp |
-| K4 | Cross-domain task DAGs | The Supervisor plans a DAG that spans two domains |
+| K4 | Cross-domain task DAGs | Done (`personalos/domain/task_plan.py`, `personalos/graphs/plan_steps.py`; see [Orchestration Graphs](#11-orchestration-graphs-personalosgraphs)). The Supervisor plans a validated DAG of steps across domains. Each step runs through its subgraph on a thread of the one workflow, with its own approval, durable resumption, dependent-only cancellation, and a proposed release for a dangling calendar hold |
 | K5 | Classifier and evals for new domains | Each domain has routing golden cases, and the quality report covers them |
 
 ### Phase L: API security
@@ -1789,6 +1824,7 @@ Settings come from the environment, then `.env` in the working directory.
 | `API_LIMITS_ENABLED` | `true` | Per-actor rates, concurrency caps and the auth throttle. Every `API_RATE_*`, `API_MAX_*` and `API_AUTH_*` limit setting is in [docs/LIMITS.md](docs/LIMITS.md). |
 | `FILES_ALLOWED_ROOTS` | `[]` | JSON list of absolute paths. If empty, every file read and write is refused. |
 | `FILES_MAX_UNATTENDED` | `3` | The most files a File subgraph plan may change before it needs approval. Deletes and overwrites always do. |
+| `SUPERVISOR_MAX_PLAN_STEPS` / `SUPERVISOR_PLAN_REPAIR_ATTEMPTS` | `6` / `2` | The most steps a cross-domain plan may have (1-12), and how many times an invalid plan is handed back to the planner before the request is asked back. |
 | `WORKER_GRAPHS` | `apps.worker.graphs:build_worker_graphs` | `module:callable`. Empty runs no graphs. |
 | `GREENHOUSE_BOARDS` | `{}` | JSON, board token to employer name. |
 | `LEVER_SITES` | `{}` | JSON, Lever site (`jobs.lever.co/<site>`; prefix `eu/` for EU-hosted) to employer name. |
