@@ -73,20 +73,28 @@ class EchoCommunicationsSubgraph(EchoJobSubgraph):
     """Records the communications tasks the Supervisor hands off."""
 
 
+class EchoCalendarSubgraph(EchoJobSubgraph):
+    """Records the calendar tasks the Supervisor hands off."""
+
+
 def supervisor(
     gateway: ModelGateway,
-) -> tuple[Any, EchoJobSubgraph, EchoFileSubgraph, EchoCommunicationsSubgraph]:
+) -> tuple[
+    Any, EchoJobSubgraph, EchoFileSubgraph, EchoCommunicationsSubgraph, EchoCalendarSubgraph
+]:
     """The compiled Supervisor over the gateway's intent classifier."""
     job_subgraph = EchoJobSubgraph()
     file_subgraph = EchoFileSubgraph()
     communications_subgraph = EchoCommunicationsSubgraph()
+    calendar_subgraph = EchoCalendarSubgraph()
     graph = SupervisorGraph(
         gateway.intent_classifier(),
         job_subgraph,
         file_subgraph=file_subgraph,
         communications_subgraph=communications_subgraph,
+        calendar_subgraph=calendar_subgraph,
     ).build()
-    return graph, job_subgraph, file_subgraph, communications_subgraph
+    return graph, job_subgraph, file_subgraph, communications_subgraph, calendar_subgraph
 
 
 @dataclass

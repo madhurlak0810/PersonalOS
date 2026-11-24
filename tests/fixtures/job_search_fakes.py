@@ -22,7 +22,7 @@ from personalos.domain.checkpoints import (
     ConditionKind,
     PendingCheckpoint,
 )
-from personalos.domain.interview_scheduling import PROP_APPLICATION_ID, CalendarEvent
+from personalos.domain.interview_scheduling import PROP_APPLICATION_ID, BusyInterval, CalendarEvent
 from personalos.domain.job_search import (
     ActionIntent,
     ActionKind,
@@ -722,6 +722,11 @@ class FakeCalendar:
         #: The `WriteAuthority` each write was made under, in order.
         self.authorities: list[Any] = []
         self.lose_next_create_response = False
+        #: Busy time free/busy reports that no listed event explains -- a
+        #: booking on another calendar.
+        self.extra_busy: list[BusyInterval] = []
+        #: Attendees each created event was given, by event id.
+        self.attendees: dict[str, list[str]] = {}
         self._next_id = 1
 
     # Reader (the graph's `CalendarReader` port).
@@ -735,6 +740,22 @@ class FakeCalendar:
         self, user_id: UUID, application_id: UUID
     ) -> Sequence[CalendarEvent]:
         return await self.find_by_property(PROP_APPLICATION_ID, str(application_id))
+
+    async def free_busy(
+        self, start: datetime, end: datetime, *, calendar_ids: Sequence[str] | None = None
+    ) -> tuple[BusyInterval, ...]:
+        """Busy intervals from the busy events and `extra_busy`, as Google's free/busy would."""
+        intervals = [
+            BusyInterval(starts_at=max(e.starts_at, start), ends_at=min(e.ends_at, end))
+            for e in self.events.values()
+            if e.busy and e.starts_at < end and e.ends_at > start
+        ]
+        intervals.extend(
+            BusyInterval(starts_at=max(b.starts_at, start), ends_at=min(b.ends_at, end))
+            for b in self.extra_busy
+            if b.starts_at < end and b.ends_at > start
+        )
+        return tuple(sorted(intervals, key=lambda b: b.starts_at))
 
     # Client (the executor's `CalendarClient` port).
 
@@ -754,6 +775,7 @@ class FakeCalendar:
         properties: dict[str, str],
         authority: Any = None,
         time_zone: str | None = None,
+        attendees: Sequence[str] = (),
     ) -> CalendarEvent:
         self.authorities.append(authority)
         event = CalendarEvent(
@@ -764,7 +786,9 @@ class FakeCalendar:
             properties=dict(properties),
             etag="1",
             time_zone=time_zone,
+            attendees=tuple(attendees),
         )
+        self.attendees[event.event_id] = list(attendees)
         self._next_id += 1
         self.events[event.event_id] = event
         self.created.append(event.event_id)

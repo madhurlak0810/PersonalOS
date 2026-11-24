@@ -52,14 +52,15 @@ def test_the_default_allowlists_keep_send_and_delete_narrow():
     assert senders == {RESPONDER, GMAIL_SENDER}
     assert "google.gmail_send_message" not in GOOGLE_NODE_TOOL_ALLOWLISTS[DRAFTER]
     assert "google.gmail_send_message" not in GOOGLE_NODE_TOOL_ALLOWLISTS[REPLY_DRAFTER]
-    # Only interview scheduling may cancel an event -- behind approval, and
-    # only one PersonalOS stamped (`CalendarActionExecutor`).
+    # Only interview scheduling and the Calendar subgraph's planner may cancel
+    # an event -- behind approval, and only one PersonalOS stamped
+    # (`CalendarActionExecutor`). The Calendar subgraph's reader may not.
     deleters = {
         n
         for n, tools in GOOGLE_NODE_TOOL_ALLOWLISTS.items()
         if "google.calendar_delete_event" in tools
     }
-    assert deleters == {SCHEDULER}
+    assert deleters == {SCHEDULER, "graph:calendar#plan_calendar_change"}
 
 
 async def test_the_scheduler_cannot_delete_an_event_without_approval(google):

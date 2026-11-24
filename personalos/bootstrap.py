@@ -33,6 +33,7 @@ from personalos.domain.ownership import SYSTEM_ACCESS
 from personalos.domain.workflow import (
     WorkflowThread,
     application_transition_thread_id,
+    calendar_thread_id,
     communications_thread_id,
     event_handler_thread_id,
     file_task_thread_id,
@@ -64,6 +65,8 @@ from personalos.executor.tool_executor import (
     ProviderReconciler,
     ToolExecutor,
 )
+from personalos.graphs.calendar import READ_CALENDAR, CalendarGraph, CalendarSubgraphRunner
+from personalos.graphs.calendar import requester as calendar_requester
 from personalos.graphs.communications import (
     CommunicationsGraph,
     CommunicationsSubgraphRunner,
@@ -190,6 +193,9 @@ FILE_TASK_WORKFLOW = "file_task"
 
 #: `workflows.name` for a Communications subgraph task run on its own.
 COMMUNICATIONS_WORKFLOW = "communications"
+
+#: `workflows.name` for a Calendar subgraph task run on its own.
+CALENDAR_WORKFLOW = "calendar"
 
 
 def build_operation_store(session_factory=SessionLocal) -> OperationStore:
@@ -1216,6 +1222,7 @@ def build_google_calendar(
     policy: PolicyEngine | None = None,
     time_zone: str | None = None,
     calendar_id: str | None = None,
+    requested_by: str | None = None,
 ) -> GoogleCalendar:
     """Build the calendar the Job Search graph reads and the calendar executor writes.
 
@@ -1242,10 +1249,71 @@ def build_google_calendar(
                 port="calendar",
             )
         gateway = build_tool_gateway(policy=policy or build_policy_engine())
+    extra = {"requested_by": requested_by} if requested_by else {}
     return GoogleCalendar(
         gateway,
         time_zone=zone,
         calendar_id=calendar_id or settings.calendar_id,
+        **extra,
+    )
+
+
+def build_calendar_reader(
+    gateway: ToolGateway | None = None,
+    *,
+    policy: PolicyEngine | None = None,
+    time_zone: str | None = None,
+    calendar_id: str | None = None,
+) -> GoogleCalendar:
+    """The Calendar subgraph's reader: free/busy, listings and single events.
+
+    The same `GoogleCalendar` as `build_google_calendar`, reading as the
+    Calendar subgraph (`graph:calendar#read_calendar`), whose allowlist reads
+    and cannot write. Raises `PortNotConfigured` as that does.
+    """
+    return build_google_calendar(
+        gateway,
+        policy=policy,
+        time_zone=time_zone,
+        calendar_id=calendar_id,
+        requested_by=calendar_requester(READ_CALENDAR),
+    )
+
+
+def build_calendar_graph(
+    *,
+    calendar: Any,
+    action_executor: Any,
+    session_factory: Callable[[], object] = SessionLocal,
+    time_zone: str | None = None,
+    application_directory: Any = None,
+    checkpointer: BaseCheckpointSaver | None = None,
+) -> CalendarGraph:
+    """The Calendar subgraph over the configured calendar, in `CALENDAR_TIME_ZONE`.
+
+    `action_executor` is the one the Job Search graph writes the calendar
+    with (`ToolExecutor` around `CalendarActionExecutor`, reconciled by
+    `CalendarReconciler`), so a create is journaled, looked up by its stamp
+    after a lost response, and made at most once. Applications are checked
+    against the candidate's own through the recruiter-event store.
+    """
+    zone = time_zone if time_zone is not None else settings.calendar_time_zone
+    if not zone:
+        raise PortNotConfigured(
+            "CALENDAR_TIME_ZONE is not set; name the IANA zone calendar times are read and "
+            "written in, e.g. 'America/New_York'",
+            port="calendar",
+        )
+    return CalendarGraph(
+        calendar,
+        time_zone=zone,
+        action_executor=action_executor,
+        application_directory=(
+            application_directory
+            if application_directory is not None
+            else build_recruiter_event_store(session_factory)
+        ),
+        checkpointer=checkpointer,
     )
 
 
@@ -1602,6 +1670,49 @@ def build_communications_subgraph_runner(
     )
 
 
+def register_calendar_thread(
+    *,
+    user_id: UUID,
+    registry: WorkflowThreadRegistry,
+    workflow_id: UUID | None = None,
+    task_key: str | None = None,
+    actor_id: str = "system",
+    correlation_id: UUID | None = None,
+) -> WorkflowThread:
+    """Derive and register the stable thread a Calendar task runs on.
+
+    Owned by the candidate (`user_id`), so the task, its approvals and its
+    audit trail are that actor's and no other's.
+    """
+    thread_id = calendar_thread_id(user_id, task_key)
+    existing = registry.resolve(thread_id)
+    if existing is not None:
+        return existing
+    return registry.register(
+        thread_id=thread_id,
+        workflow_name=CALENDAR_WORKFLOW,
+        workflow_id=workflow_id,
+        user_id=user_id,
+        actor_id=actor_id,
+        correlation_id=correlation_id,
+    )
+
+
+def build_calendar_subgraph_runner(
+    compiled_subgraph,
+    *,
+    user_id: UUID,
+    thread: WorkflowThread,
+) -> CalendarSubgraphRunner:
+    """Bind the Supervisor's `CalendarSubgraphRunner` port to a registered thread."""
+    return CalendarSubgraphRunner(
+        compiled_subgraph,
+        user_id=user_id,
+        thread_id=thread.thread_id,
+        workflow_id=thread.workflow_id,
+    )
+
+
 def register_supervisor_thread(
     *,
     conversation_key: str,
@@ -1772,6 +1883,11 @@ __all__ = [
     "build_communications_graph",
     "register_communications_thread",
     "build_communications_subgraph_runner",
+    "CALENDAR_WORKFLOW",
+    "build_calendar_reader",
+    "build_calendar_graph",
+    "register_calendar_thread",
+    "build_calendar_subgraph_runner",
     "build_google_mcp_server",
     "connected_google_credential",
     "google_authorizer",

@@ -357,6 +357,52 @@ class TestRunCommunicationsSubgraph:
             CONTRACTS[sup.RUN_COMMUNICATIONS_SUBGRAPH].validate_input({"message": "triage"})
 
 
+# --- run_calendar_subgraph ----------------------------------------------------
+
+
+@covers_node(SUPERVISOR_GRAPH, sup.RUN_CALENDAR_SUBGRAPH)
+class TestRunCalendarSubgraph:
+    async def test_hands_the_request_over_and_records_only_the_result(self):
+        calendar = RecordingJobSubgraph(result={"domain": "calendar", "availability": []})
+        graph = supervisor(calendar_subgraph=calendar)
+        message = "when am I free Thursday"
+        dag = graph._plan_work(
+            {"message": message, "route_decision": decided(RouteDomain.CALENDAR)}
+        )["task_dag"]
+
+        update = await graph._run_calendar_subgraph({"message": message, "task_dag": dag})
+
+        assert update == {"result": {"domain": "calendar", "availability": []}}
+        ((handed, state),) = calendar.calls
+        assert handed == dag
+        assert TaskDAG.model_validate(dag).goal == f"calendar: {message}"
+        # Bounded, and its last step is a write that waits for approval.
+        assert [task["id"] for task in dag["tasks"]] == ["resolve", "read", "plan", "write"]
+        assert state["message"] == message
+
+    def test_a_calendar_decision_routes_to_its_subgraph_after_planning(self):
+        graph = supervisor(calendar_subgraph=RecordingJobSubgraph())
+
+        assert (
+            graph._route_after_planning({"route_decision": decided(RouteDomain.CALENDAR)})
+            == sup.RUN_CALENDAR_SUBGRAPH
+        )
+
+    def test_without_a_calendar_subgraph_the_domain_is_clarified_not_planned(self):
+        graph = supervisor()
+
+        assert (
+            graph._route_after_classification({"route_decision": decided(RouteDomain.CALENDAR)})
+            == sup.CLARIFY
+        )
+        with pytest.raises(UnsupportedRouteDomain):
+            graph._plan_work({"route_decision": decided(RouteDomain.CALENDAR)})
+
+    def test_its_input_contract_requires_a_task_dag(self):
+        with pytest.raises(ValidationError):
+            CONTRACTS[sup.RUN_CALENDAR_SUBGRAPH].validate_input({"message": "when am I free"})
+
+
 # --- clarify -------------------------------------------------------------------
 
 

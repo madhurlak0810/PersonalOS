@@ -34,6 +34,7 @@ from personalos.domain.job_search import FollowUpKind
 from personalos.domain.recruiter_events import CommitmentActor, ExtractedCommitment
 from personalos.graphs import job_search as jsg
 from personalos.graphs.contracts import (
+    CALENDAR_GRAPH,
     COMMUNICATIONS_GRAPH,
     FILE_TASK_GRAPH,
     JOB_SEARCH_GRAPH,
@@ -46,6 +47,7 @@ from personalos.graphs.contracts import (
 from personalos.graphs.job_search import JobSearchGraph
 from personalos.graphs.supervisor import SupervisorGraph
 from personalos.models.routing import KeywordIntentClassifier
+from tests.fixtures import calendar as calendar_fixtures
 from tests.fixtures import communications as comms_fixtures
 from tests.fixtures import file_task as file_fixtures
 from tests.fixtures import job_search_fakes as fakes
@@ -65,6 +67,11 @@ class _FileSubgraph:
 class _CommunicationsSubgraph:
     async def __call__(self, task_dag, state):
         return {"triage": []}
+
+
+class _CalendarSubgraph:
+    async def __call__(self, task_dag, state):
+        return {"availability": []}
 
 
 def _job_search(**overrides) -> JobSearchGraph:
@@ -112,6 +119,7 @@ def _supervisor() -> SupervisorGraph:
         _JobSubgraph(),
         file_subgraph=_FileSubgraph(),
         communications_subgraph=_CommunicationsSubgraph(),
+        calendar_subgraph=_CalendarSubgraph(),
     )
 
 
@@ -132,6 +140,11 @@ def _communications():
     return comms_fixtures.build_world_in_process().graph
 
 
+def _calendar():
+    """A Calendar subgraph over the in-memory calendar with fake free/busy."""
+    return calendar_fixtures.build_world().graph
+
+
 def _registered_nodes(compiled) -> set[str]:
     return {name for name in compiled.get_graph().nodes if name not in ("__start__", "__end__")}
 
@@ -142,6 +155,7 @@ GRAPHS = {
     JOB_SEARCH_GRAPH: _job_search,
     FILE_TASK_GRAPH: _file_task,
     COMMUNICATIONS_GRAPH: _communications,
+    CALENDAR_GRAPH: _calendar,
 }
 
 
@@ -244,6 +258,7 @@ async def test_supervisor_runs_satisfy_every_node_contract():
         "find me a python job",
         "find my latest resume",
         "summarize the email thread t-acme",
+        "when am I free Thursday?",
         "hmm, not sure",
     ):
         await compiled.ainvoke(
@@ -307,6 +322,31 @@ async def test_communications_runs_satisfy_every_node_contract():
 
     assert visited == set(contracts_for(COMMUNICATIONS_GRAPH)), (
         f"not reached by any run: {sorted(set(contracts_for(COMMUNICATIONS_GRAPH)) - visited)}"
+    )
+
+
+async def test_calendar_runs_satisfy_every_node_contract():
+    """A question, a conflict, and a create that parks for approval and is then written."""
+    from langgraph.types import Command
+
+    cf = calendar_fixtures
+    world = cf.build_world(
+        [cf.external("ext-1", "Dentist", cf.utc(2026, 11, 26, 15), cf.utc(2026, 11, 26, 16))]
+    )
+    visited: set[str] = set()
+    graph = enforce_contracts(world.graph, CALENDAR_GRAPH, inputs=True, visited=visited)
+    compiled = graph.build()
+
+    for request in ("when am I free Thursday", "schedule 'Sync' Thursday at 10am"):
+        await compiled.ainvoke(cf.start(request), config=cf.thread())
+
+    config = cf.thread()
+    parked = await compiled.ainvoke(cf.start("schedule 'Sync' Thursday at 2pm"), config=config)
+    final = await compiled.ainvoke(Command(resume=cf.approve_all(parked)), config=config)
+    assert [receipt["ok"] for receipt in final["action_receipts"]] == [True]
+
+    assert visited == set(contracts_for(CALENDAR_GRAPH)), (
+        f"not reached by any run: {sorted(set(contracts_for(CALENDAR_GRAPH)) - visited)}"
     )
 
 

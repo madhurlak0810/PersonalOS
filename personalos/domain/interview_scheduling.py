@@ -110,6 +110,9 @@ class _Value(BaseModel):
 class CalendarEventRole(str, Enum):
     INTERVIEW = "interview"
     PREP = "prep"
+    #: An event the Calendar subgraph created on a person's request -- a call,
+    #: a meeting -- that belongs to no interview schedule.
+    EVENT = "event"
 
 
 class CalendarEvent(_Value):
@@ -127,6 +130,8 @@ class CalendarEvent(_Value):
     #: The IANA zone the calendar stores the event in, when it reports one.
     #: `starts_at`/`ends_at` are UTC whatever it is.
     time_zone: str | None = None
+    #: Attendee addresses, as the calendar reports them.
+    attendees: tuple[str, ...] = ()
 
     @property
     def stamped(self) -> bool:

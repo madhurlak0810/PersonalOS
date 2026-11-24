@@ -74,7 +74,25 @@ _DOMAIN_KEYWORDS: dict[RouteDomain, tuple[str, ...]] = {
         "triage",
         "action item",
     ),
-    RouteDomain.CALENDAR: ("calendar", "schedule", "meeting", "availability", "event"),
+    RouteDomain.CALENDAR: (
+        "calendar",
+        "schedule",
+        "meeting",
+        "availability",
+        "available",
+        "event",
+        "am i free",
+        "free time",
+        "free slot",
+        "reschedule",
+        "appointment",
+        "move my",
+        # "interview times" also matches "interview time": a request for slots
+        # outweighs the one job keyword ("interview") it contains.
+        "interview time",
+        "interview times",
+        "book a",
+    ),
 }
 
 

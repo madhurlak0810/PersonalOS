@@ -157,6 +157,24 @@ def test_the_default_factory_names_every_port_it_bound_to_a_stand_in(factory):
     assert EMBEDDER_PORT not in graphs.unbound_ports
 
 
+def test_the_calendar_subgraph_is_wired_only_once_the_calendar_is_configured(factory, monkeypatch):
+    """Without `CALENDAR_TIME_ZONE` there is no Calendar subgraph: no zone is guessed."""
+    from personalos.domain.workflow import CALENDAR_THREAD_NAMESPACE
+
+    monkeypatch.setattr(bootstrap.settings, "calendar_time_zone", "")
+    assert CALENDAR_THREAD_NAMESPACE not in build_worker_graphs(factory).runners
+
+    monkeypatch.setattr(bootstrap.settings, "calendar_time_zone", "America/New_York")
+    monkeypatch.setattr(bootstrap.settings, "mcp_google_enabled", True)
+    graphs = build_worker_graphs(factory)
+
+    runner = graphs.runners[CALENDAR_THREAD_NAMESPACE]
+    assert isinstance(runner.graph.checkpointer, SqlAlchemyCheckpointSaver)
+    assert {"parse_request", "check_availability", "plan_calendar_change"} <= set(
+        runner.graph.get_graph().nodes
+    )
+
+
 def test_with_no_embedding_provider_the_embedder_is_a_stand_in(factory, monkeypatch):
     monkeypatch.setattr(bootstrap.settings, "embedding_provider", "")
 

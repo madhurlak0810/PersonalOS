@@ -5,10 +5,11 @@ graph free-form text to branch on: it produces a `RouteDecision`, a typed,
 validated structure. `RouteDomain` is the closed set of domains a decision is
 allowed to name.
 
-The enum already reserves members for domains this build does not implement
-(Calendar) so that turning one on later is additive --
-the structured-output schema a model is constrained to does not change shape,
-only `SUPPORTED_ROUTE_DOMAINS` grows. Until a domain is added there, any
+Every member of the enum is now supported. The enum was declared whole from
+the start, with members reserved for domains not yet built, so that turning
+one on was additive -- the structured-output schema a model is constrained
+to did not change shape, only `SUPPORTED_ROUTE_DOMAINS` grew. A domain added
+to the enum later is reserved the same way: until it is added there, any
 `RouteDecision` naming it is schema-valid but must still be rejected by
 `ensure_supported_domain`, which is what lets a domain be reserved without
 being reachable.
@@ -25,9 +26,9 @@ from personalos.domain.errors import ValidationFailed
 class RouteDomain(str, Enum):
     """The closed set of domains a routing decision may name.
 
-    `JOB`, `FILE` and `COMMUNICATIONS` are supported; the others are reserved for later phases and are deliberately
-    declared now so the schema a model is constrained to never needs to
-    change shape when one of them is turned on -- only `SUPPORTED_ROUTE_DOMAINS`
+    All four are supported. A member added for a later phase is declared
+    before it is built, so the schema a model is constrained to never needs
+    to change shape when it is turned on -- only `SUPPORTED_ROUTE_DOMAINS`
     does.
     """
 
@@ -43,7 +44,7 @@ class RouteDomain(str, Enum):
 #: here (and wiring its subgraph) -- not changing the enum or breaking callers
 #: that already validate against it.
 SUPPORTED_ROUTE_DOMAINS: frozenset[RouteDomain] = frozenset(
-    {RouteDomain.JOB, RouteDomain.FILE, RouteDomain.COMMUNICATIONS}
+    {RouteDomain.JOB, RouteDomain.FILE, RouteDomain.COMMUNICATIONS, RouteDomain.CALENDAR}
 )
 
 #: Below this confidence, the Supervisor routes to clarification instead of

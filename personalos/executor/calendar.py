@@ -80,6 +80,10 @@ from personalos.policy import PolicyViolation
 
 logger = logging.getLogger(__name__)
 
+#: `ActionIntent.payload` key of a create's attendee addresses
+#: (`personalos.domain.calendar.PAYLOAD_ATTENDEES`).
+PAYLOAD_ATTENDEES = "attendees"
+
 CALENDAR_ACTION_KINDS = frozenset(
     {
         ActionKind.CREATE_CALENDAR_EVENT,
@@ -127,8 +131,9 @@ class CalendarClient(Protocol):
         properties: dict[str, str],
         authority: WriteAuthority,
         time_zone: str | None = None,
+        attendees: Sequence[str] = (),
     ) -> CalendarEvent:
-        """Insert an event and return it as stored."""
+        """Insert an event and return it as stored. Attendees are not notified."""
         ...
 
     async def update_event(
@@ -298,6 +303,12 @@ class CalendarActionExecutor:
         application_id = intent.payload.get("application_id")
         if application_id and PROP_APPLICATION_ID not in properties:
             properties[PROP_APPLICATION_ID] = str(application_id)
+        extra: dict[str, object] = {}
+        attendees = [str(a) for a in intent.payload.get(PAYLOAD_ATTENDEES) or ()]
+        if attendees:
+            # Passed only when there are some, so a client that predates
+            # attendees keeps working for the writes that have none.
+            extra["attendees"] = attendees
         event = await self.client.create_event(
             title=str(intent.payload.get(PAYLOAD_TITLE) or intent.summary),
             starts_at=starts_at,
@@ -308,6 +319,7 @@ class CalendarActionExecutor:
             properties={**properties, **self._stamps(intent)},
             authority=authority,
             time_zone=_time_zone(intent),
+            **extra,
         )
         return _receipt(intent, event, "created")
 

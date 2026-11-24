@@ -103,7 +103,7 @@ See `IMPLEMENTATION_GUIDE.md` for data flow and API details.
 
 Actively in development. Built: contracts and boundaries, the data model, the orchestration runtime, the security boundary, the API and worker, the outbox, tracing and logging, the evaluation harness and adversarial tests, covered by 2,000+ tests.
 
-Still to come: adapters for the ports the worker reports as unbound (application submission, mailbox, calendar), the Calendar subgraph, the Google MCP server, and API authentication. See [Next Steps](IMPLEMENTATION_GUIDE.md#next-steps).
+Still to come: adapters for the ports the worker reports as unbound (application submission, mailbox, calendar), the Google MCP server, and API authentication. See [Next Steps](IMPLEMENTATION_GUIDE.md#next-steps).
 
 ## License
 

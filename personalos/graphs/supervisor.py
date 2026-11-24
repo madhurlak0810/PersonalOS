@@ -8,15 +8,17 @@ subgraph. It never touches a tool or a repository directly -- see
 
 Two things keep this graph honest to that boundary:
 
-- `classifier`, `job_subgraph`, `file_subgraph` and `communications_subgraph`
-  are injected ports (`IntentClassifier`, `JobSubgraphRunner`,
-  `FileSubgraphRunner`, `CommunicationsSubgraphRunner`), not concrete
-  dependencies this module constructs. The composition root wires a real
-  classifier and adapters that run the Job Search subgraph
+- `classifier`, `job_subgraph`, `file_subgraph`, `communications_subgraph`
+  and `calendar_subgraph` are injected ports (`IntentClassifier`,
+  `JobSubgraphRunner`, `FileSubgraphRunner`, `CommunicationsSubgraphRunner`,
+  `CalendarSubgraphRunner`), not concrete dependencies this module
+  constructs. The composition root wires a real classifier and adapters that
+  run the Job Search subgraph
   (`personalos.graphs.job_search.JobSearchSubgraphRunner`), the File subgraph
-  (`personalos.graphs.file_task.FileTaskSubgraphRunner`) and the
-  Communications subgraph
-  (`personalos.graphs.communications.CommunicationsSubgraphRunner`). A
+  (`personalos.graphs.file_task.FileTaskSubgraphRunner`), the Communications
+  subgraph (`personalos.graphs.communications.CommunicationsSubgraphRunner`)
+  and the Calendar subgraph
+  (`personalos.graphs.calendar.CalendarSubgraphRunner`). A
   Supervisor built without one of the optional subgraphs treats its domain as
   unsupported and asks for clarification, exactly as it does for a reserved
   domain.
@@ -74,6 +76,7 @@ PLAN_WORK = "plan_work"
 RUN_JOB_SUBGRAPH = "run_job_subgraph"
 RUN_FILE_SUBGRAPH = "run_file_subgraph"
 RUN_COMMUNICATIONS_SUBGRAPH = "run_communications_subgraph"
+RUN_CALENDAR_SUBGRAPH = "run_calendar_subgraph"
 CLARIFY = "clarify"
 
 #: What each routable domain is called in a clarification.
@@ -81,6 +84,7 @@ _DOMAIN_NAMES: dict[RouteDomain, str] = {
     RouteDomain.JOB: "job search",
     RouteDomain.FILE: "your job-search documents",
     RouteDomain.COMMUNICATIONS: "your job-search email",
+    RouteDomain.CALENDAR: "your calendar",
 }
 
 
@@ -120,6 +124,18 @@ class CommunicationsSubgraphRunner(Protocol):
 
     async def __call__(self, task_dag: dict[str, Any], state: "SupervisorState") -> dict[str, Any]:
         """Run the communications task and return a JSON-compatible result."""
+        ...
+
+
+class CalendarSubgraphRunner(Protocol):
+    """Port the Supervisor uses to hand a request to the Calendar subgraph.
+
+    It parses its own request -- which times, in the person's zone, and which
+    event -- from `state["message"]`; every write waits for approval inside it.
+    """
+
+    async def __call__(self, task_dag: dict[str, Any], state: "SupervisorState") -> dict[str, Any]:
+        """Run the calendar task and return a JSON-compatible result."""
         ...
 
 
@@ -196,6 +212,25 @@ def _build_communications_dag(message: str) -> TaskDAG:
     )
 
 
+def _build_calendar_dag(message: str) -> TaskDAG:
+    """The bounded plan for a calendar request: read, plan, write only once approved.
+
+    Fixed and linear. Whether the request is a question (answered from
+    free/busy, nothing written) or a change is the Calendar subgraph's own
+    parse; a write always waits for approval inside it.
+    """
+    goal = f"calendar: {message.strip()}" if message.strip() else "calendar"
+    return TaskDAG(
+        goal=goal[:200],
+        tasks=(
+            TaskNode(id="resolve", name="Resolve the times in your time zone"),
+            TaskNode(id="read", name="Read free/busy and events", depends_on=("resolve",)),
+            TaskNode(id="plan", name="Answer, or plan the change", depends_on=("read",)),
+            TaskNode(id="write", name="Write only once approved", depends_on=("plan",)),
+        ),
+    )
+
+
 class SupervisorGraph:
     """Builds and compiles the top-level Supervisor LangGraph graph."""
 
@@ -206,6 +241,7 @@ class SupervisorGraph:
         *,
         file_subgraph: FileSubgraphRunner | None = None,
         communications_subgraph: CommunicationsSubgraphRunner | None = None,
+        calendar_subgraph: CalendarSubgraphRunner | None = None,
         confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
         checkpointer: BaseCheckpointSaver | None = None,
         store: BaseStore | None = None,
@@ -238,9 +274,11 @@ class SupervisorGraph:
         self.job_subgraph = job_subgraph
         self.file_subgraph = file_subgraph
         self.communications_subgraph = communications_subgraph
+        self.calendar_subgraph = calendar_subgraph
         optional = {
             RouteDomain.FILE: file_subgraph,
             RouteDomain.COMMUNICATIONS: communications_subgraph,
+            RouteDomain.CALENDAR: calendar_subgraph,
         }
         #: The domains this instance can actually hand work to: the build's
         #: supported set, less any whose subgraph was not wired.
@@ -278,6 +316,10 @@ class SupervisorGraph:
                 RUN_COMMUNICATIONS_SUBGRAPH, self._run_communications_subgraph, graph="supervisor"
             ),
         )
+        graph.add_node(
+            RUN_CALENDAR_SUBGRAPH,
+            traced_node(RUN_CALENDAR_SUBGRAPH, self._run_calendar_subgraph, graph="supervisor"),
+        )
         graph.add_node(CLARIFY, traced_node(CLARIFY, self._clarify, graph="supervisor"))
 
         graph.add_edge(START, LOAD_CONTEXT)
@@ -294,11 +336,13 @@ class SupervisorGraph:
                 RUN_JOB_SUBGRAPH: RUN_JOB_SUBGRAPH,
                 RUN_FILE_SUBGRAPH: RUN_FILE_SUBGRAPH,
                 RUN_COMMUNICATIONS_SUBGRAPH: RUN_COMMUNICATIONS_SUBGRAPH,
+                RUN_CALENDAR_SUBGRAPH: RUN_CALENDAR_SUBGRAPH,
             },
         )
         graph.add_edge(RUN_JOB_SUBGRAPH, END)
         graph.add_edge(RUN_FILE_SUBGRAPH, END)
         graph.add_edge(RUN_COMMUNICATIONS_SUBGRAPH, END)
+        graph.add_edge(RUN_CALENDAR_SUBGRAPH, END)
         graph.add_edge(CLARIFY, END)
 
         return graph.compile(checkpointer=self.checkpointer, store=self.store)
@@ -368,6 +412,8 @@ class SupervisorGraph:
             return RUN_FILE_SUBGRAPH
         if decision.domain == RouteDomain.COMMUNICATIONS:
             return RUN_COMMUNICATIONS_SUBGRAPH
+        if decision.domain == RouteDomain.CALENDAR:
+            return RUN_CALENDAR_SUBGRAPH
         return RUN_JOB_SUBGRAPH
 
     def _plan_work(self, state: SupervisorState) -> dict[str, Any]:
@@ -384,6 +430,8 @@ class SupervisorGraph:
             dag = _build_file_task_dag(state.get("message", ""))
         elif decision.domain == RouteDomain.COMMUNICATIONS:
             dag = _build_communications_dag(state.get("message", ""))
+        elif decision.domain == RouteDomain.CALENDAR:
+            dag = _build_calendar_dag(state.get("message", ""))
         else:  # pragma: no cover - unreachable while every supported domain has a planner
             raise UnsupportedRouteDomain(f"no planner registered for domain '{decision.domain}'")
 
@@ -417,6 +465,16 @@ class SupervisorGraph:
         result = await self.communications_subgraph(task_dag, state)
         return {"result": result}
 
+    async def _run_calendar_subgraph(self, state: SupervisorState) -> dict[str, Any]:
+        """Hand the request to the Calendar subgraph and record its result."""
+        task_dag = state.get("task_dag")
+        if task_dag is None:  # pragma: no cover - plan_work always sets one before this node
+            raise InvalidTaskDAG("calendar subgraph reached without a planned task DAG")
+        if self.calendar_subgraph is None:  # pragma: no cover - routing guards this
+            raise UnsupportedRouteDomain("no calendar subgraph is wired")
+        result = await self.calendar_subgraph(task_dag, state)
+        return {"result": result}
+
     def _clarify(self, state: SupervisorState) -> dict[str, Any]:
         """Ask for clarification instead of guessing at a low-confidence or unsupported route."""
         raw_decision = state.get("route_decision")
@@ -446,4 +504,5 @@ __all__ = [
     "JobSubgraphRunner",
     "FileSubgraphRunner",
     "CommunicationsSubgraphRunner",
+    "CalendarSubgraphRunner",
 ]
