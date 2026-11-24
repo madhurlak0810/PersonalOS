@@ -24,7 +24,7 @@ anything, there is no such checkpoint and the command simply runs as queued.
 
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import timedelta
 from typing import Any
 
@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 #: The `configurable` key, and so the checkpoint metadata key, naming the
 #: command a run is carrying out.
 COMMAND_ID_KEY = "command_id"
+
+#: Called with each command once it has run and been settled as done -- how a
+#: plan waiting on a step thread is woken (`apps.worker.plan_steps`).
+AfterRun = Callable[[WorkflowCommand], Awaitable[None]]
 
 #: How long a command whose workflow is leased elsewhere waits before it is
 #: claimable again. Without it the loop that released it claims it straight back.
@@ -123,6 +127,7 @@ async def process_next(
     *,
     lease_busy_delay: timedelta = DEFAULT_LEASE_BUSY_DELAY,
     gate: HealthGate | None = None,
+    after_run: AfterRun | None = None,
 ) -> bool:
     """Claim and run the oldest queued command. False when there was none.
 
@@ -141,6 +146,9 @@ async def process_next(
     `gate` is the circuit breaker: a command that needs an integration that is
     down, or awaiting a reconnect, is put back for `gate.retry_after` instead
     of being run into a failure (`apps.worker.health_monitor.HealthGate`).
+
+    `after_run` is called with the command once it has run. A failure in it is
+    logged, never raised: the command itself succeeded.
     """
     claimed = queue.claim_next()
     if claimed is None:
@@ -199,6 +207,11 @@ async def process_next(
         queue.mark_failed(claimed.outbox_id)
         raise
     queue.mark_done(claimed.outbox_id)
+    if after_run is not None:
+        try:
+            await after_run(command)
+        except Exception:  # noqa: BLE001 - the command ran; only the follow-up failed
+            logger.exception("after-run hook failed for command %s", command.command_id)
     return True
 
 
@@ -210,6 +223,7 @@ async def run_commands(
     idle_seconds: float = 1.0,
     lease_busy_delay: timedelta = DEFAULT_LEASE_BUSY_DELAY,
     gate: HealthGate | None = None,
+    after_run: AfterRun | None = None,
 ) -> None:
     """Run queued commands until `stop` is set, pausing `idle_seconds` when there are none.
 
@@ -219,7 +233,9 @@ async def run_commands(
     """
     while not stop.is_set():
         try:
-            ran = await process_next(queue, runners, lease_busy_delay=lease_busy_delay, gate=gate)
+            ran = await process_next(
+                queue, runners, lease_busy_delay=lease_busy_delay, gate=gate, after_run=after_run
+            )
         except Exception:
             # Either the command failed (already logged and settled) or the
             # claim itself could not reach the database; in the second case
@@ -233,6 +249,7 @@ async def run_commands(
 
 
 __all__ = [
+    "AfterRun",
     "COMMAND_ID_KEY",
     "DEFAULT_LEASE_BUSY_DELAY",
     "command_configurable",

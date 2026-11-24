@@ -185,6 +185,12 @@ class Settings(BaseSettings):
     # approval. Policy holds moves from larger plans to the same limit.
     files_max_unattended: int = 3
 
+    # Cross-domain plans. The most steps a Supervisor plan may have (1-12); a
+    # longer plan is refused and asked back, never trimmed. And how many times
+    # an invalid plan is handed back to the planner before that.
+    supervisor_max_plan_steps: int = 6
+    supervisor_plan_repair_attempts: int = 2
+
     # Job providers. Greenhouse boards to watch, as board token -> employer
     # name; a board belongs to one company, so there is no global search.
     # Set as JSON: GREENHOUSE_BOARDS={"acme": "Acme"}

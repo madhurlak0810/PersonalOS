@@ -49,9 +49,10 @@ from langgraph.config import get_config
 from apps.worker.checkpoint_monitor import CheckpointConditionEvaluator, PendingCheckpointMonitor
 from apps.worker.health_monitor import GatedSweep, HealthGate, IntegrationHealthMonitor
 from apps.worker.outbox_dispatcher import OutboxDispatcher, build_outbox_dispatcher
+from apps.worker.plan_steps import PlanStepResumer
 from apps.worker.scheduler import ScheduledSweep, Scheduler
 from apps.worker.stall_monitor import StalledApplicationMonitor
-from apps.worker.workflow_commands import process_next, run_commands
+from apps.worker.workflow_commands import AfterRun, process_next, run_commands
 from apps.worker.workflow_runner import DurableWorkflowRunner
 from personalos.bootstrap import (
     build_application_lifecycle_store,
@@ -385,10 +386,14 @@ class Worker:
         scheduler: Scheduler | None = None,
         idle_seconds: float = 1.0,
         gate: HealthGate | None = None,
+        after_run: AfterRun | None = None,
     ):
         """Wire the queue and runners, and optionally the dispatcher, scheduler and gate.
 
         `gate` is the circuit breaker commands pass through before they run.
+        `after_run` follows each command that ran; by default, the
+        `PlanStepResumer` that wakes a plan parked on the step thread a
+        command just moved.
         """
         self.commands = commands
         self.runners = dict(runners)
@@ -396,6 +401,9 @@ class Worker:
         self.scheduler = scheduler
         self.idle_seconds = idle_seconds
         self.gate = gate
+        self.after_run = (
+            after_run if after_run is not None else PlanStepResumer(commands, self.runners)
+        )
 
     async def run(self, stop: asyncio.Event) -> None:
         """Run every loop this worker has until `stop` is set."""
@@ -408,6 +416,7 @@ class Worker:
                     stop,
                     idle_seconds=self.idle_seconds,
                     gate=self.gate,
+                    after_run=self.after_run,
                 )
             )
         else:
@@ -427,7 +436,9 @@ class Worker:
         """Run queued commands until none is claimable (or `limit` ran). Returns how many."""
         ran = 0
         while limit is None or ran < limit:
-            if not await process_next(self.commands, self.runners, gate=self.gate):
+            if not await process_next(
+                self.commands, self.runners, gate=self.gate, after_run=self.after_run
+            ):
                 break
             ran += 1
         return ran
