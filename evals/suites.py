@@ -8,7 +8,7 @@ anything.
 
 | Suite | Golden file | Runs | Scored on |
 | --- | --- | --- | --- |
-| `routing` | `routing_requests.json` | compiled Supervisor | route, and domain where set |
+| `routing` | `routing/*.json` | compiled Supervisor, planner wired | route, domain, clarify reason, plan domains, forbidden routes |
 | `recruiter_events` | `recruiter_emails.json` | the extractor alone | classification (macro F1) |
 | `job_matching` | `job_descriptions.json` | compiled Job Search, discovery | recommendation per posting, shortlist precision / recall |
 | `scenarios` | `scenarios.json` | compiled Job Search, end to end | classification, intents, pause point, final status |
@@ -16,6 +16,7 @@ anything.
 | `human_review` | `human_review.json` | top-k and drafts | automatic checks; the rest waits for a reviewer |
 | `approvals` | `approval_boundaries.json`, `scenarios.json` | policy engine; compiled Job Search | approval precision / recall at consequence boundaries |
 | `recovery` | `recovery.json` | compiled Job Search, failed and resumed | end state, recovery, duplicated side effects |
+| `domain_workflows` | `domain_workflows.json` | compiled Calendar, Communications, File | proposals, approval gating, end state, recovery, per domain |
 
 Suites that run workflows to the end also count the side effects they
 observe into a `SideEffectLedger` (`duplicate_side_effect_rate`), and
@@ -235,43 +236,61 @@ async def run_discovery(gateway: ModelGateway, case: dict[str, Any]):
 # --- routing ----------------------------------------------------------------
 
 
+#: Routes that hand a request to something that can write: every domain
+#: subgraph, and a cross-domain plan of them.
+WRITE_ROUTES = ("job_search", "file_task", "communications", "calendar", "plan")
+
+
 async def routing(gateway: ModelGateway) -> SuiteResult:
-    cases = dataset.load("routing_requests.json")["cases"]
+    """Every routing case through the compiled Supervisor, as the worker wires it.
+
+    `expected` carries the case's `tags` (its file's domain and its kind), so
+    `evals.metrics` can break accuracy down per domain and build the
+    confusion matrix from the results file alone.
+    """
+    cases = dataset.routing_cases()
 
     async def one(case: dict[str, Any]) -> CaseResult:
-        graph, job_subgraph, file_subgraph, communications_subgraph, calendar_subgraph = (
-            world.supervisor(gateway)
-        )
-        final = await graph.ainvoke({"message": case["message"]}, world.thread(case["id"]))
+        env = world.supervisor(gateway)
+        final = await env.graph.ainvoke({"message": case["message"]}, world.thread(case["id"]))
         decision = final.get("route_decision") or {}
+        route = env.route(final)
+        plan = final.get("task_plan") or {}
+        resolution = None if route == "plan" or not decision else env.graph_owner.resolve(decision)
         actual = {
-            "route": (
-                "job_search"
-                if job_subgraph.calls
-                else "file_task"
-                if file_subgraph.calls
-                else "communications"
-                if communications_subgraph.calls
-                else "calendar"
-                if calendar_subgraph.calls
-                else "clarify"
-            ),
+            "route": route,
             "domain": decision.get("domain"),
             "confidence": decision.get("confidence"),
+            "reason": resolution.reason.value if resolution else None,
+            "plan_domains": [step["domain"] for step in plan.get("steps", ())],
         }
-        expected = case["expected"]
+        expected = {**case["expected"], "tags": {"domain": case["domain"], "kind": case["kind"]}}
         failures = []
-        if actual["route"] != expected["route"]:
-            failures.append(f"route {actual['route']!r}, expected {expected['route']!r}")
+        if route != expected["route"]:
+            failures.append(f"route {route!r}, expected {expected['route']!r}")
         if "domain" in expected and actual["domain"] != expected["domain"]:
             failures.append(f"domain {actual['domain']!r}, expected {expected['domain']!r}")
+        if "reason" in expected and route == "clarify" and actual["reason"] != expected["reason"]:
+            failures.append(f"clarified as {actual['reason']!r}, expected {expected['reason']!r}")
+        if "plan_domains" in expected and route == "plan":
+            if actual["plan_domains"] != expected["plan_domains"]:
+                failures.append(
+                    f"planned {actual['plan_domains']}, expected {expected['plan_domains']}"
+                )
+        if route in expected.get("never_routes", ()):
+            failures.append(f"unsafe: reached {route!r}, which it must never reach")
         return _judge("routing", case["id"], expected, actual, failures)
 
     results = [await _timed(lambda c=c: one(c), "routing", c["id"]) for c in cases]
-    with_domain = [
+    labelled = [
         (case, result)
         for case, result in zip(cases, results, strict=True)
         if "domain" in case["expected"] and result.actual
+    ]
+    guarded = [
+        (case, result)
+        for case, result in zip(cases, results, strict=True)
+        if case["expected"].get("never_routes")
     ]
     return SuiteResult(
         "routing",
@@ -287,12 +306,17 @@ async def routing(gateway: ModelGateway) -> SuiteResult:
             ),
             "domain_accuracy": (
                 round(
-                    sum(r.actual["domain"] == c["expected"]["domain"] for c, r in with_domain)
-                    / len(with_domain),
+                    sum(r.actual["domain"] == c["expected"]["domain"] for c, r in labelled)
+                    / len(labelled),
                     4,
                 )
-                if with_domain
+                if labelled
                 else 0.0
+            ),
+            # Cases that reached a route they must never reach, or raised.
+            "forbidden_routes": sum(
+                not r.actual or r.actual["route"] in c["expected"]["never_routes"]
+                for c, r in guarded
             ),
             "pass_rate": _rate(results),
         },
@@ -717,7 +741,7 @@ def _policy_observation(case: dict[str, Any]) -> tuple[ActionObservation, str]:
         arguments=arguments,
         origin=IntentOrigin(case["origin"]),
         mutating=case["mutating"],
-        requested_by="eval:approvals",
+        requested_by=case.get("requested_by", "eval:approvals"),
     )
     decision = default_policy_engine().evaluate_intent(intent).decision
     observation = ActionObservation(
@@ -749,11 +773,13 @@ async def approvals(gateway: ModelGateway) -> SuiteResult:
     data = dataset.load("approval_boundaries.json")
     labels = data["action_kinds"]
     observations: list[ActionObservation] = []
+    by_domain: dict[str, list[ActionObservation]] = {}
     results: list[CaseResult] = []
 
     async def policy_case(case: dict[str, Any]) -> CaseResult:
         observation, verdict = _policy_observation(case)
         observations.append(observation)
+        by_domain.setdefault(case["domain"], []).append(observation)
         expected = {
             "consequential": case["consequential"],
             "external_write": case["external_write"],
@@ -788,6 +814,7 @@ async def approvals(gateway: ModelGateway) -> SuiteResult:
                 gated=gated,
             )
             observations.append(observation)
+            by_domain.setdefault(labels[kind]["domain"], []).append(observation)
             failures += _judge_gate(observation)
             actual.append(
                 {"kind": kind, "gated": gated, "executed": str(intent["action_id"]) in executed}
@@ -799,8 +826,31 @@ async def approvals(gateway: ModelGateway) -> SuiteResult:
         results.append(await _timed(lambda c=case: graph_case(c), "approvals", case_id))
 
     return SuiteResult(
-        "approvals", results, {**approval_metrics(observations), "pass_rate": _rate(results)}
+        "approvals",
+        results,
+        {
+            **approval_metrics(observations),
+            **_per_domain_approvals(by_domain),
+            "pass_rate": _rate(results),
+        },
     )
+
+
+#: The approval metrics reported per domain, as `<metric>_<domain>`.
+PER_DOMAIN_APPROVAL_METRICS = (
+    "approval_precision",
+    "approval_recall",
+    "external_write_approval_recall",
+)
+
+
+def _per_domain_approvals(by_domain: dict[str, list[ActionObservation]]) -> dict[str, Any]:
+    return {
+        f"{name}_{domain}": value
+        for domain, items in sorted(by_domain.items())
+        for name, value in approval_metrics(items).items()
+        if name in PER_DOMAIN_APPROVAL_METRICS
+    }
 
 
 # --- recovery ---------------------------------------------------------------
@@ -941,6 +991,204 @@ async def recovery(gateway: ModelGateway) -> SuiteResult:
     )
 
 
+# --- domain_workflows -------------------------------------------------------
+
+
+def _domain_fault(env: world.DomainWorld, failures: int, error: str) -> None:
+    """Make the subgraph's action executor raise `failures` times before it works."""
+    owner = env.executor_owner
+    inner = owner.action_executor
+    remaining = [failures]
+
+    class Flaky:
+        async def execute(self, intent, decision):
+            if remaining[0] > 0:
+                remaining[0] -= 1
+                raise InjectedFault(error)
+            return await inner.execute(intent, decision)
+
+        def __getattr__(self, name):
+            return getattr(inner, name)
+
+    owner.action_executor = Flaky()
+
+
+def _decisions(env: world.DomainWorld, parked: dict[str, Any], verdict: str) -> list[dict]:
+    from personalos.domain.job_search import ApprovalVerdict
+
+    (pending,) = parked["__interrupt__"]
+    decisions = []
+    for request in pending.value["requests"]:
+        decision = env.approve(request)
+        if verdict == "rejected":
+            decision = decision.model_copy(update={"verdict": ApprovalVerdict.REJECTED})
+        decisions.append(decision.model_dump(mode="json"))
+    return decisions
+
+
+def _effect_counts(effects: list[tuple[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for kind, _ in effects:
+        counts[kind] = counts.get(kind, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+async def _run_domain_case(gateway: ModelGateway, case: dict[str, Any]):
+    """Run one case to where a reviewer would leave it. Returns what a scorer needs."""
+    from langgraph.types import Command
+
+    env = world.DOMAIN_WORLDS[case["domain"]](gateway, case)
+    config = world.thread(case["id"])
+    if case.get("fault"):
+        _domain_fault(env, case["fault"]["failures"], case["fault"]["error"])
+
+    parked = await env.graph.ainvoke(env.graph_input, config)
+    proposed = intents(parked)
+    requested = {str(r["action_id"]) for r in parked.get("approval_requests") or []}
+    before_approval = list(env.effects())
+    final, resumes, completed = parked, 0, True
+    verdict = case.get("approval", "pending")
+    if parked.get("__interrupt__") and verdict != "pending":
+        command = Command(resume=_decisions(env, parked, verdict))
+        try:
+            final = await env.graph.ainvoke(command, config)
+        except InjectedFault:
+            completed = False
+            for resume in range(1, case.get("max_resumes", 0) + 1):
+                try:
+                    final = await env.graph.ainvoke(None, config)
+                except InjectedFault:
+                    continue
+                resumes, completed = resume, True
+                break
+    return env, parked, final, proposed, requested, before_approval, resumes, completed
+
+
+def _gate_proposals(
+    proposed: list[dict[str, Any]],
+    requested: set[str],
+    before: list[tuple[str, Any]],
+    labels: dict[str, Any],
+    observations: list[ActionObservation],
+) -> list[str]:
+    """Was every proposed action held for approval, with nothing reaching the world first?"""
+    failures: list[str] = []
+    for intent in proposed:
+        kind = intent["kind"]
+        if kind not in labels:
+            failures.append(f"{kind} has no label in approval_boundaries.json")
+            continue
+        prompted = str(intent["action_id"]) in requested
+        observation = ActionObservation(
+            action=kind,
+            consequential=labels[kind]["consequential"],
+            external_write=labels[kind]["external_write"],
+            prompted=prompted,
+            gated=prompted and not before,
+        )
+        observations.append(observation)
+        failures += _judge_gate(observation)
+    if before and proposed:
+        # A plan small and reversible enough to run unattended proposes
+        # nothing; one that proposed an action must not act before it.
+        failures.append(f"reached the outside world before any approval: {before}")
+    return failures
+
+
+def _judge_domain_outcome(case: dict[str, Any], actual: dict[str, Any]) -> list[str]:
+    expected = case["expected"]
+    failures = []
+    if actual["intents"] != sorted(expected["intents"]):
+        failures.append(f"proposed {actual['intents']}, expected {sorted(expected['intents'])}")
+    if actual["parks"] != expected["parks"]:
+        failures.append("stopped for approval" if actual["parks"] else "did not stop for approval")
+    if actual["effects"] != expected["effects"]:
+        failures.append(f"effects {actual['effects']}, expected {expected['effects']}")
+    if case.get("recoverable") and not actual["completed"]:
+        failures.append("did not finish by resuming")
+    return failures
+
+
+async def domain_workflows(gateway: ModelGateway) -> SuiteResult:
+    """The Calendar, Communications and File subgraphs end to end, per domain.
+
+    Scored on what was proposed (tool selection), whether every consequential
+    proposal was held for approval with nothing reaching the outside world
+    first (approval precision / recall), whether the run ended where it
+    should (completion), whether an injected executor fault was recovered by
+    resuming, and whether any effect landed twice.
+    """
+    data = dataset.load("domain_workflows.json")
+    labels = dataset.load("approval_boundaries.json")["action_kinds"]
+    ledger = SideEffectLedger()
+    observations: dict[str, list[ActionObservation]] = {}
+
+    async def one(case: dict[str, Any]) -> CaseResult:
+        (
+            env,
+            parked,
+            final,
+            proposed,
+            requested,
+            before,
+            resumes,
+            completed,
+        ) = await _run_domain_case(gateway, case)
+        effects = list(env.effects())
+        scope = ledger.scoped(case["id"])
+        for kind, identity in effects:
+            scope.record(kind, identity)
+        failures = _gate_proposals(
+            proposed, requested, before, labels, observations.setdefault(case["domain"], [])
+        )
+        actual = {
+            "intents": sorted(intent["kind"] for intent in proposed),
+            "parks": bool(parked.get("__interrupt__")),
+            "effects": _effect_counts(effects),
+            "effects_before_approval": len(before),
+            "completed": completed,
+            "resumes": resumes,
+            "receipts": [r["ok"] for r in final.get("action_receipts") or []],
+        }
+        failures += _judge_domain_outcome(case, actual)
+        duplicated = {k: c for k, c in ledger.duplicated().items() if k[0][0] == case["id"]}
+        if duplicated:
+            failures.append(f"duplicated side effects: {duplicated}")
+        return _judge(
+            "domain_workflows",
+            case["id"],
+            {
+                **case["expected"],
+                "tags": {"domain": case["domain"]},
+                "recoverable": case.get("recoverable"),
+            },
+            actual,
+            failures,
+        )
+
+    results = [await _timed(lambda c=c: one(c), "domain_workflows", c["id"]) for c in data["cases"]]
+    every = [o for domain in observations.values() for o in domain]
+    recoverable = [
+        r for c, r in zip(data["cases"], results, strict=True) if c.get("recoverable") and r.actual
+    ]
+    return SuiteResult(
+        "domain_workflows",
+        results,
+        {
+            **approval_metrics(every),
+            **_per_domain_approvals(observations),
+            "recovery_rate": (
+                round(sum(r.actual["completed"] for r in recoverable) / len(recoverable), 4)
+                if recoverable
+                else 0.0
+            ),
+            "recoverable_failures": len(recoverable),
+            "pass_rate": _rate(results),
+            **_effect_metrics(ledger),
+        },
+    )
+
+
 SUITES: dict[str, Suite] = {
     "routing": routing,
     "recruiter_events": recruiter_events,
@@ -950,6 +1198,7 @@ SUITES: dict[str, Suite] = {
     "human_review": human_review,
     "approvals": approvals,
     "recovery": recovery,
+    "domain_workflows": domain_workflows,
 }
 
 __all__ = [

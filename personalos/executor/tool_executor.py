@@ -82,22 +82,21 @@ from personalos.policy import (
     PolicyDenied,
     PolicyEngine,
 )
+from personalos.policy.actions import ACTION_POLICIES, ActionExecution
 from personalos.policy.permissions import Provenance
 
 logger = logging.getLogger(__name__)
 
 #: The classified tool each kind of action is evaluated as. The permission
 #: class and scopes policy applies come from this reference, so a kind with no
-#: entry falls through to an unclassified name and is denied.
+#: entry falls through to an unclassified name and is denied. Derived from
+#: `personalos.policy.actions.ACTION_POLICIES`, the one table that says which
+#: policy decision holds each kind -- and which its contract test checks.
 ACTION_TOOLS: Mapping[ActionKind, str] = MappingProxyType(
     {
-        ActionKind.SUBMIT_APPLICATION: "jobs.submit_application",
-        ActionKind.SEND_RECRUITER_MESSAGE: "google.gmail_send_message",
-        ActionKind.SEND_EMAIL: "google.gmail_send_message",
-        ActionKind.OVERWRITE_DOCUMENT: "files.overwrite_document",
-        ActionKind.CREATE_CALENDAR_EVENT: "google.calendar_create_event",
-        ActionKind.UPDATE_CALENDAR_EVENT: "google.calendar_update_event",
-        ActionKind.CANCEL_CALENDAR_EVENT: "google.calendar_delete_event",
+        kind: policy.tool
+        for kind, policy in ACTION_POLICIES.items()
+        if policy.execution is ActionExecution.EXECUTOR
     }
 )
 

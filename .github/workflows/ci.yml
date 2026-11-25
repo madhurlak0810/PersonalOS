@@ -100,6 +100,11 @@ jobs:
         # Fails if a node registered in any graph has no typed contract in
         # personalos.graphs.contracts or no @covers_node contract test.
         run: pytest tests/contracts/test_node_contract_coverage.py -v
+      - name: Action policy gate
+        # Fails if an ActionKind has no row in personalos/policy/actions.py, or
+        # if policy would let any call it makes run without approval (a rule
+        # or permission class removed, a tool left unclassified).
+        run: pytest tests/contracts/test_action_policy_coverage.py -v
       - name: Adversarial tests
         # The security boundary: prompt injection, approval tampering, path
         # traversal, permission escalation and hostile tool payloads. Its own
@@ -113,6 +118,12 @@ jobs:
         # evals/thresholds.json: approval recall below 100% (external writes
         # included) or any duplicated side effect.
         run: python -m evals.harness
+      - name: Per-domain floors
+        # The same run's quality section, recomputed from its results file
+        # against evals/thresholds.json: fails when routing accuracy in any
+        # domain, approval recall in any domain, or the forbidden-route count
+        # breaks its floor. Its own step so the failure names what it is.
+        run: python -m evals.harness quality evals/model_benchmarks/results/rules/results.json
       - name: Quality report
         if: always()
         run: |

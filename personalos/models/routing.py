@@ -22,78 +22,137 @@ Both satisfy the same protocol, so the composition root chooses between them
 without the graph changing at all.
 """
 
+import re
 from typing import Any, Protocol
 
 from personalos.domain.routing import RouteDecision, RouteDomain
 from personalos.models.structured import DEFAULT_MAX_ATTEMPTS, invoke_structured
 from personalos.observability.tracing import model_name, model_span
 
-#: Confidence returned when at least one keyword for a domain matches.
+#: Confidence returned when one domain clearly leads on keywords.
 _MATCH_CONFIDENCE = 0.85
+
+#: Confidence returned for a tie between domains: still above the threshold,
+#: because the request *is* about something -- `ambiguous` is what sends it
+#: back, with the domains it could be.
+_TIE_CONFIDENCE = 0.65
 
 #: Confidence returned when nothing matches; deliberately low so the
 #: Supervisor's confidence gate routes to clarification rather than guessing.
 _NO_MATCH_CONFIDENCE = 0.2
 
-#: Keyword sets per reserved domain, including domains this build does not
-#: yet support -- the classifier can still recognize intent to name them, and
-#: `ensure_supported_domain` is what turns that recognition into a rejection.
-_DOMAIN_KEYWORDS: dict[RouteDomain, tuple[str, ...]] = {
-    RouteDomain.JOB: ("job", "resume", "apply", "interview", "recruiter", "position", "hiring"),
+#: Weight of a keyword that names a topic the whole system is about rather
+#: than a system it acts on: an interview can be an email, an event or a job
+#: application, so "interview" alone should not outvote "email".
+_WEAK = 0.5
+
+#: Keyword sets per domain, each with its weight (1.0 unless noted). A domain
+#: added to `RouteDomain` gets an entry here; `tests/unit/test_routing_classifier.py`
+#: fails for one that has none.
+_DOMAIN_KEYWORDS: dict[RouteDomain, tuple[tuple[str, float], ...]] = {
+    RouteDomain.JOB: (
+        ("job", 1.0),
+        ("apply", 1.0),
+        ("application", 1.0),
+        ("position", 1.0),
+        ("hiring", 1.0),
+        ("role", 1.0),
+        ("opening", 1.0),
+        ("tailor", 1.0),
+        ("salary", 1.0),
+        ("offer", _WEAK),
+        ("resume", _WEAK),
+        ("interview", _WEAK),
+        ("recruiter", _WEAK),
+    ),
     # Phrases about the person's own documents, so "find my latest resume"
-    # outweighs the single job keyword "resume" it contains. A tie still goes
-    # to JOB, which is listed first: "tailor my resume for this role" is a
-    # job-search request that happens to name a document.
+    # outweighs the single weak job keyword "resume" it contains, while
+    # "tailor my resume for this role" stays a job-search request.
     RouteDomain.FILE: (
-        "file",
-        "document",
-        "upload",
-        "attachment",
-        "folder",
-        "find my",
-        "where is my",
-        "where's my",
-        "latest",
-        "newest",
-        "most recent",
-        "my resume",
-        "my cv",
-        "cover letter",
-        "summarize my",
-        "summarise my",
-        "organize my",
-        "organise my",
-        "rename",
+        ("file", 1.0),
+        ("document", 1.0),
+        ("upload", 1.0),
+        ("attachment", 1.0),
+        ("folder", 1.0),
+        ("find my", 1.0),
+        ("where is my", 1.0),
+        ("where's my", 1.0),
+        ("latest", 1.0),
+        ("newest", 1.0),
+        ("most recent", 1.0),
+        ("cover letter", 1.0),
+        ("summarize my", 1.0),
+        ("summarise my", 1.0),
+        ("organize my", 1.0),
+        ("organise my", 1.0),
+        ("rename", 1.0),
+        ("pdf", 1.0),
     ),
     RouteDomain.COMMUNICATIONS: (
-        "email",
-        "message",
-        "inbox",
-        "reply",
-        "thread",
-        "triage",
-        "action item",
+        ("email", 1.0),
+        ("e-mail", 1.0),
+        ("inbox", 1.0),
+        ("reply", 1.0),
+        ("thread", 1.0),
+        ("triage", 1.0),
+        ("action item", 1.0),
+        ("unread", 1.0),
+        ("message", _WEAK),
+        ("send", _WEAK),
     ),
     RouteDomain.CALENDAR: (
-        "calendar",
-        "schedule",
-        "meeting",
-        "availability",
-        "available",
-        "event",
-        "am i free",
-        "free time",
-        "free slot",
-        "reschedule",
-        "appointment",
-        "move my",
+        ("calendar", 1.0),
+        ("schedule", 1.0),
+        ("meeting", 1.0),
+        ("availability", 1.0),
+        ("available", 1.0),
+        ("am i free", 1.0),
+        ("free time", 1.0),
+        ("free slot", 1.0),
+        ("reschedule", 1.0),
+        ("appointment", 1.0),
+        ("move my", 1.0),
         # "interview times" also matches "interview time": a request for slots
-        # outweighs the one job keyword ("interview") it contains.
-        "interview time",
-        "interview times",
-        "book a",
+        # outweighs the weak job keyword ("interview") it contains.
+        ("interview time", 1.0),
+        ("interview times", 1.0),
+        ("book a", 1.0),
+        ("event", _WEAK),
     ),
 }
+
+#: Where one request becomes several: the same separators the rule-based task
+#: planner splits on, so the two agree on what a clause is.
+_CLAUSE_SPLIT = re.compile(
+    r"(?:,?\s+then|,?\s+after\s+that|;|,\s*and|\s+and(?:\s+also)?|\s+also)\s+",
+    re.IGNORECASE,
+)
+
+#: A clause needs at least this much keyword weight to count as a domain of
+#: its own in a multi-domain request: one weak word is not a second request.
+_CLAUSE_MIN_SCORE = 1.0
+
+
+def _scores(text: str) -> list[tuple[RouteDomain, float]]:
+    """Every domain's keyword weight in `text`, highest first; ties in enum order."""
+    lowered = text.lower()
+    scored = [
+        (domain, sum(weight for keyword, weight in keywords if keyword in lowered))
+        for domain, keywords in _DOMAIN_KEYWORDS.items()
+    ]
+    order = {domain: index for index, domain in enumerate(RouteDomain)}
+    return sorted(scored, key=lambda item: (-item[1], order[item[0]]))
+
+
+def _clause_domains(message: str) -> list[RouteDomain]:
+    """The domain of each clause that clearly names one, in order, without repeats."""
+    found: list[RouteDomain] = []
+    for clause in _CLAUSE_SPLIT.split(message):
+        ranked = _scores(clause)
+        (best, top), (_, runner_up) = ranked[0], ranked[1]
+        if top >= _CLAUSE_MIN_SCORE and top > runner_up and best not in found:
+            found.append(best)
+    return found
 
 
 #: System prompt for `StructuredLLMIntentClassifier`. The domain list is built
@@ -117,7 +176,20 @@ or when it names no domain at all. Do not inflate confidence to force a route.
 
 Classify what the user actually asked for. Some domains are recognized but not \
 yet enabled; the caller handles that, so never substitute an enabled domain \
-for the one the request is really about."""
+for the one the request is really about.
+
+Three more fields, each of which can only make the caller more careful:
+- `secondary_domains`: when the request asks for work in more than one domain \
+("find the invite email and put it on my calendar"), set `domain` to the first \
+and list the others here. Leave it empty for a single-domain request.
+- `ambiguous`: true when the request could belong to more than one domain and \
+you cannot tell which was meant ("deal with the Acme meeting message"). List \
+the other readings in `secondary_domains`.
+- `access_escalation`: true when the request asks to skip an approval, act \
+without checking with the user, approve something itself, or use tools or \
+permissions beyond what the task needs. Classify the domain as usual.
+
+Requests that belong to none of the domains get low confidence."""
 
 #: One line per domain, so the prompt and the enum cannot drift apart.
 _DOMAIN_DESCRIPTIONS: dict[RouteDomain, str] = {
@@ -218,25 +290,37 @@ class KeywordIntentClassifier:
             return self._classify(message)
 
     def _classify(self, message: str) -> RouteDecision:
-        text = (message or "").lower()
+        text = message or ""
+        clauses = _clause_domains(text)
+        if len(clauses) > 1:
+            return RouteDecision(
+                domain=clauses[0],
+                confidence=_MATCH_CONFIDENCE,
+                secondary_domains=tuple(clauses[1:]),
+                reasoning="clauses name " + ", ".join(d.value for d in clauses),
+            )
 
-        best_domain: RouteDomain | None = None
-        best_hits = 0
-        for domain, keywords in _DOMAIN_KEYWORDS.items():
-            hits = sum(1 for keyword in keywords if keyword in text)
-            if hits > best_hits:
-                best_domain, best_hits = domain, hits
-
-        if best_domain is None:
+        ranked = _scores(text)
+        (best, top), (second, runner_up) = ranked[0], ranked[1]
+        if top == 0:
             return RouteDecision(
                 domain=RouteDomain.JOB,
                 confidence=_NO_MATCH_CONFIDENCE,
                 reasoning="no domain keywords matched",
             )
+        if runner_up == top:
+            tied = tuple(domain for domain, score in ranked if score == top)
+            return RouteDecision(
+                domain=best,
+                confidence=_TIE_CONFIDENCE,
+                ambiguous=True,
+                secondary_domains=tied[1:],
+                reasoning="keywords tie between " + ", ".join(d.value for d in tied),
+            )
         return RouteDecision(
-            domain=best_domain,
+            domain=best,
             confidence=_MATCH_CONFIDENCE,
-            reasoning=f"matched {best_hits} keyword(s) for '{best_domain.value}'",
+            reasoning=f"keyword weight {top:g} for '{best.value}' (next: {second.value} {runner_up:g})",
         )
 
 

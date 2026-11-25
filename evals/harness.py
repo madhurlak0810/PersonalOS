@@ -183,6 +183,8 @@ def trend(args: argparse.Namespace) -> int:
         entries = [entry for entry in entries if entry.get("config") == args.config_name]
     names = args.metric or [
         "routing_accuracy",
+        "routing_accuracy_communications",
+        "routing_accuracy_calendar",
         "external_write_approval_recall",
         "approval_precision",
         "duplicate_side_effect_rate",
