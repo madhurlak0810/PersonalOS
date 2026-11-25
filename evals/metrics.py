@@ -14,13 +14,16 @@ rate, not a rate of zero.
 | Metric | From | What |
 | --- | --- | --- |
 | `routing_accuracy` | `routing` cases | route and, where labelled, domain both right |
-| `approval_precision` | `approvals` | approval prompts that were for consequential actions |
-| `approval_recall` | `approvals` | consequential actions that could not run unattended |
-| `external_write_approval_recall` | `approvals` | the same, for external writes only; must be 1.0 |
+| `routing_accuracy_<domain>` | `routing` cases | the same, over one domain's golden file |
+| `forbidden_route_count` | `routing` cases | cases that reached a route their `never_routes` names; must be 0 |
+| `approval_precision` | `approvals`, `domain_workflows` | approval prompts that were for consequential actions |
+| `approval_recall` | `approvals`, `domain_workflows` | consequential actions that could not run unattended |
+| `external_write_approval_recall` | `approvals`, `domain_workflows` | the same, for external writes only; must be 1.0 |
+| `<approval metric>_<domain>` | `approvals`, `domain_workflows` | each of the three, per domain; the worst suite counts |
 | `tool_call_validity_rate` | model spans | model attempts whose output passed its schema |
-| `tool_selection_accuracy` | `scenarios` cases | runs that proposed exactly the expected actions |
-| `workflow_completion_rate` | `scenarios` cases | runs that reached the expected end with no repair |
-| `recovery_rate` | `recovery`, else spans | recoverable failures that finished by resuming |
+| `tool_selection_accuracy[_<domain>]` | `scenarios`, `domain_workflows` | runs that proposed exactly the expected actions |
+| `workflow_completion_rate[_<domain>]` | `scenarios`, `domain_workflows` | runs that reached the expected end with no repair |
+| `recovery_rate[_<domain>]` | `recovery`, `domain_workflows`, else spans | recoverable failures that finished by resuming |
 | `mean_recovery_time_ms` | node spans | first failure to the successful retry of the same node |
 | `*_p50_ms`, `*_p95_ms` | node and model spans | interactive vs long-running steps; model calls |
 | `model_tokens_per_sec` | model spans | output tokens over model time, where usage was recorded |
@@ -38,17 +41,38 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from personalos.graphs import calendar as cal
+from personalos.graphs import communications as comms
+from personalos.graphs import file_task as ft
 from personalos.graphs import job_search as js
 from personalos.graphs import supervisor as sv
 from personalos.observability.tracing import Attr
 
 from .telemetry import SpanRecord
 
-#: Which step each graph node belongs to, for latency. Nodes not listed
-#: (persistence, approval, execution) are neither kind of step.
-STEP_NODES: dict[str, tuple[str, ...]] = {
-    "routing": (sv.LOAD_CONTEXT, sv.CLASSIFY_INTENT, sv.PLAN_WORK, sv.CLARIFY),
+#: Which step each graph node belongs to, for latency. A bare name matches
+#: that node in any graph; a `(graph, node)` pair only in that graph, for the
+#: names two subgraphs share (`parse_request`). Nodes not listed (persistence,
+#: approval checkpoints) are neither kind of step.
+STEP_NODES: dict[str, tuple[str | tuple[str, str], ...]] = {
+    "routing": (sv.LOAD_CONTEXT, sv.CLASSIFY_INTENT, sv.PLAN_WORK, sv.CLARIFY, sv.PLAN_TASK),
     "extraction": (js.CLASSIFY_RECRUITER_EVENTS,),
+    "calendar_read": (
+        (cal.GRAPH_NAME, cal.PARSE_REQUEST),
+        (cal.GRAPH_NAME, cal.CHECK_AVAILABILITY),
+        (cal.GRAPH_NAME, cal.PLAN_CALENDAR_CHANGE),
+    ),
+    "communications_read": (
+        (comms.GRAPH_NAME, comms.PARSE_REQUEST),
+        (comms.GRAPH_NAME, comms.TRIAGE_INBOX),
+        (comms.GRAPH_NAME, comms.LOAD_THREAD),
+        (comms.GRAPH_NAME, comms.LINK_APPLICATION),
+    ),
+    "file_read": (
+        (ft.GRAPH_NAME, ft.DISCOVER_FILES),
+        (ft.GRAPH_NAME, ft.PLAN_FILE_TASK),
+        (ft.GRAPH_NAME, ft.READ_DOCUMENTS),
+    ),
     "discovery": (
         js.LOAD_SEARCH_PROFILE,
         js.SEARCH_PROVIDERS,
@@ -60,15 +84,50 @@ STEP_NODES: dict[str, tuple[str, ...]] = {
         js.RANK,
         js.SHORTLIST,
     ),
-    "drafting": (js.PREPARE_APPLICATION_PACKET, js.DRAFT_FOLLOW_UP),
+    "drafting": (
+        js.PREPARE_APPLICATION_PACKET,
+        js.DRAFT_FOLLOW_UP,
+        (comms.GRAPH_NAME, comms.DRAFT_REPLY),
+    ),
+    "external_writes": (
+        (cal.GRAPH_NAME, cal.EXECUTE_CALENDAR_CHANGES),
+        (comms.GRAPH_NAME, comms.EXECUTE_SEND),
+        (ft.GRAPH_NAME, ft.APPLY_FILE_CHANGES),
+        (ft.GRAPH_NAME, ft.VERIFY_FILE_CHANGES),
+    ),
 }
 
-#: A person is waiting on these.
-INTERACTIVE_STEPS = ("routing", "extraction")
-#: These run in the background.
-LONG_RUNNING_STEPS = ("discovery", "drafting")
+#: A person is waiting on these: routing, and the reads that answer a
+#: question or build what a reviewer is shown.
+INTERACTIVE_STEPS = ("routing", "extraction", "calendar_read", "communications_read", "file_read")
+#: These run in the background, or after a reviewer has said yes.
+LONG_RUNNING_STEPS = ("discovery", "drafting", "external_writes")
 
-_STEP_OF_NODE = {node: step for step, nodes in STEP_NODES.items() for node in nodes}
+_STEP_OF_NODE: dict[str | tuple[str, str], str] = {
+    node: step for step, nodes in STEP_NODES.items() for node in nodes
+}
+
+
+def _step_of(span: SpanRecord) -> str | None:
+    node = span.get(Attr.NODE)
+    return _STEP_OF_NODE.get((span.get(Attr.GRAPH), node)) or _STEP_OF_NODE.get(node)
+
+
+#: The domains per-domain metrics are reported for, as `<metric>_<domain>`.
+DOMAINS = ("job", "file", "communications", "calendar")
+
+#: What a routing route is called in the confusion matrix: the domain it hands
+#: work to, `plan` for a cross-domain plan, or `clarify`.
+ROUTE_LABELS = {
+    "job_search": "job",
+    "file_task": "file",
+    "communications": "communications",
+    "calendar": "calendar",
+    "plan": "plan",
+    "clarify": "clarify",
+}
+CONFUSION_LABELS = ("job", "file", "communications", "calendar", "plan", "clarify")
+
 
 #: Span attributes a model call's output token count may arrive under: the
 #: OpenTelemetry GenAI convention first, then what common LangChain
@@ -186,7 +245,7 @@ def latency_metrics(spans: Sequence[SpanRecord]) -> dict[str, Any]:
     """
     by_step: dict[str, list[float]] = defaultdict(list)
     for span in _node_spans(spans):
-        step = _STEP_OF_NODE.get(span.get(Attr.NODE))
+        step = _step_of(span)
         if step is not None:
             by_step[step].append(span.duration_ms)
 
@@ -281,37 +340,81 @@ def _scored(cases: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return [case for case in cases if case["status"] in ("pass", "fail", "error")]
 
 
-def routing_metrics(document: dict[str, Any]) -> dict[str, Any]:
-    """Routing decisions, overall and per kind of decision.
+def _decision_kind(expected: dict[str, Any]) -> str:
+    """What kind of routing decision a case asks for."""
+    route = expected["route"]
+    if route == "clarify":
+        reason = expected.get("reason")
+        if reason in ("ambiguous", "access_escalation", "multi_domain"):
+            return reason
+        return "reject" if expected.get("domain") else "clarify"
+    return "plan" if route == "plan" else "hand_off"
 
-    The kinds: hand to a domain (`job_search`), turn away a request for a
-    domain the system does not handle yet (`reject`: a clarify that must name
-    the domain), and ask back about a request that names none (`clarify`).
+
+def routing_metrics(document: dict[str, Any]) -> dict[str, Any]:
+    """Routing decisions: overall, per domain, per kind of case, and as a confusion matrix.
+
+    A case's domain is the golden file it came from (`expected.tags.domain`);
+    the matrix counts expected route against actual route, both named by
+    `ROUTE_LABELS`, so a calendar request handed to communications is the
+    `calendar` row's `communications` cell. `forbidden_routes` counts cases
+    that reached a route their `never_routes` names -- an unsafe outcome,
+    counted apart from a merely wrong one.
     """
     by_kind: dict[str, list[bool]] = defaultdict(list)
+    by_domain: dict[str, list[bool]] = defaultdict(list)
+    by_case_kind: dict[str, list[bool]] = defaultdict(list)
+    confusion = {row: dict.fromkeys(CONFUSION_LABELS, 0) for row in CONFUSION_LABELS}
+    forbidden: list[str] = []
     for case in _scored(_cases(document, "routing")):
         expected = case["expected"]
-        if expected["route"] == "job_search":
-            kind = "job_search"
-        else:
-            kind = "reject" if expected.get("domain") else "clarify"
-        by_kind[kind].append(case["status"] == "pass")
+        ok = case["status"] == "pass"
+        tags = expected.get("tags") or {}
+        by_kind[_decision_kind(expected)].append(ok)
+        by_domain[tags.get("domain", "unlabelled")].append(ok)
+        by_case_kind[tags.get("kind", "unlabelled")].append(ok)
+        actual = case.get("actual") or {}
+        if actual.get("route") in ROUTE_LABELS:
+            confusion[ROUTE_LABELS[expected["route"]]][ROUTE_LABELS[actual["route"]]] += 1
+        never = expected.get("never_routes") or ()
+        if never and (not actual or actual.get("route") in never):
+            forbidden.append(case["case_id"])
     every = [ok for oks in by_kind.values() for ok in oks]
+
+    def table(groups: dict[str, list[bool]]) -> dict[str, Any]:
+        return {
+            name: {"cases": len(oks), "accuracy": _ratio(sum(oks), len(oks))}
+            for name, oks in sorted(groups.items())
+        }
+
     return {
         "routing_accuracy": _ratio(sum(every), len(every)),
-        "by_decision": {
-            kind: {"cases": len(oks), "accuracy": _ratio(sum(oks), len(oks))}
-            for kind, oks in sorted(by_kind.items())
-        },
+        "by_decision": table(by_kind),
+        "by_domain": table(by_domain),
+        "by_case_kind": table(by_case_kind),
+        "confusion": {"labels": list(CONFUSION_LABELS), "matrix": confusion},
+        "forbidden_routes": sorted(forbidden),
     }
 
 
-def tool_selection_accuracy(document: dict[str, Any]) -> float | None:
-    """Scenario runs that proposed exactly the actions the golden case expects."""
+def _workflow_cases(document: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Scored end-to-end runs and their domain: Job Search scenarios, then the new domains'."""
+    runs = [("job", case) for case in _scored(_cases(document, "scenarios"))]
+    runs += [
+        ((case["expected"] or {}).get("tags", {}).get("domain", "unlabelled"), case)
+        for case in _scored(_cases(document, "domain_workflows"))
+    ]
+    return runs
+
+
+def tool_selection_accuracy(document: dict[str, Any], domain: str | None = None) -> float | None:
+    """Runs that proposed exactly the actions the golden case expects. Optionally one domain."""
     labelled = [
         case
-        for case in _scored(_cases(document, "scenarios"))
-        if "intents" in (case["expected"] or {}) and case["actual"]
+        for case_domain, case in _workflow_cases(document)
+        if (domain is None or case_domain == domain)
+        and "intents" in (case["expected"] or {})
+        and case["actual"]
     ]
     right = sum(
         sorted(case["actual"]["intents"]) == sorted(case["expected"]["intents"])
@@ -320,14 +423,77 @@ def tool_selection_accuracy(document: dict[str, Any]) -> float | None:
     return _ratio(right, len(labelled))
 
 
-def workflow_completion_rate(document: dict[str, Any]) -> float | None:
-    """Scenario runs that reached the expected end state on their own."""
-    scored = _scored(_cases(document, "scenarios"))
+def workflow_completion_rate(document: dict[str, Any], domain: str | None = None) -> float | None:
+    """Runs that reached the expected end state on their own. Optionally one domain."""
+    scored = [
+        case
+        for case_domain, case in _workflow_cases(document)
+        if domain is None or case_domain == domain
+    ]
     return _ratio(sum(case["status"] == "pass" for case in scored), len(scored))
+
+
+def _recovery(document: dict[str, Any]) -> dict[str, Any]:
+    """Recoverable failures that finished by resuming, from both suites that inject them."""
+    finished: dict[str, list[bool]] = defaultdict(list)
+    for case in _scored(_cases(document, "recovery")):
+        if (case["expected"] or {}).get("recoverable") and case["actual"]:
+            finished["job"].append(bool(case["actual"]["completed"]))
+    for case in _scored(_cases(document, "domain_workflows")):
+        expected = case["expected"] or {}
+        if expected.get("recoverable") and case["actual"]:
+            domain = expected.get("tags", {}).get("domain", "unlabelled")
+            finished[domain].append(bool(case["actual"]["completed"]))
+    every = [ok for oks in finished.values() for ok in oks]
+    return {
+        "recovery_rate": _ratio(sum(every), len(every)),
+        "by_domain": {
+            domain: _ratio(sum(oks), len(oks)) for domain, oks in sorted(finished.items())
+        },
+        "recoverable_failures": len(every),
+    }
 
 
 def _suite_metric(document: dict[str, Any], suite: str, name: str) -> Any:
     return document.get("suites", {}).get(suite, {}).get("metrics", {}).get(name)
+
+
+#: Suites that measure approval gating: policy and the Job Search graph, and
+#: the new domains' subgraphs end to end.
+APPROVAL_SUITES = ("approvals", "domain_workflows")
+_APPROVAL_RATES = ("approval_precision", "approval_recall", "external_write_approval_recall")
+
+
+def _worst(values: Iterable[Any]) -> float | None:
+    """The lowest of the values reported; None when no suite reported one."""
+    present = [value for value in values if value is not None]
+    return min(present) if present else None
+
+
+def _approvals(document: dict[str, Any]) -> dict[str, Any]:
+    """Approval precision and recall, overall and per domain, across `APPROVAL_SUITES`.
+
+    Each rate is the worst any suite reported: a recall of 1.0 at the policy
+    boundary does not excuse a subgraph that ran a write unattended.
+    """
+    names = [*_APPROVAL_RATES, *(f"{n}_{d}" for n in _APPROVAL_RATES for d in DOMAINS)]
+    combined: dict[str, Any] = {
+        name: _worst(_suite_metric(document, suite, name) for suite in APPROVAL_SUITES)
+        for name in names
+    }
+    for count in ("approval_prompts", "consequential_actions", "external_writes"):
+        combined[count] = sum(
+            _suite_metric(document, suite, count) or 0 for suite in APPROVAL_SUITES
+        )
+    for listed in ("ungated_consequential", "unneeded_prompts"):
+        combined[listed] = sorted(
+            {
+                action
+                for suite in APPROVAL_SUITES
+                for action in _suite_metric(document, suite, listed) or ()
+            }
+        )
+    return combined
 
 
 def _grounding(document: dict[str, Any]) -> float | None:
@@ -361,39 +527,48 @@ def _duplicates(document: dict[str, Any]) -> dict[str, Any]:
 def compute(document: dict[str, Any] | None, spans: Sequence[SpanRecord]) -> dict[str, Any]:
     """The quality section for one run: flat headline `metrics`, and the detail behind them."""
     document = document or {}
-    approvals = {
-        name: _suite_metric(document, "approvals", name)
-        for name in (
-            "approval_precision",
-            "approval_recall",
-            "external_write_approval_recall",
-            "approval_prompts",
-            "consequential_actions",
-            "external_writes",
-            "ungated_consequential",
-            "unneeded_prompts",
-        )
-    }
+    approvals = _approvals(document)
     routing = routing_metrics(document)
     latency = latency_metrics(spans)
     validity = tool_call_validity(spans)
     span_recovery = recovery_from_spans(spans)
     duplicates = _duplicates(document)
-    suite_recovery = _suite_metric(document, "recovery", "recovery_rate")
 
+    recovery = _recovery(document)
     metrics = {
         "routing_accuracy": routing["routing_accuracy"],
+        **{
+            f"routing_accuracy_{domain}": (routing["by_domain"].get(domain) or {}).get("accuracy")
+            for domain in DOMAINS
+        },
+        "forbidden_route_count": (
+            len(routing["forbidden_routes"]) if routing["by_domain"] else None
+        ),
         "approval_precision": approvals["approval_precision"],
         "approval_recall": approvals["approval_recall"],
         "external_write_approval_recall": approvals["external_write_approval_recall"],
+        **{
+            f"{name}_{domain}": approvals[f"{name}_{domain}"]
+            for name in _APPROVAL_RATES
+            for domain in DOMAINS
+        },
         "tool_call_validity_rate": validity["tool_call_validity_rate"],
         "tool_selection_accuracy": tool_selection_accuracy(document),
+        **{
+            f"tool_selection_accuracy_{domain}": tool_selection_accuracy(document, domain)
+            for domain in DOMAINS
+        },
         "workflow_completion_rate": workflow_completion_rate(document),
+        **{
+            f"workflow_completion_rate_{domain}": workflow_completion_rate(document, domain)
+            for domain in DOMAINS
+        },
         "recovery_rate": (
-            suite_recovery
-            if _suite_metric(document, "recovery", "recoverable_failures")
+            recovery["recovery_rate"]
+            if recovery["recoverable_failures"]
             else span_recovery["recovery_rate"]
         ),
+        **{f"recovery_rate_{domain}": recovery["by_domain"].get(domain) for domain in DOMAINS},
         "mean_recovery_time_ms": span_recovery["mean_recovery_time_ms"],
         "interactive_p50_ms": latency["interactive"]["p50_ms"],
         "interactive_p95_ms": latency["interactive"]["p95_ms"],
@@ -416,7 +591,7 @@ def compute(document: dict[str, Any] | None, spans: Sequence[SpanRecord]) -> dic
         "routing": routing,
         "approvals": approvals,
         "tool_calls": validity,
-        "recovery": {"suite_recovery_rate": suite_recovery, "spans": span_recovery},
+        "recovery": {**recovery, "spans": span_recovery},
         "latency": latency,
         "side_effects": duplicates,
         "spans": len(spans),
@@ -476,6 +651,10 @@ def check_thresholds(
 
 __all__ = [
     "STEP_NODES",
+    "DOMAINS",
+    "CONFUSION_LABELS",
+    "ROUTE_LABELS",
+    "APPROVAL_SUITES",
     "INTERACTIVE_STEPS",
     "LONG_RUNNING_STEPS",
     "OUTPUT_TOKEN_ATTRIBUTES",

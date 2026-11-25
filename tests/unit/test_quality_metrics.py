@@ -143,11 +143,10 @@ def test_missing_data_breaches_only_a_critical_threshold():
 
 
 def test_a_warning_does_not_fail_the_gate():
-    passing = {"external_write_approval_recall": 1.0, "approval_recall": 1.0}
-    breaches = metrics.check_thresholds(
-        {**passing, "duplicate_side_effect_rate": 0.0, "routing_accuracy": 0.5},
-        metrics.load_thresholds(),
-    )
+    thresholds = metrics.load_thresholds()
+    # Every critical bound met exactly, whatever the config lists.
+    passing = {t.metric: t.min if t.min is not None else t.max for t in thresholds if t.critical}
+    breaches = metrics.check_thresholds({**passing, "routing_accuracy": 0.5}, thresholds)
     document = {"cases": [], "quality": {"breaches": breaches}}
 
     assert [(b["metric"], b["critical"]) for b in breaches] == [("routing_accuracy", False)]

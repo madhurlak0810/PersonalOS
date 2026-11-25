@@ -11,8 +11,11 @@ A world is built fresh for every case: nothing a case does is visible to the
 next.
 """
 
-from collections.abc import Sequence
+import tempfile
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
@@ -24,10 +27,16 @@ from personalos.domain.job_search import (
 )
 from personalos.domain.models import ApplicationStatus
 from personalos.domain.recruiter_events import ApplicationCandidate
+from personalos.domain.routing import RouteDomain
+from personalos.domain.task_plan import PlanStep, StepRecord, StepRef, StepStatus
 from personalos.graphs.job_search import JobSearchGraph
+from personalos.graphs.plan_steps import StepContext
 from personalos.graphs.supervisor import SupervisorGraph, SupervisorState
 from personalos.models.gateway import ModelGateway
 from personalos.retrieval.job_matching import HybridJobMatcher
+from tests.fixtures import calendar as calendar_fixtures
+from tests.fixtures import communications as communications_fixtures
+from tests.fixtures import file_task as file_fixtures
 from tests.fixtures import job_search_fakes as fakes
 
 #: Every case runs as this user, and an inbound-mail case's one application
@@ -77,24 +86,84 @@ class EchoCalendarSubgraph(EchoJobSubgraph):
     """Records the calendar tasks the Supervisor hands off."""
 
 
-def supervisor(
-    gateway: ModelGateway,
-) -> tuple[
-    Any, EchoJobSubgraph, EchoFileSubgraph, EchoCommunicationsSubgraph, EchoCalendarSubgraph
-]:
-    """The compiled Supervisor over the gateway's intent classifier."""
-    job_subgraph = EchoJobSubgraph()
-    file_subgraph = EchoFileSubgraph()
-    communications_subgraph = EchoCommunicationsSubgraph()
-    calendar_subgraph = EchoCalendarSubgraph()
-    graph = SupervisorGraph(
+class EchoStepRunner:
+    """A `PlanStepRunner` that records the step it was handed and reports it done.
+
+    The routing suite measures whether a cross-domain request was planned,
+    and into which domains -- not what each step's subgraph then did.
+    """
+
+    def __init__(self, domain: RouteDomain) -> None:
+        self.domain = domain
+        self.steps: list[PlanStep] = []
+
+    async def run(
+        self, step: PlanStep, inputs: Mapping[str, StepRef], context: StepContext
+    ) -> StepRecord:
+        self.steps.append(step)
+        return StepRecord(step_id=step.id, status=StepStatus.SUCCEEDED, outcome="done")
+
+    async def poll(self, step: PlanStep, record: StepRecord, context: StepContext) -> StepRecord:
+        return record
+
+
+@dataclass
+class SupervisorWorld:
+    """The compiled Supervisor and the echoes a routing case reads its route from."""
+
+    graph: Any
+    #: The uncompiled `SupervisorGraph`, for `resolve`: why a decision clarified.
+    graph_owner: Any
+    job: EchoJobSubgraph
+    file: EchoFileSubgraph
+    communications: EchoCommunicationsSubgraph
+    calendar: EchoCalendarSubgraph
+    steps: dict[RouteDomain, EchoStepRunner]
+
+    def route(self, final: dict[str, Any]) -> str:
+        """Where the request went: a subgraph, a cross-domain `plan`, or `clarify`."""
+        if final.get("plan_kind") == "plan":
+            return "plan"
+        for name, echo in (
+            ("job_search", self.job),
+            ("file_task", self.file),
+            ("communications", self.communications),
+            ("calendar", self.calendar),
+        ):
+            if echo.calls:
+                return name
+        return "clarify"
+
+
+def supervisor(gateway: ModelGateway) -> SupervisorWorld:
+    """The compiled Supervisor as the worker boots it, over the gateway's models.
+
+    Intent classifier and cross-domain task planner both come from the
+    gateway, with every domain's subgraph and plan-step runner wired, so a
+    routing case takes the same path a real request does: planned across
+    domains first, classified to one otherwise.
+    """
+    steps = {domain: EchoStepRunner(domain) for domain in RouteDomain}
+    world = SupervisorWorld(
+        graph=None,
+        graph_owner=None,
+        job=EchoJobSubgraph(),
+        file=EchoFileSubgraph(),
+        communications=EchoCommunicationsSubgraph(),
+        calendar=EchoCalendarSubgraph(),
+        steps=steps,
+    )
+    world.graph_owner = SupervisorGraph(
         gateway.intent_classifier(),
-        job_subgraph,
-        file_subgraph=file_subgraph,
-        communications_subgraph=communications_subgraph,
-        calendar_subgraph=calendar_subgraph,
-    ).build()
-    return graph, job_subgraph, file_subgraph, communications_subgraph, calendar_subgraph
+        world.job,
+        file_subgraph=world.file,
+        communications_subgraph=world.communications,
+        calendar_subgraph=world.calendar,
+        task_planner=gateway.task_planner(),
+        step_runners=steps,
+    )
+    world.graph = world.graph_owner.build()
+    return world
 
 
 @dataclass
@@ -158,6 +227,148 @@ def job_search(
     )
 
 
+# --- The new domains' subgraphs ------------------------------------------------------
+
+
+@dataclass
+class DomainWorld:
+    """One compiled domain subgraph, its first input, and how to read its effects.
+
+    `executor_owner` is the object whose `action_executor` (or `files`) a
+    recovery case wraps to inject a fault; `effects()` reads what reached the
+    fake outside world, keyed by what makes two effects the same one.
+    """
+
+    domain: str
+    graph: Any
+    graph_input: dict[str, Any]
+    fixtures: Any
+    approve: Any
+    effects: Any
+    executor_owner: Any
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+def _calendar_events(entries: Sequence[dict[str, Any]]):
+    cf = calendar_fixtures
+    events = []
+    for entry in entries:
+        if entry["kind"] == "interview_with_prep":
+            events += cf.interview_with_prep(datetime.fromisoformat(entry["starts_at"]))
+            continue
+        make = cf.managed if entry["kind"] == "managed" else cf.external
+        events.append(
+            make(
+                entry["event_id"],
+                entry["title"],
+                datetime.fromisoformat(entry["starts_at"]),
+                datetime.fromisoformat(entry["ends_at"]),
+            )
+        )
+    return events
+
+
+def calendar(gateway: ModelGateway, case: dict[str, Any]) -> DomainWorld:
+    """The Calendar subgraph over the in-memory calendar. It has no model-backed port."""
+    cf = calendar_fixtures
+    built = cf.build_world(_calendar_events(case.get("events", ())))
+    fake = built.calendar
+
+    def effects() -> list[tuple[str, Any]]:
+        from personalos.domain.interview_scheduling import PROP_IDEMPOTENCY_KEY
+
+        created = [
+            (
+                "calendar.create",
+                fake.events[event_id].properties.get(PROP_IDEMPOTENCY_KEY, event_id),
+            )
+            for event_id in fake.created
+            if event_id in fake.events
+        ]
+        return (
+            created
+            + [("calendar.update", event_id) for event_id in fake.updated]
+            + [("calendar.cancel", event_id) for event_id in fake.cancelled]
+        )
+
+    return DomainWorld(
+        domain="calendar",
+        graph=built.graph.build(),
+        graph_input=cf.start(case["request"]),
+        fixtures=cf,
+        approve=cf.approve,
+        effects=effects,
+        executor_owner=built.graph,
+    )
+
+
+def communications(gateway: ModelGateway, case: dict[str, Any]) -> DomainWorld:
+    """The Communications subgraph over the Gmail tool path and a fake Google API.
+
+    Triage, thread analysis and the reply writer come from the gateway; under
+    `rules` the reply is the fixture's scripted one, as the template would be.
+    """
+    cf = communications_fixtures
+    writer = gateway.thread_reply_writer()
+    built = cf.build_world_in_process(
+        triager=gateway.message_triager(),
+        analyzer=gateway.thread_analyzer(),
+        **({"writer": writer} if writer is not None else {}),
+    )
+    user_id, _ = cf.applied_application(built.factory)
+    for index, mail in enumerate(case.get("mail", ())):
+        built.add_mail(
+            mail.get("message_id", f"m-{index + 1}"),
+            **{key: value for key, value in mail.items() if key != "message_id"},
+        )
+
+    def effects() -> list[tuple[str, Any]]:
+        return [("gmail.send", (send.json or {}).get("raw")) for send in built.sends()]
+
+    return DomainWorld(
+        domain="communications",
+        graph=built.compile(),
+        graph_input={"request": case["request"], "user_id": str(user_id)},
+        fixtures=cf,
+        approve=cf.approve,
+        effects=effects,
+        executor_owner=built.graph,
+        extra={"world": built},
+    )
+
+
+def file_task(gateway: ModelGateway, case: dict[str, Any]) -> DomainWorld:
+    """The File subgraph over a real files server confined to a fresh temporary root."""
+    ff = file_fixtures
+    root = Path(tempfile.mkdtemp(prefix="personalos-eval-"))
+    layout = ff.seed_documents(root)
+    built = ff.build_world(
+        root,
+        planner=gateway.file_planner(),
+        summarizer=gateway.document_summarizer(),
+        max_unattended=case.get("max_unattended", 3),
+    )
+
+    def effects() -> list[tuple[str, Any]]:
+        # What is on disk now, against the seeded layout: a file gone from
+        # where it was seeded was moved or deleted, once.
+        return [("file.change", name) for name, path in layout.items() if not path.exists()]
+
+    return DomainWorld(
+        domain="file",
+        graph=built.compile(),
+        graph_input={"request": case["request"]},
+        fixtures=ff,
+        approve=ff.approve,
+        effects=effects,
+        executor_owner=built.graph,
+        extra={"root": root, "layout": layout},
+    )
+
+
+DOMAIN_WORLDS = {"calendar": calendar, "communications": communications, "file": file_task}
+
+
 def final_status(world: JobSearchWorld, *, inbound: bool) -> ApplicationStatus | None:
     """The application's status once the run stopped, or None if none exists."""
     if inbound:
@@ -197,7 +408,14 @@ __all__ = [
     "NOW",
     "StaticEvidenceSource",
     "EchoJobSubgraph",
+    "EchoStepRunner",
+    "SupervisorWorld",
     "supervisor",
+    "DomainWorld",
+    "DOMAIN_WORLDS",
+    "calendar",
+    "communications",
+    "file_task",
     "JobSearchWorld",
     "job_search",
     "final_status",

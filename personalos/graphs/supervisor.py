@@ -47,9 +47,13 @@ from personalos.domain.routing import (
     SUPPORTED_ROUTE_DOMAINS,
     RouteDecision,
     RouteDomain,
+    RouteReason,
+    RouteResolution,
     UnsupportedRouteDomain,
     ensure_supported_domain,
+    resolve_route,
     route_decision_from_mapping,
+    screen_request,
 )
 from personalos.domain.task_plan import (
     DEFAULT_MAX_PLAN_STEPS,
@@ -294,6 +298,13 @@ def _build_calendar_dag(message: str) -> TaskDAG:
     )
 
 
+def _join(names: Sequence[str], conjunction: str = "and") -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    if len(names) < 3:
+        return f" {conjunction} ".join(names)
+    return f"{', '.join(names[:-1])} {conjunction} {names[-1]}"
+
+
 def _request_key(message: str) -> str:
     """A stable name for a request whose plan was refused: there is no plan id to use."""
     return f"plan-request-{hashlib.sha256(message.encode('utf-8')).hexdigest()[:16]}"
@@ -508,6 +519,11 @@ class SupervisorGraph:
         A classifier failure is treated as a zero-confidence decision rather
         than propagated, so a flaky classifier degrades to "ask for
         clarification" instead of failing the whole graph run.
+
+        The request is also screened (`screen_request`) for asking to skip an
+        approval or widen tool access. The screen is deterministic and is
+        applied over whatever the classifier said, so no model -- however it
+        was persuaded -- can route such a request.
         """
         message = state.get("message", "")
         try:
@@ -519,21 +535,26 @@ class SupervisorGraph:
                 confidence=0.0,
                 reasoning="classification failed",
             )
+        escalation = screen_request(message)
+        if escalation is not None:
+            decision = decision.model_copy(
+                update={
+                    "access_escalation": True,
+                    "reasoning": f"request asks to {escalation}",
+                }
+            )
         return {"route_decision": decision.model_dump(mode="json")}
 
+    def resolve(self, raw_decision: Mapping[str, Any] | None) -> RouteResolution:
+        """Where this instance sends a recorded decision, and why."""
+        decision = route_decision_from_mapping(dict(raw_decision)) if raw_decision else None
+        return resolve_route(
+            decision, threshold=self.confidence_threshold, routable=self.routable_domains
+        )
+
     def _route_after_classification(self, state: SupervisorState) -> str:
-        """Below the confidence threshold, or outside the supported domains: clarify."""
-        raw_decision = state.get("route_decision")
-        if raw_decision is None:
-            return CLARIFY
-        decision = route_decision_from_mapping(raw_decision)
-        if decision.confidence < self.confidence_threshold:
-            return CLARIFY
-        try:
-            self._ensure_routable(decision)
-        except UnsupportedRouteDomain:
-            return CLARIFY
-        return PLAN_WORK
+        """Anything short of one confident, unambiguous, routable domain: clarify."""
+        return PLAN_WORK if self.resolve(state.get("route_decision")).routed else CLARIFY
 
     def _ensure_routable(self, decision: RouteDecision) -> RouteDecision:
         """`ensure_supported_domain`, narrowed to the subgraphs this instance has."""
@@ -667,6 +688,9 @@ class SupervisorGraph:
         """
         assert self.task_planner is not None
         message = state.get("message", "")
+        if screen_request(message) is not None:
+            # Not planned at all: classification marks it and clarify refuses it.
+            return {"plan_kind": "single"}
         try:
             outcome = await self.task_planner.plan(
                 message, domains=self.step_runners.keys(), max_steps=self.max_plan_steps
@@ -883,18 +907,26 @@ class SupervisorGraph:
                     f"({shown}). Could you split it up, or say which part to do first?"
                 )
             }
-        raw_decision = state.get("route_decision")
-        decision = route_decision_from_mapping(raw_decision) if raw_decision else None
-
-        if decision is not None and decision.confidence >= self.confidence_threshold:
-            names = [_DOMAIN_NAMES[d] for d in RouteDomain if d in self.routable_domains]
-            handled = (
-                " and ".join(names)
-                if len(names) < 3
-                else f"{', '.join(names[:-1])} and {names[-1]}"
-            )
+        resolution = self.resolve(state.get("route_decision"))
+        if resolution.reason is RouteReason.ACCESS_ESCALATION:
             message = (
-                f"I can't help with '{decision.domain.value}' yet -- I currently only "
+                "I can't do that: every send, submission, calendar change and file change "
+                "waits for your approval, and I can only use the tools a task needs. "
+                "I'm happy to prepare it for you to review -- what would you like me to draft?"
+            )
+        elif resolution.reason in (RouteReason.AMBIGUOUS, RouteReason.MULTI_DOMAIN):
+            names = [_DOMAIN_NAMES[d] for d in resolution.candidates]
+            if resolution.reason is RouteReason.AMBIGUOUS:
+                message = f"That could be about {_join(names, 'or')}. Which did you mean?"
+            else:
+                message = (
+                    f"That touches {_join(names)}. I'd rather not do only part of it -- "
+                    "could you tell me which part to start with?"
+                )
+        elif resolution.reason is RouteReason.UNSUPPORTED and resolution.domain is not None:
+            handled = _join([_DOMAIN_NAMES[d] for d in RouteDomain if d in self.routable_domains])
+            message = (
+                f"I can't help with '{resolution.domain.value}' yet -- I currently only "
                 f"handle {handled}. Could you rephrase your request?"
             )
         else:

@@ -28,9 +28,24 @@ from . import world
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 
+#: Routing cases, one file per domain the Supervisor can route to, plus
+#: `general` for requests that name none. Adding a domain adds a file here.
+ROUTING_FILES = (
+    "routing/job.json",
+    "routing/file.json",
+    "routing/communications.json",
+    "routing/calendar.json",
+    "routing/general.json",
+)
+
+#: The kinds of routing case. Every domain's file has at least one of each
+#: of `REQUIRED_ROUTING_KINDS` (`tests/unit/test_routing_golden.py`).
+ROUTING_KINDS = ("clear", "ambiguous", "cross_domain", "adversarial", "out_of_scope", "negative")
+REQUIRED_ROUTING_KINDS = ("clear", "ambiguous", "cross_domain", "adversarial")
+
 #: The files a run reads. Hashed together into `dataset_sha256`.
 GOLDEN_FILES = (
-    "routing_requests.json",
+    *ROUTING_FILES,
     "recruiter_emails.json",
     "candidate_profiles.json",
     "job_descriptions.json",
@@ -39,6 +54,7 @@ GOLDEN_FILES = (
     "human_review.json",
     "approval_boundaries.json",
     "recovery.json",
+    "domain_workflows.json",
 )
 
 
@@ -52,6 +68,16 @@ def dataset_sha256() -> str:
         digest.update(name.encode())
         digest.update((GOLDEN_DIR / name).read_bytes())
     return digest.hexdigest()
+
+
+def routing_cases() -> list[dict[str, Any]]:
+    """Every routing case, each tagged with its file's `domain` and its own `kind`."""
+    cases = []
+    for name in ROUTING_FILES:
+        data = load(name)
+        for case in data["cases"]:
+            cases.append({**case, "domain": data["domain"]})
+    return cases
 
 
 @dataclass(frozen=True)
@@ -143,6 +169,10 @@ def message(case_id: str, entry: dict[str, Any], received_at: str) -> RecruiterM
 __all__ = [
     "GOLDEN_DIR",
     "GOLDEN_FILES",
+    "ROUTING_FILES",
+    "ROUTING_KINDS",
+    "REQUIRED_ROUTING_KINDS",
+    "routing_cases",
     "load",
     "dataset_sha256",
     "Candidate",

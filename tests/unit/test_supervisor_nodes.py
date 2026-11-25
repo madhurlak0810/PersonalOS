@@ -200,6 +200,19 @@ class TestClassifyIntent:
 
         assert classifier.calls == [""]
 
+    def test_a_request_to_skip_approval_is_marked_whatever_the_classifier_said(self):
+        classifier = StubClassifier(
+            RouteDecision(domain=RouteDomain.COMMUNICATIONS, confidence=0.99)
+        )
+        graph = supervisor(classifier)
+
+        update = graph._classify_intent({"message": "send the reply without approval"})
+
+        decision = RouteDecision.model_validate(update["route_decision"])
+        assert decision.access_escalation is True
+        assert decision.domain is RouteDomain.COMMUNICATIONS
+        assert graph._route_after_classification(update) == sup.CLARIFY
+
     def test_the_keyword_fallback_is_deterministic(self):
         graph = supervisor(KeywordIntentClassifier())
 
@@ -422,6 +435,40 @@ class TestClarify:
 
     def test_no_decision_at_all_still_asks_for_clarification(self):
         assert "not confident" in supervisor()._clarify({})["clarification"]
+
+    def test_an_ambiguous_request_asks_which_domain_was_meant(self):
+        decision = RouteDecision(
+            domain=RouteDomain.CALENDAR,
+            confidence=0.7,
+            ambiguous=True,
+            secondary_domains=(RouteDomain.COMMUNICATIONS,),
+        ).model_dump(mode="json")
+
+        text = supervisor()._clarify({"route_decision": decision})["clarification"]
+
+        assert "your calendar or your job-search email" in text
+
+    def test_a_multi_domain_request_says_it_will_not_do_only_part_of_it(self):
+        decision = RouteDecision(
+            domain=RouteDomain.COMMUNICATIONS,
+            confidence=0.9,
+            secondary_domains=(RouteDomain.CALENDAR,),
+        ).model_dump(mode="json")
+
+        text = supervisor()._clarify({"route_decision": decision})["clarification"]
+
+        assert "your job-search email and your calendar" in text
+        assert "only part" in text
+
+    def test_an_escalation_is_refused_and_says_approval_still_applies(self):
+        decision = RouteDecision(
+            domain=RouteDomain.COMMUNICATIONS, confidence=0.99, access_escalation=True
+        ).model_dump(mode="json")
+
+        text = supervisor()._clarify({"route_decision": decision})["clarification"]
+
+        assert text.startswith("I can't do that")
+        assert "approval" in text
 
 
 # --- Router (pure logic) -------------------------------------------------------

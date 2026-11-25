@@ -517,7 +517,7 @@ PersonalOS/
 │   └── versions/                  # one file per schema change
 │
 ├── evals/                         # evaluation harness: python -m evals.harness
-│   ├── golden/                    # golden dataset: requests, mail, postings, scenarios
+│   ├── golden/                    # golden dataset: per-domain routing, mail, postings, scenarios
 │   └── model_benchmarks/          # model configs, baselines, review ratings
 │
 ├── docs/
@@ -525,6 +525,7 @@ PersonalOS/
 │   ├── AUTHORIZATION.md           # scopes, system identities, actor-scoped stores
 │   ├── LIMITS.md                  # rate limits, concurrency caps, request limits
 │   ├── EVENT_TRANSPORT.md         # the outbox transport and how to swap it
+│   ├── ADDING_A_DOMAIN.md         # classifier labels, golden cases, policy rows, subgraph wiring
 │   └── quickstart/                # sample resume and profile for the quick start
 │
 ├── scripts/
@@ -1396,7 +1397,7 @@ models changes no graph, node or prompt.
 
 | File | Cases | Expected |
 | --- | --- | --- |
-| `routing_requests.json` | user requests | Supervisor route (`job_search` / `file_task` / `clarify`) and domain |
+| `routing/<domain>.json` | user requests, per domain (`job`, `file`, `communications`, `calendar`, plus `general`): clear, ambiguous, cross-domain, adversarial, out-of-scope and negative | Supervisor route (a subgraph, a cross-domain `plan` with its step domains, or `clarify` with its reason) and domain; `never_routes` a request must not reach |
 | `recruiter_emails.json` | 35 emails | event classification |
 | `candidate_profiles.json`, `job_descriptions.json` | 2 candidates × 10 postings | acceptable recommendations, top-k relevance |
 | `scenarios.json` | end-to-end runs | classification, tool intents, approval pause, final application status |
@@ -1404,6 +1405,7 @@ models changes no graph, node or prompt.
 | `human_review.json` | top-k and drafts | automatic checks, plus a rubric a person rates |
 | `approval_boundaries.json` | labelled tool calls, every `ActionKind` | consequential / external write, scored against the policy engine and the graph's approval requests |
 | `recovery.json` | failed-and-resumed runs, redeliveries | end state, whether resuming alone finished the work, no duplicated side effect |
+| `domain_workflows.json` | Calendar, Communications and File subgraph runs, approved / rejected / pending / fault-then-resume | proposed actions, approval before any effect, effects that reached the fakes, recovery |
 
 **What a run produces** (`evals/model_benchmarks/results/<config>/`, not
 tracked): `results.json` with every case's expected and actual outcome and
@@ -1421,12 +1423,16 @@ is reported, not gated, so a weak model can still be benchmarked.
 
 **Quality metrics** ([`evals/metrics.py`](evals/metrics.py)). Every run also
 computes a `quality` section from its cases and from the spans the graphs
-emitted (captured in memory, saved as `spans.otlp.json`): routing accuracy;
-approval precision, recall and external-write recall; tool-call validity
+emitted (captured in memory, saved as `spans.otlp.json`): routing accuracy,
+overall and per domain, with a confusion matrix and a count of requests that
+reached a route their case forbids;
+approval precision, recall and external-write recall, overall and per domain
+(the worst of the policy boundary and the domain's subgraph); tool-call validity
 (the `schema_valid` attribute on each model attempt's span) and tool
 selection accuracy; workflow completion, recovery rate and mean recovery
-time; p50/p95 latency for interactive steps (routing, extraction) and
-long-running ones (discovery, drafting), per-model latency and tokens/sec
+time, each also per domain; p50/p95 latency for interactive steps (routing,
+extraction, the calendar, mail and file reads) and long-running ones
+(discovery, drafting, external writes), per-model latency and tokens/sec
 where usage is on the span; `job_match_precision@k`,
 `event_classification_f1`, `resume_evidence_grounding` and
 `duplicate_side_effect_rate`. `python -m evals.harness quality` recomputes it
@@ -1436,8 +1442,14 @@ deployment. Each run records its model labels and per-role prompt versions
 appended to `results/history.jsonl`; `python -m evals.harness trend` lists
 runs side by side. [`evals/thresholds.json`](evals/thresholds.json) bounds the
 metrics: a critical breach -- approval recall or external-write approval
-recall below 1.0, or any duplicated side effect -- fails the run and the CI
-"Quality metrics gate" step; the rest are warnings in the report.
+recall below 1.0 (overall or in any domain), per-domain routing accuracy below
+its floor, a forbidden route reached, or any duplicated side effect -- fails
+the run and the CI "Quality metrics gate" step; the rest are warnings in the
+report. Every `ActionKind` must also have a row in
+`personalos/policy/actions.py` that policy holds for approval
+(`tests/contracts/test_action_policy_coverage.py`, the CI "Action policy
+gate"). Adding a domain end to end is in
+[`docs/ADDING_A_DOMAIN.md`](docs/ADDING_A_DOMAIN.md).
 
 **Tests:** [`tests/unit/test_eval_harness.py`](tests/unit/test_eval_harness.py)
 pins the `rules` run to its baseline, and runs the suites with a scripted

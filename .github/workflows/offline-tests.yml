@@ -25,5 +25,7 @@ jobs:
           pip install -e ".[dev,test]"
       - name: Node contract gate
         run: pytest tests/contracts/test_node_contract_coverage.py -v
+      - name: Action policy gate
+        run: pytest tests/contracts/test_action_policy_coverage.py -v
       - name: Unit, contract and graph tests
         run: pytest tests -q

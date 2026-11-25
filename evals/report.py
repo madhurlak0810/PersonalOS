@@ -19,7 +19,7 @@ from typing import Any
 
 from personalos.models.gateway import ModelConfig, prompt_versions
 
-from .metrics import INTERACTIVE_STEPS
+from .metrics import DOMAINS, INTERACTIVE_STEPS
 from .suites import ERROR, FAIL, PASS, REVIEW, SKIPPED, SuiteResult, fingerprint
 
 SCHEMA_VERSION = 1
@@ -209,6 +209,7 @@ HEADLINE = {
     "human_review": "automatic_pass_rate",
     "approvals": "external_write_approval_recall",
     "recovery": "recovery_rate",
+    "domain_workflows": "approval_recall",
 }
 
 
@@ -315,6 +316,7 @@ def summary_markdown(document: dict[str, Any], changes: dict[str, Any], gate: li
 QUALITY_GROUPS = {
     "Routing and tools": (
         "routing_accuracy",
+        "forbidden_route_count",
         "tool_call_validity_rate",
         "tool_selection_accuracy",
     ),
@@ -350,6 +352,84 @@ def _fmt_metric(value: Any) -> str:
     return "n/a" if value is None else _fmt(value)
 
 
+#: The per-domain table's columns: heading, and the metric each cell shows
+#: as `<metric>_<domain>`.
+DOMAIN_COLUMNS = (
+    ("Routing", "routing_accuracy"),
+    ("Approval precision", "approval_precision"),
+    ("Approval recall", "approval_recall"),
+    ("External-write recall", "external_write_approval_recall"),
+    ("Tool selection", "tool_selection_accuracy"),
+    ("Completion", "workflow_completion_rate"),
+    ("Recovery", "recovery_rate"),
+)
+
+
+def _cell(metrics: dict[str, Any], breaches: dict[str, Any], name: str) -> str:
+    text = _fmt_metric(metrics.get(name))
+    breach = breaches.get(name)
+    if breach:
+        text += " **FAIL**" if breach["critical"] else " (warn)"
+    return text
+
+
+def _domain_lines(quality: dict[str, Any], breaches: dict[str, Any], heading: str) -> list[str]:
+    metrics = quality["metrics"]
+    if not any(
+        f"{metric}_{domain}" in metrics for _, metric in DOMAIN_COLUMNS for domain in DOMAINS
+    ):
+        return []
+    lines = [
+        "",
+        f"{heading}# By domain",
+        "",
+        "| Domain | " + " | ".join(title for title, _ in DOMAIN_COLUMNS) + " |",
+        "| --- |" + " --- |" * len(DOMAIN_COLUMNS),
+    ]
+    for domain in DOMAINS:
+        cells = [_cell(metrics, breaches, f"{metric}_{domain}") for _, metric in DOMAIN_COLUMNS]
+        lines.append(f"| {domain} | " + " | ".join(cells) + " |")
+
+    routing = quality.get("routing") or {}
+    kinds = routing.get("by_case_kind") or {}
+    if kinds:
+        lines += [
+            "",
+            "| Routing case kind | Cases | Accuracy |",
+            "| --- | --- | --- |",
+            *(
+                f"| {kind} | {row['cases']} | {_fmt_metric(row['accuracy'])} |"
+                for kind, row in kinds.items()
+            ),
+        ]
+    confusion = routing.get("confusion")
+    if confusion and any(any(row.values()) for row in confusion["matrix"].values()):
+        labels = confusion["labels"]
+        lines += [
+            "",
+            f"{heading}# Routing confusion matrix",
+            "",
+            "Rows are the route a careful reader would take; columns, the route taken.",
+            "",
+            "| expected \\ actual | " + " | ".join(labels) + " |",
+            "| --- |" + " --- |" * len(labels),
+        ]
+        for row in labels:
+            counts = confusion["matrix"][row]
+            cells = [
+                (f"**{counts[col]}**" if row == col else str(counts[col])) if counts[col] else "·"
+                for col in labels
+            ]
+            lines.append(f"| {row} | " + " | ".join(cells) + " |")
+    forbidden = routing.get("forbidden_routes") or ()
+    if forbidden:
+        lines += [
+            "",
+            "Reached a route they must never reach: " + ", ".join(f"`{c}`" for c in forbidden),
+        ]
+    return lines
+
+
 def quality_markdown(quality: dict[str, Any], *, heading: str = "#") -> str:
     """The quality section: every metric, its threshold status, and latency per step."""
     metrics = quality["metrics"]
@@ -369,6 +449,8 @@ def quality_markdown(quality: dict[str, Any], *, heading: str = "#") -> str:
             if breach:
                 status = f"{'**FAIL**' if breach['critical'] else 'warn'}: {breach['reason']}"
             lines.append(f"| {group} | {name} | {_fmt_metric(metrics.get(name))} | {status} |")
+
+    lines += _domain_lines(quality, breaches, heading)
 
     latency = quality.get("latency") or {}
     if latency.get("steps"):
