@@ -537,9 +537,10 @@ PersonalOS/
 │   ├── retrieval/                 # resume ingestion, embedder, evidence selection, job matching
 │   ├── models/                    # model gateway: rules by default; Anthropic, Ollama, OpenAI-compatible
 │   ├── secrets/                   # keychain and container file stores, short-lived token exchange
-│   └── observability/             # structured logging, tracing, redaction
+│   └── observability/             # structured logging, tracing, metrics catalog, redaction
 │
 ├── apps/                          # process entry points (composition layer)
+│   ├── alerts/                    # local alert receiver: Alertmanager webhook -> log lines
 │   ├── api/                       # FastAPI app
 │   │   └── routes/                # chat/workflows, approvals, applications, audit, failures,
 │   │                              # events (SSE), profile, evidence
@@ -570,11 +571,16 @@ PersonalOS/
 │
 ├── deploy/                        # compose stack configuration
 │   ├── compose.defaults.env       # container settings; override in .env.compose
-│   └── otel/                      # the OpenTelemetry collector's config
+│   ├── otel/                      # the OpenTelemetry collector's config
+│   ├── prometheus/                # scrape config, alert rules, promtool rule tests
+│   ├── alertmanager/              # alert routing: the local receiver, optional others
+│   └── grafana/                   # datasource, dashboard provisioning, generated dashboards
 │
 ├── docs/
 │   ├── ARCHITECTURE_BOUNDARIES.md # layer ownership and enforced import rules
 │   ├── CONTAINERS.md              # images, compose, secrets in containers, volumes, reset
+│   ├── METRICS.md                 # the metric catalog, labels, stall rules, dashboards
+│   ├── ALERTS.md                  # alert delivery and one runbook per alert
 │   ├── AUTHORIZATION.md           # scopes, system identities, actor-scoped stores
 │   ├── LIMITS.md                  # rate limits, concurrency caps, request limits
 │   ├── EVENT_TRANSPORT.md         # the outbox transport and how to swap it
@@ -586,12 +592,15 @@ PersonalOS/
 │   ├── check_guide_tree.py        # this tree against the repository (CI)
 │   ├── check_image.py             # run inside a built image: non-root, no fakes or dev deps (CI)
 │   ├── smoke_compose.py           # the containerized quick start, end to end (CI)
+│   ├── build_dashboards.py        # Grafana dashboards from their definitions (--check in CI)
+│   ├── check_dashboards.py        # every panel queried against a running stack
+│   ├── smoke_observability.py     # monitoring profile: panels have data, a stall alerts (CI)
 │   ├── export_openapi.py          # ui/openapi.json from the FastAPI app (--check in CI)
 │   └── smoke_quickstart.py        # the quick start, end to end (CI)
 │
 └── tests/
     ├── architecture/              # layer boundaries and the intent-only boundary
-    ├── contracts/                 # node contract coverage, event transport, offline guards
+    ├── contracts/                 # node contracts, event transport, metrics, offline guards
     ├── unit/                      # pure logic, routes, stores, worker wiring
     ├── graph_scenarios/           # whole-graph runs: approvals, resume, recovery, tracing
     ├── adversarial/               # prompt injection, permission escalation, hostile payloads
@@ -773,6 +782,10 @@ Producers and consumers depend on the transport interfaces in
 out (`docs/EVENT_TRANSPORT.md`). Logs are structured and carry
 `workflow_id`/`correlation_id`. Each workflow is one OpenTelemetry trace, and
 credentials are redacted from logs, traces, checkpoints and audit payloads.
+Metrics are named in one catalog (`personalos/observability/metrics.py`,
+[docs/METRICS.md](docs/METRICS.md)), labelled only with ids and code-defined
+names, and graphed and alerted on by the compose `monitoring` profile
+([docs/ALERTS.md](docs/ALERTS.md)).
 
 ### 10. CLI (`personalos/cli.py`)
 
@@ -1850,7 +1863,7 @@ These fill in the ports the worker reports as unbound at startup.
 | # | Issue | Done when |
 | --- | --- | --- |
 | N1 | Container images and compose (done) | `docker compose up` starts the API, the worker, Postgres with pgvector, and a collector; see [docs/CONTAINERS.md](docs/CONTAINERS.md) |
-| N2 | Dashboards and alerts | Dashboards for latency, error rate and dead letters, and alerts on stalled workflows |
+| N2 | Dashboards and alerts (done) | `docker compose --profile monitoring up` adds Prometheus, Alertmanager and Grafana with dashboards and alert rules as code; see [docs/METRICS.md](docs/METRICS.md) and [docs/ALERTS.md](docs/ALERTS.md) |
 | N3 | Backup and data retention | A scheduled Postgres backup, and a retention policy for the event log, traces and drafts |
 | N4 | Second event transport (optional) | A NATS JetStream or Redis Streams adapter passes the transport contract tests |
 
@@ -1902,6 +1915,8 @@ Settings come from the environment, then `.env` in the working directory.
 | `CLOUD_INFERENCE_ALLOWED` | `false` | Must be `true` before a hosted embedder (`openai`) can be selected. |
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | Use `text` in a terminal. |
 | `TRACING_ENABLED` / `OTEL_EXPORTER_OTLP_ENDPOINT` | `false` / empty | An OTLP/HTTP collector, for example Jaeger at `http://localhost:4318`. |
+| `METRICS_ENABLED` | `false` | Pushes metrics to the same OTLP endpoint every `METRICS_EXPORT_INTERVAL_SECONDS` (15). The compose stack sets it. Names and labels are in [docs/METRICS.md](docs/METRICS.md). |
+| `WORKFLOW_STALL_SECONDS` / `APPROVAL_OVERDUE_GRACE_SECONDS` | `900` / `300` | When an unfinished workflow with no progress, or one parked at an approval past its expiry, counts as stalled and fires `WorkflowStalled` ([docs/ALERTS.md](docs/ALERTS.md#workflowstalled)). |
 | `SECRET_STORE_SERVICE` | `personalos` | The OS keychain service that holds secrets. Never put a secret in `.env`. |
 | `SECRET_STORE_BACKEND` | `keychain` | `file` for containers: secrets are `<provider>.<name>` files in `SECRET_STORE_DIR` (writable) and `SECRET_STORE_READ_ONLY_DIRS` (Docker secrets). See [docs/CONTAINERS.md](docs/CONTAINERS.md#secrets-in-containers). |
 | `DATABASE_PASSWORD_FILE` | empty | A file whose contents replace the password in `DATABASE_URL`. The compose stack uses it. |

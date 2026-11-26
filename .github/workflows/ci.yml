@@ -134,6 +134,14 @@ jobs:
         run: pytest tests -v
       - name: Lint
         run: ruff check personalos apps mcp_servers tests scripts
+      - name: Metrics contract gate
+        # Fails if a metric is renamed or removed in the catalog, docs/METRICS.md,
+        # a dashboard or an alert rule without the others; if a panel queries a
+        # series or label the catalog does not define; or if an alert has no
+        # runbook. Its own step so the failure names what it is.
+        run: pytest tests/contracts/test_metrics_contract.py tests/contracts/test_metrics_emission.py -v
+      - name: Dashboards are generated from their definitions
+        run: python scripts/build_dashboards.py --check
       - name: UI API schema is current
         # ui/openapi.json is what the UI's typed client is generated from; a
         # route or model change has to regenerate it (and the `ui` job checks
@@ -154,8 +162,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install the smoke test's client
-        run: pip install "httpx>=0.25"
+      - name: Install the smoke tests' client
+        run: pip install "httpx>=0.25" "pyyaml>=6.0"
       - name: Build the images
         # Twice: the quick start override replaces the worker's image with
         # `worker-quickstart`, so the production `worker` image only comes
@@ -216,6 +224,27 @@ jobs:
         # API on loopback only, the quick start's workflow queued and
         # approved, stack torn down.
         run: python scripts/smoke_compose.py --no-build
+      - name: Alert rules, Prometheus and Alertmanager config
+        # promtool's unit tests fire every alert on the series it is meant
+        # for, and clear WorkflowStalled once its series goes away. Run inside
+        # the same pinned images the stack uses.
+        run: |
+          PROMETHEUS=$(python -c "import yaml; print(yaml.safe_load(open('docker-compose.yml'))['services']['prometheus']['image'])")
+          ALERTMANAGER=$(python -c "import yaml; print(yaml.safe_load(open('docker-compose.yml'))['services']['alertmanager']['image'])")
+          docker run --rm --entrypoint /bin/promtool \
+            -v "$PWD/deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            -v "$PWD/deploy/prometheus/rules:/etc/prometheus/rules:ro" \
+            "$PROMETHEUS" check config /etc/prometheus/prometheus.yml
+          docker run --rm --entrypoint /bin/promtool -v "$PWD/deploy/prometheus:/prom:ro" \
+            "$PROMETHEUS" test rules /prom/tests/personalos.test.yml
+          docker run --rm --entrypoint /bin/amtool -v "$PWD/deploy/alertmanager:/am:ro" \
+            "$ALERTMANAGER" check-config /am/alertmanager.yml
+      - name: Observability smoke test
+        # The `monitoring` profile on the quick start stack: every dashboard
+        # panel has data after the quick start's workflow; a workflow queued
+        # with the worker stopped fires WorkflowStalled, which reaches the
+        # local alert receiver; restarting the worker clears it.
+        run: python scripts/smoke_observability.py
 
   ui:
     name: UI

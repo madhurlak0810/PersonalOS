@@ -71,7 +71,8 @@ from personalos.domain.workflow import (
     WorkflowCommand,
     WorkflowCommandKind,
 )
-from personalos.observability import tracing
+from personalos.observability import metrics, tracing
+from personalos.observability.metrics import Metric
 from personalos.observability.structured_logging import LogEvent
 from personalos.observability.tracing import Attr
 from personalos.persistence.checkpointer import WorkflowThreadRegistry
@@ -439,6 +440,14 @@ class ApprovalQueue:
                 return False
         finally:
             session.close()
+        # Only ever recorded by the call that wrote the row, so a decision
+        # raced by an expiry is timed once.
+        metrics.observe(
+            Metric.APPROVAL_WAIT_DURATION,
+            (now - request.requested_at).total_seconds(),
+            outcome=outcome,
+            action_kind=request.kind,
+        )
         logger.info(
             "approval %s for action %s on workflow %s recorded as %s by %s",
             request.request_id,

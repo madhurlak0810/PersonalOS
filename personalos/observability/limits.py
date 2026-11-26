@@ -29,9 +29,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from opentelemetry import metrics
-
-from personalos.observability import tracing
+from personalos.observability import metrics, tracing
+from personalos.observability.metrics import Metric
 
 logger = logging.getLogger("personalos.api.limits")
 
@@ -42,12 +41,6 @@ LIMIT_HIT_SPAN = "api.limit_hit"
 
 #: The actor of a hit refused before anyone was authenticated.
 ANONYMOUS_ACTOR = "anonymous"
-
-_meter = metrics.get_meter("personalos.api.limits")
-_hits = _meter.create_counter(
-    "personalos.api.limit_hits",
-    description="Requests refused by an API limit, by route and limit",
-)
 
 #: Path segments that are ids, not names: UUIDs, numbers, long opaque tokens.
 _ID_SEGMENT = re.compile(
@@ -132,7 +125,7 @@ def record_limit_hit(
 ) -> None:
     """Report one refused request. See the module docstring for where it goes."""
     actor = actor_id or ANONYMOUS_ACTOR
-    _hits.add(1, {"route": route, "limit": limit})
+    metrics.add(Metric.API_LIMIT_HITS, route=route, limit=limit)
     (counter or default_hit_counter).add(actor, route, limit)
     attributes: dict[str, str | float] = {"actor_id": actor, "route": route, "limit": limit}
     if retry_after is not None:

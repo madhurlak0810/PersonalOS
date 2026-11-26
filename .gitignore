@@ -8,6 +8,8 @@ venv/
 .env
 .env.*
 !.env.example
+# A local Alertmanager config with an external channel (docs/ALERTS.md).
+alertmanager.local.yml
 *.log
 .vscode/
 

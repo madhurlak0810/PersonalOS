@@ -18,7 +18,14 @@ the live exception object could format it for itself and bypass all of this.
 
 import logging
 import traceback
+from collections.abc import Mapping
+from typing import Any
 
+from personalos.domain.exception_text import (
+    chain_echoes_input,
+    safe_exception_message,
+    safe_traceback,
+)
 from personalos.domain.redaction import Redactor, default_redactor
 
 #: Attributes every `LogRecord` has. Anything else on a record arrived through
@@ -32,9 +39,35 @@ STANDARD_RECORD_ATTRIBUTES = frozenset(logging.LogRecord("", 0, "", 0, "", None,
 _FACTORY_MARKER = "_personalos_redacting"
 
 
+def _safe_arg(value: Any, redactor: Redactor) -> Any:
+    """An exception that quotes its input, as text without the input; anything else as is."""
+    if isinstance(value, BaseException) and chain_echoes_input(value):
+        return safe_exception_message(value, redactor)
+    return value
+
+
+def _describe_echoing_exceptions(record: logging.LogRecord, redactor: Redactor) -> None:
+    """Replace exceptions that quote their input, in the message, its args and `exc_info`."""
+    record.msg = _safe_arg(record.msg, redactor)
+    if isinstance(record.args, tuple):
+        record.args = tuple(_safe_arg(arg, redactor) for arg in record.args)
+    elif isinstance(record.args, Mapping):
+        record.args = {key: _safe_arg(arg, redactor) for key, arg in record.args.items()}
+    error = record.exc_info[1] if isinstance(record.exc_info, tuple) else None
+    if isinstance(error, BaseException) and chain_echoes_input(error):
+        record.exc_text = safe_traceback(error, redactor)
+
+
 def scrub_record(record: logging.LogRecord, redactor: Redactor | None = None) -> logging.LogRecord:
-    """Redact one log record in place, and return it."""
+    """Redact one log record in place, and return it.
+
+    An exception that quotes the input it rejected (a pydantic
+    `ValidationError`, whose input is often model output or a message body) is
+    formatted by `exception_text` -- field and error type, no value -- both
+    where it is a format argument and where it is the record's `exc_info`.
+    """
     redactor = redactor or default_redactor()
+    _describe_echoing_exceptions(record, redactor)
 
     try:
         message = record.getMessage()

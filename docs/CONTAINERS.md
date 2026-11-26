@@ -2,8 +2,9 @@
 
 PersonalOS ships a `Dockerfile` for the API and the worker, and a
 `docker-compose.yml` that runs them with PostgreSQL (with pgvector), the
-migrations and an OpenTelemetry collector. Ollama and the operator UI are
-optional, behind compose profiles. CI builds the images and runs the stack end
+migrations and an OpenTelemetry collector. Ollama, the operator UI and the
+monitoring stack (Prometheus, Alertmanager, Grafana) are optional, behind
+compose profiles. CI builds the images and runs the stack end
 to end (`scripts/smoke_compose.py`).
 
 The local, non-container path in
@@ -58,6 +59,10 @@ docker compose -f docker-compose.yml -f compose.quickstart.yml up -d --build
 | `otel-collector` | `otel/opentelemetry-collector-contrib:0.139.0` | `backend` | none | see [Known limits](#known-limits) |
 | `ollama` (profile) | `ollama/ollama:0.12.10` | `backend`, `egress` | none | `ollama list` |
 | `ui` (profile) | `personalos-ui` (`ui/Dockerfile`) | `egress` | `127.0.0.1:5173` | `GET /` |
+| `prometheus` (profile `monitoring`) | `prom/prometheus:v3.7.3` | `backend` | none | `GET /-/ready` |
+| `alertmanager` (profile `monitoring`) | `prom/alertmanager:v0.29.0` | `backend` | none | `GET /-/ready` |
+| `alert-receiver` (profile `monitoring`) | `Dockerfile` target `api` | `backend` | none | `GET /health` |
+| `grafana` (profile `monitoring`) | `grafana/grafana:12.2.1` | `backend`, `egress` | `127.0.0.1:3000` | `GET /api/health` |
 
 Startup order follows readiness, not just start order. `postgres` waits for
 `db-password` to exit 0. `migrate` waits for `postgres` to be healthy. `api` and
@@ -76,10 +81,14 @@ together.
 
 ## Security defaults
 
-- **Only loopback is published.** The API is published on `127.0.0.1:8000` and
-  the UI on `127.0.0.1:5173`. Inside its container the API listens on
-  `0.0.0.0` so that the port mapping can reach it. It refuses that bind unless
-  `API_AUTH_ENABLED=true`, which is the default.
+- **Only loopback is published.** The API is published on `127.0.0.1:8000`,
+  the UI on `127.0.0.1:5173` and, with the `monitoring` profile, Grafana on
+  `127.0.0.1:3000`. Inside its container the API listens on `0.0.0.0` so that
+  the port mapping can reach it. It refuses that bind unless
+  `API_AUTH_ENABLED=true`, which is the default. Grafana serves read-only
+  dashboards to anonymous viewers, with no login form and no admin over HTTP.
+  The dashboards hold only metrics, which carry ids and code-defined names and
+  never user content (METRICS.md).
 - **PostgreSQL has no host port.** It is reachable only on the internal
   network. To inspect it, run
   `docker compose exec postgres psql -U personalos`.
@@ -251,6 +260,22 @@ Then open http://localhost:5173 and paste the API token. The API's address is
 compiled into the bundle and into its Content-Security-Policy, so changing
 `PERSONALOS_API_PORT` means rebuilding the UI.
 
+**Dashboards and alerts**: the `monitoring` profile adds Prometheus, which
+scrapes the collector and evaluates the alert rules; Alertmanager, which sends
+every alert to `alert-receiver` as a log line; and Grafana on
+http://127.0.0.1:3000 with the dashboards read-only. Nothing outside the stack
+is needed. See [METRICS.md](METRICS.md) and [ALERTS.md](ALERTS.md).
+
+```bash
+docker compose --profile monitoring up -d --build
+docker compose logs -f alert-receiver
+```
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `PERSONALOS_GRAFANA_PORT` | `3000` | Host port for Grafana (still on 127.0.0.1). |
+| `PERSONALOS_ALERTMANAGER_CONFIG` | `./deploy/alertmanager/alertmanager.yml` | An Alertmanager config of your own, to add an external channel ([ALERTS.md](ALERTS.md#sending-alerts-elsewhere)). |
+
 **Traces**: the collector prints a summary of each batch to its log
 (`docker compose logs -f otel-collector`). To send traces to Jaeger, Tempo
 or a vendor, add an exporter in `deploy/otel/collector.yaml`, and add the
@@ -264,6 +289,9 @@ or a vendor, add an exporter in `deploy/otel/collector.yaml`, and add the
 | `personalos_db-password` | the generated database password |
 | `personalos_personalos-secrets` | the API token and secrets PersonalOS writes (refresh tokens) |
 | `personalos_ollama-models` | downloaded Ollama models |
+| `personalos_prometheus-data` | metrics history (15 days) |
+| `personalos_alertmanager-data` | silences and notification state |
+| `personalos_grafana-data` | Grafana's own database (the dashboards themselves are files) |
 
 ```bash
 docker compose down                     # stop; keep all state
@@ -297,7 +325,13 @@ The `containers` job in `.github/workflows/ci.yml`:
    PostgreSQL has no host port and nothing answers on the host's 5432, that
    the API and worker run as non-root on read-only root filesystems, and that
    the collector is healthy. It then runs the quick start's workflow through
-   approval and tears the stack down with `down -v`.
+   approval and tears the stack down with `down -v`;
+5. runs `promtool` (the rule unit tests and `check config`) and `amtool
+   check-config` inside the pinned Prometheus and Alertmanager images;
+6. runs `scripts/smoke_observability.py`. It brings the quick-start stack up
+   with `--profile monitoring`, checks that every dashboard panel has data,
+   and then stalls a workflow to check that `WorkflowStalled` fires, reaches
+   the alert receiver, and clears.
 
 `tests/unit/test_container_config.py` checks the same posture statically on
 every test run: published ports, networks, pinned images, health checks,

@@ -1,0 +1,124 @@
+# PersonalOS alert rules, evaluated by the `monitoring` profile's Prometheus.
+#
+# Every alert has a `summary` and a `runbook` annotation; the runbook is the
+# alert's section in docs/ALERTS.md, which says what it means and the first
+# thing to check. Every series queried here is in the metrics catalog
+# (personalos/observability/metrics.py, docs/METRICS.md);
+# tests/contracts/test_metrics_contract.py fails if one is renamed.
+#
+# Unit tests: deploy/prometheus/tests/personalos.test.yml (promtool, in CI).
+
+groups:
+  - name: personalos.workflows
+    rules:
+      # One series per stalled workflow, sampled from the database by the API,
+      # so this fires while the worker is down. Its `reason` is `no_progress`
+      # (nothing recorded for WORKFLOW_STALL_SECONDS) or `approval_overdue`
+      # (parked at an approval past its expiry plus the grace period). The
+      # series disappears once the workflow moves again, which resolves it.
+      - alert: WorkflowStalled
+        expr: max by (workflow_id, reason) (personalos_workflow_stalled_for_seconds) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Workflow {{ $labels.workflow_id }} is stalled ({{ $labels.reason }}) for {{ $value | humanizeDuration }}"
+          runbook: docs/ALERTS.md#workflowstalled
+
+      - alert: WorkflowFailureRateHigh
+        expr: |
+          (
+            sum by (graph) (rate(personalos_workflow_runs_total{outcome="failed"}[30m]))
+              / sum by (graph) (rate(personalos_workflow_runs_total[30m]))
+          ) > 0.25
+          and sum by (graph) (increase(personalos_workflow_runs_total[30m])) >= 4
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than a quarter of {{ $labels.graph }} runs have failed for 15 minutes"
+          runbook: docs/ALERTS.md#workflowfailureratehigh
+
+  - name: personalos.outbox
+    rules:
+      # The parked count went up within the last 15 minutes. It is a gauge
+      # (rows in `outbox_events`), so a requeue lowers it again.
+      - alert: DeadLettersGrowing
+        expr: sum by (status) (delta(personalos_outbox_parked[15m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox events are being parked as {{ $labels.status }}"
+          runbook: docs/ALERTS.md#deadlettersgrowing
+
+      - alert: OutboxBacklogGrowing
+        expr: |
+          (
+            sum(personalos_outbox_backlog) > 20
+            and deriv(sum(personalos_outbox_backlog)[15m:1m]) > 0
+          )
+          or max(personalos_outbox_oldest_pending_age_seconds) > 900
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The outbox backlog is growing or its oldest event is over 15 minutes old"
+          runbook: docs/ALERTS.md#outboxbackloggrowing
+
+  - name: personalos.errors
+    rules:
+      - alert: ApiErrorRateHigh
+        expr: |
+          (
+            sum by (route) (rate(personalos_api_request_duration_seconds_count{status_class="5xx"}[10m]))
+              / sum by (route) (rate(personalos_api_request_duration_seconds_count[10m]))
+          ) > 0.05
+          and sum by (route) (increase(personalos_api_request_duration_seconds_count[10m])) >= 10
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Route {{ $labels.route }} has answered more than 5% of requests with a 5xx for 10 minutes"
+          runbook: docs/ALERTS.md#apierrorratehigh
+
+      - alert: ModelErrorRateHigh
+        expr: |
+          (
+            sum by (provider) (rate(personalos_model_request_duration_seconds_count{outcome!="ok"}[15m]))
+              / sum by (provider) (rate(personalos_model_request_duration_seconds_count[15m]))
+          ) > 0.2
+          and sum by (provider) (increase(personalos_model_request_duration_seconds_count[15m])) >= 5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 20% of calls to model provider {{ $labels.provider }} have failed for 15 minutes"
+          runbook: docs/ALERTS.md#modelerrorratehigh
+
+  - name: personalos.integrations
+    rules:
+      # 0 healthy, 1 degraded, 2 down. Reported by the worker from what it
+      # last saw and by the API from the `integration_health` table.
+      - alert: IntegrationUnhealthy
+        expr: max by (integration) (personalos_integration_health_status) >= 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Integration {{ $labels.integration }} has been {{ if ge $value 2.0 }}down{{ else }}degraded{{ end }} for at least 30 minutes"
+          runbook: docs/ALERTS.md#integrationunhealthy
+
+  - name: personalos.telemetry
+    rules:
+      # Without these gauges WorkflowStalled cannot fire, so their absence is
+      # an alert of its own: the API is down, metrics are off, or its
+      # database sampling keeps failing.
+      - alert: OperationalStateMissing
+        expr: absent(personalos_workflows_active)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The API has reported no operational state for 5 minutes; stalled workflows cannot be detected"
+          runbook: docs/ALERTS.md#operationalstatemissing

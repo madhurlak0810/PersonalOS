@@ -39,6 +39,7 @@ That holds with tracing off too; logs do not depend on spans being recorded.
 of scalars and drops anything else -- a dict, a model, a message body -- so a
 span refers to an action, a command or an event by id and never embeds it.
 What does reach a span (an exception message, a recorded traceback) is
+recorded without any input the exception quoted (`exception_text`) and
 redacted on its way out by `trace_redaction.RedactingSpanExporter`.
 
 This module is the tracing *API*: it depends on `opentelemetry-api` alone and
@@ -71,6 +72,8 @@ from opentelemetry.trace import (
     TraceFlags,
 )
 
+from personalos.domain.exception_text import safe_exception_message, safe_traceback
+from personalos.observability import metrics
 from personalos.observability.structured_logging import log_scope
 
 #: Instrumentation scope every PersonalOS span is created under.
@@ -514,9 +517,20 @@ def _workflow_span(
 
 
 def mark_failed(span_: Span, error: BaseException) -> None:
-    """Record `error` on `span_` and mark it failed."""
+    """Record `error` on `span_` and mark it failed.
+
+    The recorded message and traceback are `exception_text`'s: a validation
+    error is described by field and error type, never by the input it quotes
+    -- which is often model output or a message body.
+    """
     if span_.is_recording():
-        span_.record_exception(error)
+        span_.record_exception(
+            error,
+            attributes={
+                "exception.message": safe_exception_message(error),
+                "exception.stacktrace": safe_traceback(error),
+            },
+        )
         span_.set_status(Status(StatusCode.ERROR, type(error).__name__))
 
 
@@ -559,18 +573,41 @@ def _as_uuid(value: Any) -> UUID | None:
 
 @contextmanager
 def node_span(node: str, graph: str | None = None) -> Iterator[Span]:
-    """The span one graph node runs in, scoped to the run's workflow and thread."""
-    scope = _node_scope()
-    attributes = {Attr.NODE: node, Attr.GRAPH: graph}
-    workflow_id = _as_uuid(scope.pop("workflow_id", None))
-    if workflow_id is None:
-        with span(f"node.{node}", attributes) as current:
+    """The span one graph node runs in, scoped to the run's workflow and thread.
+
+    The node is also timed into `personalos.workflow.step.duration`, with its
+    graph, its class (`metrics.step_class`: `quick` or `long_running`) and an
+    outcome: `completed`, `interrupted` when it stopped at an interrupt (an
+    approval), or `failed`.
+    """
+    timer = metrics.start_timer()
+    outcome = metrics.StepOutcome.COMPLETED
+    try:
+        scope = _node_scope()
+        attributes = {Attr.NODE: node, Attr.GRAPH: graph}
+        workflow_id = _as_uuid(scope.pop("workflow_id", None))
+        if workflow_id is None:
+            with span(f"node.{node}", attributes) as current:
+                yield current
+            return
+        with workflow_span(
+            f"node.{node}", workflow_id=workflow_id, attributes=attributes, **scope
+        ) as current:
             yield current
-        return
-    with workflow_span(
-        f"node.{node}", workflow_id=workflow_id, attributes=attributes, **scope
-    ) as current:
-        yield current
+    except BaseException as error:
+        outcome = (
+            metrics.StepOutcome.INTERRUPTED if _is_interrupt(error) else metrics.StepOutcome.FAILED
+        )
+        raise
+    finally:
+        metrics.observe(
+            metrics.Metric.WORKFLOW_STEP_DURATION,
+            timer.elapsed(),
+            graph=graph,
+            step=node,
+            step_class=metrics.step_class(graph, node),
+            outcome=outcome,
+        )
 
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -602,15 +639,44 @@ def traced_node(node: str, fn: F, *, graph: str | None = None) -> F:
 # --- Model calls ------------------------------------------------------------------------
 
 
+#: Exceptions that mean a model answered, but not in the requested shape --
+#: pydantic's `ValidationError` and LangChain's `OutputParserException` are
+#: both `ValueError`s.
+_SCHEMA_FAILURES = (ValueError, TypeError)
+
+
 @contextmanager
 def model_span(operation: str, *, model: str | None = None, **attributes: Any) -> Iterator[Span]:
-    """The span one model call runs in. Prompts and completions are never attributes."""
-    with span(
-        f"model.{operation}",
-        {Attr.MODEL_OPERATION: operation, Attr.MODEL_NAME: model, **attributes},
-        kind=SpanKind.CLIENT,
-    ) as current:
-        yield current
+    """The span one model call runs in. Prompts and completions are never attributes.
+
+    The call is also timed into `personalos.model.request.duration`, labelled
+    with the model's provider (`metrics.model_provider`), the operation and an
+    outcome: `ok`, `schema_invalid` when the answer did not validate, or
+    `error`.
+    """
+    timer = metrics.start_timer()
+    outcome = metrics.ModelOutcome.OK
+    try:
+        with span(
+            f"model.{operation}",
+            {Attr.MODEL_OPERATION: operation, Attr.MODEL_NAME: model, **attributes},
+            kind=SpanKind.CLIENT,
+        ) as current:
+            yield current
+    except _SCHEMA_FAILURES:
+        outcome = metrics.ModelOutcome.SCHEMA_INVALID
+        raise
+    except BaseException:
+        outcome = metrics.ModelOutcome.ERROR
+        raise
+    finally:
+        metrics.observe(
+            metrics.Metric.MODEL_REQUEST_DURATION,
+            timer.elapsed(),
+            provider=metrics.model_provider(model),
+            operation=operation,
+            outcome=outcome,
+        )
 
 
 def model_name(model: Any) -> str | None:

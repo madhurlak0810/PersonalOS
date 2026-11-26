@@ -1,0 +1,29 @@
+# Alertmanager for the compose stack's `monitoring` profile.
+#
+# Every alert goes to the local receiver (`alert-receiver`, apps/alerts/
+# receiver.py), which writes one structured log line per alert -- read them
+# with `docker compose logs -f alert-receiver` -- and needs nothing outside
+# the stack. Resolutions are sent too, so the log says when an alert clears.
+#
+# To also send alerts somewhere else (mail, Slack, a pager), copy this file,
+# add a receiver and route to it, and point the stack at your copy:
+#
+#   PERSONALOS_ALERTMANAGER_CONFIG=./alertmanager.local.yml \
+#     docker compose --profile monitoring up -d
+#
+# See docs/ALERTS.md#sending-alerts-elsewhere. Alertmanager is on the
+# internal network only; an external receiver also needs the `egress`
+# network added to the service.
+
+route:
+  receiver: local
+  group_by: [alertname, workflow_id, integration, route]
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 4h
+
+receivers:
+  - name: local
+    webhook_configs:
+      - url: http://alert-receiver:9095/alerts
+        send_resolved: true

@@ -1,0 +1,173 @@
+# promtool unit tests for deploy/prometheus/rules/personalos.yml.
+#
+#   promtool test rules deploy/prometheus/tests/personalos.test.yml
+#
+# CI runs this inside the pinned Prometheus image (.github/workflows/ci.yml).
+# Each case fires an alert from series shaped like the ones the app exports,
+# and the stalled-workflow cases also check that it clears once the series
+# goes away (`stale`), which is what happens when the workflow moves again.
+
+rule_files:
+  - ../rules/personalos.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: a workflow with no progress fires WorkflowStalled, and clears when it moves
+    interval: 1m
+    input_series:
+      - series: 'personalos_workflows_active{job="personalos-api"}'
+        values: "1x10"
+      - series: 'personalos_workflow_stalled_for_seconds{job="personalos-api", workflow_id="6f1c2e9a-1b2c-4d3e-8f90-123456789abc", reason="no_progress"}'
+        values: "_ _ 960 1020 1080 1140 stale"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: WorkflowStalled
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: WorkflowStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              workflow_id: 6f1c2e9a-1b2c-4d3e-8f90-123456789abc
+              reason: no_progress
+            exp_annotations:
+              summary: "Workflow 6f1c2e9a-1b2c-4d3e-8f90-123456789abc is stalled (no_progress) for 18m 0s"
+              runbook: docs/ALERTS.md#workflowstalled
+      - eval_time: 7m
+        alertname: WorkflowStalled
+        exp_alerts: []
+
+  - name: an approval past its expiry fires WorkflowStalled with reason approval_overdue
+    interval: 1m
+    input_series:
+      - series: 'personalos_workflows_active{job="personalos-api"}'
+        values: "1x10"
+      - series: 'personalos_workflow_stalled_for_seconds{job="personalos-api", workflow_id="0a0b0c0d-0e0f-4a1b-8c2d-3e4f5a6b7c8d", reason="approval_overdue"}'
+        values: "400 460 520 580"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: WorkflowStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              workflow_id: 0a0b0c0d-0e0f-4a1b-8c2d-3e4f5a6b7c8d
+              reason: approval_overdue
+            exp_annotations:
+              summary: "Workflow 0a0b0c0d-0e0f-4a1b-8c2d-3e4f5a6b7c8d is stalled (approval_overdue) for 8m 40s"
+              runbook: docs/ALERTS.md#workflowstalled
+
+  - name: a dead letter fires DeadLettersGrowing, which clears once the count stops growing
+    interval: 1m
+    input_series:
+      - series: 'personalos_workflows_active{job="personalos-api"}'
+        values: "0x40"
+      - series: 'personalos_outbox_parked{job="personalos-api", status="dead_letter"}'
+        values: "0x10 1x30"
+      - series: 'personalos_outbox_parked{job="personalos-api", status="quarantined"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: DeadLettersGrowing
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: DeadLettersGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              status: dead_letter
+            exp_annotations:
+              summary: "Outbox events are being parked as dead_letter"
+              runbook: docs/ALERTS.md#deadlettersgrowing
+      - eval_time: 35m
+        alertname: DeadLettersGrowing
+        exp_alerts: []
+
+  - name: an integration degraded or down for 30 minutes fires IntegrationUnhealthy
+    interval: 1m
+    input_series:
+      - series: 'personalos_workflows_active{job="personalos-api"}'
+        values: "0x40"
+      - series: 'personalos_integration_health_status{job="personalos-api", integration="gmail"}'
+        values: "1x40"
+      - series: 'personalos_integration_health_status{job="personalos-worker", integration="google_calendar"}'
+        values: "2x40"
+      - series: 'personalos_integration_health_status{job="personalos-api", integration="greenhouse"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: IntegrationUnhealthy
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: IntegrationUnhealthy
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              integration: gmail
+            exp_annotations:
+              summary: "Integration gmail has been degraded for at least 30 minutes"
+              runbook: docs/ALERTS.md#integrationunhealthy
+          - exp_labels:
+              severity: warning
+              integration: google_calendar
+            exp_annotations:
+              summary: "Integration google_calendar has been down for at least 30 minutes"
+              runbook: docs/ALERTS.md#integrationunhealthy
+
+  - name: an outbox event older than 15 minutes fires OutboxBacklogGrowing
+    interval: 1m
+    input_series:
+      - series: 'personalos_workflows_active{job="personalos-api"}'
+        values: "0x40"
+      - series: 'personalos_outbox_oldest_pending_age_seconds{job="personalos-api"}'
+        values: "0+60x40"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: OutboxBacklogGrowing
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: OutboxBacklogGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "The outbox backlog is growing or its oldest event is over 15 minutes old"
+              runbook: docs/ALERTS.md#outboxbackloggrowing
+
+  - name: a route failing half its requests fires ApiErrorRateHigh
+    interval: 1m
+    input_series:
+      - series: 'personalos_workflows_active{job="personalos-api"}'
+        values: "0x40"
+      - series: 'personalos_api_request_duration_seconds_count{job="personalos-api", route="/v1/chat", method="POST", status_class="5xx"}'
+        values: "0+6x40"
+      - series: 'personalos_api_request_duration_seconds_count{job="personalos-api", route="/v1/chat", method="POST", status_class="2xx"}'
+        values: "0+6x40"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ApiErrorRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              route: /v1/chat
+            exp_annotations:
+              summary: "Route /v1/chat has answered more than 5% of requests with a 5xx for 10 minutes"
+              runbook: docs/ALERTS.md#apierrorratehigh
+
+  - name: no operational state fires OperationalStateMissing
+    interval: 1m
+    input_series:
+      - series: 'personalos_worker_queue_depth{job="personalos-worker", state="pending"}'
+        values: "0x10"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OperationalStateMissing
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: OperationalStateMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "The API has reported no operational state for 5 minutes; stalled workflows cannot be detected"
+              runbook: docs/ALERTS.md#operationalstatemissing

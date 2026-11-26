@@ -29,6 +29,12 @@ rather than `ainvoke` for that, and collects its result exactly the way
 `ainvoke` does, so the run itself is the same run either way. Recording is
 fire-and-forget: a progress event that cannot be written is logged and
 dropped, never raised into the step it describes.
+
+The same observations are metrics (`personalos.observability.metrics`): each
+invocation counts once in `personalos.workflow.runs` and is timed into
+`personalos.workflow.run.duration`, labelled with its graph and whether it
+completed, paused at an interrupt or failed. Steps are timed where every
+graph's nodes run, in `tracing.node_span`.
 """
 
 import logging
@@ -58,7 +64,8 @@ from personalos.domain.progress import (
     approval_resolved_data,
 )
 from personalos.domain.workflow import WorkflowResumeState, WorkflowThread, thread_namespace
-from personalos.observability import tracing
+from personalos.observability import metrics, tracing
+from personalos.observability.metrics import Metric, WorkflowOutcome
 from personalos.observability.structured_logging import LogEvent
 from personalos.observability.tracing import Attr
 from personalos.persistence.checkpointer import (
@@ -267,6 +274,8 @@ class DurableWorkflowRunner:
         correlation_id = configurable.get("correlation_id")
         #: Task id -> node, for every step that started and has not finished.
         running: dict[str, str] = {}
+        graph = thread_namespace(thread.thread_id)
+        run_timer = metrics.start_timer()
         with tracing.workflow_span(
             "graph.run",
             workflow_id=thread.workflow_id,
@@ -293,6 +302,7 @@ class DurableWorkflowRunner:
                 self._note_broken_integration(thread, exc)
                 await self._note_failure(thread, correlation_id, running, exc)
                 tracing.set_attributes(span, {Attr.OUTCOME: "failed"})
+                _count_run(graph, WorkflowOutcome.FAILED, run_timer)
                 raise
 
             # A graph that stopped at an interrupt (an unanswered approval, say) has
@@ -304,10 +314,12 @@ class DurableWorkflowRunner:
                     "thread '%s' paused at step(s) %s", thread.thread_id, ", ".join(state.next)
                 )
                 tracing.set_attributes(span, {Attr.OUTCOME: "paused", Attr.INTERRUPTED: True})
+                _count_run(graph, WorkflowOutcome.PAUSED, run_timer)
             else:
                 self.registry.mark_status(thread.thread_id, RUN_STATUS_COMPLETED, finished=True)
                 self._emit(thread, correlation_id, ProgressEventType.WORKFLOW_COMPLETED, {})
                 tracing.set_attributes(span, {Attr.OUTCOME: "completed"})
+                _count_run(graph, WorkflowOutcome.COMPLETED, run_timer)
             return final
 
     async def _stream(
@@ -532,6 +544,12 @@ class DurableWorkflowRunner:
                 f"to say which one to resume"
             )
         return threads[0]
+
+
+def _count_run(graph: str | None, outcome: WorkflowOutcome, timer: Any) -> None:
+    """One finished invocation: counted, and timed."""
+    metrics.add(Metric.WORKFLOW_RUNS, graph=graph, outcome=outcome)
+    metrics.observe(Metric.WORKFLOW_RUN_DURATION, timer.elapsed(), graph=graph, outcome=outcome)
 
 
 def _field(value: Any, name: str) -> Any:

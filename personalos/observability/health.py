@@ -12,8 +12,11 @@ Three instruments, all with an `integration` attribute:
 - `personalos.integration.health.status` (observable gauge): the last known
   state per integration in this process, `0` healthy, `1` degraded, `2` down.
 
-Nothing here exports anything: the instruments come from the global meter
-provider, which is a no-op until one is installed, the same as tracing.
+The names and labels are `metrics.Metric.INTEGRATION_HEALTH_*`, recorded
+through `personalos.observability.metrics`, so they are no-ops until a meter
+provider is installed. The gauge here reports what *this process* last saw;
+the API also reports the stored status of every integration from the
+database (`state_metrics`), so the dashboards see it while the worker is down.
 
 A transition is logged as `integration.health_changed` (WARNING when it gets
 worse, INFO when it recovers) with `integration`, `health_status`,
@@ -26,7 +29,8 @@ import threading
 from collections.abc import Iterable
 from uuid import UUID
 
-from opentelemetry import metrics
+from personalos.observability import metrics
+from personalos.observability.metrics import Metric
 
 logger = logging.getLogger("personalos.integration_health")
 
@@ -38,34 +42,20 @@ HEALTH_FAILED_EVENT = "integration.health_failed"
 #: Gauge value for each status.
 STATUS_VALUES = {"healthy": 0, "degraded": 1, "down": 2}
 
-_meter = metrics.get_meter("personalos.integration_health")
-_checks = _meter.create_counter(
-    "personalos.integration.health.checks",
-    description="Integration health outcomes recorded, by integration and status",
-)
-_transitions = _meter.create_counter(
-    "personalos.integration.health.transitions",
-    description="Integration health state changes",
-)
-
 _lock = threading.Lock()
 _last_status: dict[str, str] = {}
 
 
-def _observe(_options) -> Iterable[metrics.Observation]:
+def _observe() -> Iterable[tuple[float, dict[str, str]]]:
     with _lock:
         snapshot = dict(_last_status)
     return [
-        metrics.Observation(STATUS_VALUES.get(status, 2), {"integration": integration})
+        (STATUS_VALUES.get(status, 2), {"integration": integration})
         for integration, status in snapshot.items()
     ]
 
 
-_meter.create_observable_gauge(
-    "personalos.integration.health.status",
-    callbacks=[_observe],
-    description="Last known integration health: 0 healthy, 1 degraded, 2 down",
-)
+metrics.register_gauge(Metric.INTEGRATION_HEALTH_STATUS, _observe)
 
 
 def record_outcome(
@@ -82,7 +72,9 @@ def record_outcome(
     """Count one outcome, and log and count it as a transition when the state changed."""
     with _lock:
         _last_status[integration] = status
-    _checks.add(1, {"integration": integration, "status": status, "source": source})
+    metrics.add(
+        Metric.INTEGRATION_HEALTH_CHECKS, integration=integration, status=status, source=source
+    )
 
     extra = {
         "integration": integration,
@@ -106,8 +98,11 @@ def record_outcome(
             )
         return
 
-    _transitions.add(
-        1, {"integration": integration, "from_status": previous or "unknown", "status": status}
+    metrics.add(
+        Metric.INTEGRATION_HEALTH_TRANSITIONS,
+        integration=integration,
+        from_status=previous or "unknown",
+        status=status,
     )
     if status == "healthy":
         logger.info(
