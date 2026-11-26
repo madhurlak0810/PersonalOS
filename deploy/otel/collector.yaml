@@ -5,6 +5,11 @@
 # (`docker compose logs otel-collector`). To ship traces somewhere, add an
 # exporter here -- an `otlphttp` to Jaeger, Tempo or a vendor -- and list it in
 # the pipeline. Spans are already redacted by the app before they leave it.
+#
+# Metrics are exposed for Prometheus to scrape on :8889 (internal only; the
+# `monitoring` profile's Prometheus scrapes it). The series names are the
+# ones `personalos.observability.metrics` derives and docs/METRICS.md lists:
+# dots become underscores, seconds append `_seconds`, counters `_total`.
 
 extensions:
   # GET :13133/ answers 200 once the pipelines are running. The collector
@@ -30,6 +35,17 @@ processors:
 exporters:
   debug:
     verbosity: basic
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # Pinned rather than left to the default, because every dashboard and
+    # alert rule depends on the exact names this produces.
+    translation_strategy: UnderscoreEscapingWithSuffixes
+    # A series not pushed for this long is dropped. The app pushes every 15s,
+    # and a stalled workflow's gauge series stops being pushed once it moves
+    # again, so this bounds how long a cleared stall keeps its alert firing.
+    metric_expiration: 1m
+    resource_to_telemetry_conversion:
+      enabled: false
 
 service:
   extensions: [health_check]
@@ -38,6 +54,10 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
   telemetry:
     logs:
       level: info

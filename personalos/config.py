@@ -128,6 +128,21 @@ class Settings(BaseSettings):
     tracing_enabled: bool = False
     otel_exporter_otlp_endpoint: str = ""
     otel_service_name: str = ""
+    # Metrics (OpenTelemetry), pushed to the same OTLP endpoint every
+    # `metrics_export_interval_seconds`. Off unless enabled. The names and
+    # labels are `personalos.observability.metrics.CATALOG` (docs/METRICS.md).
+    metrics_enabled: bool = False
+    metrics_export_interval_seconds: float = 15.0
+    # How often the API samples the database for the operational gauges
+    # (queue depth, outbox backlog, dead letters, stalled workflows); see
+    # `personalos.observability.state_metrics`. 0 turns the sampling off.
+    metrics_state_interval_seconds: float = 15.0
+    # A workflow with a thread running or a command queued, not parked at an
+    # approval, and with nothing recorded for this long counts as stalled.
+    workflow_stall_seconds: int = 900
+    # A workflow parked at an approval this long past its expiry counts as
+    # stalled: the expiry sweep should have closed it by then.
+    approval_overdue_grace_seconds: int = 300
 
     # Models. A `ModelConfig` JSON file naming the provider and model for each
     # model-backed port (see `personalos.models.gateway` and

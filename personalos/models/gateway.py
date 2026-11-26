@@ -110,6 +110,7 @@ from personalos.models.routing import (
 from personalos.models.structured import REPAIR_PROMPT
 from personalos.models.task_planning import PLANNER_SYSTEM_PROMPT as TASK_PLANNER_SYSTEM_PROMPT
 from personalos.models.task_planning import ResilientTaskPlanner, StructuredLLMTaskPlanner
+from personalos.observability import metrics
 
 Provider = Literal["rules", "anthropic", "ollama", "openai_compatible"]
 
@@ -322,6 +323,12 @@ class ModelGateway:
         self.config = config
         self.cloud_inference_allowed = cloud_inference_allowed
         self._chat_model = chat_model_factory or default_chat_model_factory
+        # The `provider` label of the model metrics: call sites name only
+        # their model, as they do for their spans.
+        for role in ModelRole:
+            spec = config.spec_for(role)
+            if spec.provider in CHAT_PROVIDERS and spec.model:
+                metrics.register_model_provider(spec.model, spec.provider)
         self._embeddings_client = embeddings_client_factory or default_embeddings_client_factory
 
     def _spec(self, role: ModelRole) -> tuple[ModelSpec, dict[str, Any]]:

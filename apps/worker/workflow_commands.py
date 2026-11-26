@@ -34,7 +34,8 @@ from opentelemetry.trace import SpanKind
 from apps.worker.health_monitor import HealthGate, describe_blocked
 from apps.worker.workflow_runner import DurableWorkflowRunner
 from personalos.domain.workflow import WorkflowCommand, WorkflowCommandKind, thread_namespace
-from personalos.observability import tracing
+from personalos.observability import metrics, tracing
+from personalos.observability.metrics import Metric, RetrySource
 from personalos.observability.tracing import Attr
 from personalos.persistence.leases import WorkflowLeaseUnavailable
 from personalos.persistence.workflow_commands import WorkflowCommandQueue
@@ -154,6 +155,7 @@ async def process_next(
     if claimed is None:
         return False
     command = claimed.command
+    _count_retry(claimed)
     if gate is not None:
         blocked = gate.blocked_for(command)
         if blocked:
@@ -169,6 +171,7 @@ async def process_next(
                 },
             )
             queue.release(claimed.outbox_id, delay=gate.retry_after)
+            _settled(command, "held")
             return True
     try:
         # A child of the span that queued the command -- the request, or the
@@ -201,18 +204,44 @@ async def process_next(
             claimed.command.command_id,
         )
         queue.release(claimed.outbox_id, delay=lease_busy_delay)
+        _settled(command, "lease_busy")
         return True
     except Exception:
         logger.exception("workflow command %s failed", claimed.command.command_id)
         queue.mark_failed(claimed.outbox_id)
+        _settled(command, "failed")
         raise
     queue.mark_done(claimed.outbox_id)
+    _settled(command, "done")
     if after_run is not None:
         try:
             await after_run(command)
         except Exception:  # noqa: BLE001 - the command ran; only the follow-up failed
             logger.exception("after-run hook failed for command %s", command.command_id)
     return True
+
+
+#: `outcome` of `personalos.worker.commands`: ran to the end, raised, was put
+#: back by the circuit breaker, or was put back because another worker holds
+#: the workflow's lease.
+COMMAND_OUTCOMES = ("done", "failed", "held", "lease_busy")
+
+
+def _settled(command: WorkflowCommand, outcome: str) -> None:
+    metrics.add(Metric.WORKER_COMMANDS, kind=command.kind, outcome=outcome)
+
+
+def _count_retry(claimed: Any) -> None:
+    """A redelivered command, or an operator's retry, is work tried again.
+
+    Counted once per claim: a retry command that is itself redelivered counts
+    as a redelivery. A command held by the circuit breaker and claimed again
+    later counts again, as the attempt it is.
+    """
+    if claimed.redelivered:
+        metrics.add(Metric.WORKER_RETRIES, source=RetrySource.COMMAND_REDELIVERY)
+    elif claimed.command.kind == WorkflowCommandKind.RETRY:
+        metrics.add(Metric.WORKER_RETRIES, source=RetrySource.OPERATOR_RETRY)
 
 
 async def run_commands(
@@ -250,6 +279,7 @@ async def run_commands(
 
 __all__ = [
     "AfterRun",
+    "COMMAND_OUTCOMES",
     "COMMAND_ID_KEY",
     "DEFAULT_LEASE_BUSY_DELAY",
     "command_configurable",

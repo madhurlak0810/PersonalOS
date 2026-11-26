@@ -8,7 +8,7 @@ allow-list); CI pipes it in. Checks what the Dockerfile promises:
 - it runs as a non-root user;
 - no test fakes, no tests, and no dev or test dependencies are installed;
 - nothing is in the secret store directory, and no `.env` is anywhere in /app;
-- the API and the worker still import without the fakes.
+- the API, the worker and the alert receiver still import without the fakes.
 """
 
 import importlib
@@ -39,7 +39,12 @@ def problems() -> list[str]:
         if path.exists() and any(path.iterdir()):
             found.append(f"{directory} is not empty")
     found += [f"env file in the image: {path}" for path in Path("/app").rglob(".env*")]
-    for module in ("apps.api.main", "apps.worker.main", "apps.worker.graphs"):
+    for module in (
+        "apps.api.main",
+        "apps.worker.main",
+        "apps.worker.graphs",
+        "apps.alerts.receiver",
+    ):
         try:
             importlib.import_module(module)
         except Exception as error:  # noqa: BLE001 - any import failure is the finding

@@ -8,6 +8,10 @@
 #   otel-collector  receives the API's and worker's traces (internal only)
 #   ollama          optional, `--profile ollama`: local models and embeddings
 #   ui              optional, `--profile ui`: the operator UI, on 127.0.0.1 only
+#   prometheus,     optional, `--profile monitoring`: metrics, alert rules,
+#   alertmanager,     alert delivery to a local log, and the dashboards on
+#   alert-receiver,   127.0.0.1:3000 (docs/METRICS.md, docs/ALERTS.md)
+#   grafana
 #
 # Settings: deploy/compose.defaults.env, then your own `.env.compose` if it
 # exists (it is gitignored). Put job boards, the model config and so on
@@ -17,7 +21,8 @@
 #
 # Host ports and image tags can be changed with environment variables named
 # PERSONALOS_* (prefixed so a quick-start `.env` cannot change them by
-# accident): PERSONALOS_API_PORT, PERSONALOS_UI_PORT, PERSONALOS_IMAGE_TAG.
+# accident): PERSONALOS_API_PORT, PERSONALOS_UI_PORT, PERSONALOS_GRAFANA_PORT,
+# PERSONALOS_IMAGE_TAG, PERSONALOS_ALERTMANAGER_CONFIG.
 
 name: personalos
 
@@ -204,6 +209,122 @@ services:
       api:
         condition: service_healthy
 
+  prometheus:
+    # Scrapes the collector, evaluates deploy/prometheus/rules, sends alerts
+    # to Alertmanager. Internal only; query it through Grafana.
+    profiles: [monitoring]
+    image: prom/prometheus:v3.7.3@sha256:49214755b6153f90a597adcbff0252cc61069f8ab69ce8411285cd4a560e8038
+    <<: *hardening
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    networks: [backend]
+    depends_on:
+      otel-collector:
+        condition: service_started
+      alertmanager:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  alertmanager:
+    # Routes every alert to `alert-receiver`. Another channel is a config
+    # file of your own: PERSONALOS_ALERTMANAGER_CONFIG (docs/ALERTS.md).
+    profiles: [monitoring]
+    image: prom/alertmanager:v0.29.0@sha256:88743b63b3e09ea6e31e140ced5bf45f4a8e82c617c2a963f78841f4995ad1d7
+    <<: *hardening
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      # One instance: no high-availability gossip to listen for.
+      - --cluster.listen-address=
+    volumes:
+      - ${PERSONALOS_ALERTMANAGER_CONFIG:-./deploy/alertmanager/alertmanager.yml}:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    networks: [backend]
+    depends_on:
+      alert-receiver:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9093/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  alert-receiver:
+    # The local alert channel: one structured log line per alert
+    # (`docker compose logs -f alert-receiver`). No database, no secrets, no
+    # route out. The `api` target again, without an `image:` of its own.
+    profiles: [monitoring]
+    <<: *hardening
+    build:
+      context: .
+      target: api
+    restart: unless-stopped
+    env_file:
+      - path: deploy/compose.defaults.env
+      - path: .env.compose
+        required: false
+    command: ["python", "-m", "apps.alerts.receiver", "--host", "0.0.0.0", "--port", "9095"]
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9095/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  grafana:
+    # The dashboards in deploy/grafana/dashboards, read-only, for anyone on
+    # this machine: anonymous viewers, no login form, no admin over HTTP.
+    profiles: [monitoring]
+    image: grafana/grafana:12.2.1@sha256:35c41e0fd0295f5d0ee5db7e780cf33506abfaf47686196f825364889dee878b
+    <<: *hardening
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # No calls home: it is on `egress` only so its port can be published.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/personalos-workflows.json
+      # Logs to stdout only: the root filesystem is read-only.
+      GF_LOG_MODE: console
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${PERSONALOS_GRAFANA_PORT:-3000}:3000"
+    networks: [backend, egress]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
 networks:
   # Postgres, the collector and the app talk here. `internal`: no route out.
   backend:
@@ -218,3 +339,6 @@ volumes:
   db-password:
   personalos-secrets:
   ollama-models:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:

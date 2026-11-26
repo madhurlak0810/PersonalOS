@@ -44,6 +44,7 @@ from uuid import UUID, uuid5
 from pydantic import BaseModel, ConfigDict, Field
 
 from personalos.domain.errors import ErrorCode, FailureClass, PersonalOSError
+from personalos.domain.exception_text import is_input_echoing, safe_exception_message
 from personalos.domain.redaction import redact, redact_text
 
 #: Total attempts a failed step may have, the first one included.
@@ -281,10 +282,16 @@ def sanitize_error(error: StoredError) -> str:
 
 
 def describe_exception(error: BaseException) -> str:
-    """A live exception as `sanitize_error` would show its stored repr."""
+    """A live exception as `sanitize_error` would show its stored repr.
+
+    An exception that quotes its input (a pydantic `ValidationError`) is
+    described by field and error type instead (`exception_text`), so a log
+    line about a model answer that failed validation does not repeat it.
+    """
     if isinstance(error, PersonalOSError):
         return sanitize_error(parse_stored_error(repr(error)))
-    return sanitize_error(StoredError(error_type=type(error).__name__, message=str(error)))
+    message = safe_exception_message(error) if is_input_echoing(error) else str(error)
+    return sanitize_error(StoredError(error_type=type(error).__name__, message=message))
 
 
 def operation_recovery(status: str) -> OperationRecovery:

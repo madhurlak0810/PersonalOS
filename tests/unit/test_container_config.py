@@ -31,10 +31,15 @@ def _ports(service: dict) -> list[str]:
     return [str(p) for p in service.get("ports", [])]
 
 
+MONITORING = ("prometheus", "alertmanager", "alert-receiver", "grafana")
+
+
 def test_the_stack_has_every_required_service():
     assert {"postgres", "migrate", "api", "worker", "otel-collector"} <= set(SERVICES)
     assert SERVICES["ollama"]["profiles"] == ["ollama"]
     assert SERVICES["ui"]["profiles"] == ["ui"]
+    for name in MONITORING:
+        assert SERVICES[name]["profiles"] == ["monitoring"], name
 
 
 def test_postgres_has_no_host_port_and_only_the_internal_network():
@@ -62,10 +67,11 @@ def test_every_published_port_is_on_loopback(source):
             assert port.startswith("127.0.0.1:"), f"{name} publishes {port}"
 
 
-def test_only_the_api_and_ui_publish_ports():
+def test_only_the_api_ui_and_grafana_publish_ports():
     published = {name for name, service in SERVICES.items() if _ports(service)}
 
-    assert published == {"api", "ui"}
+    assert published == {"api", "ui", "grafana"}
+    assert _ports(SERVICES["grafana"]) == ["127.0.0.1:${PERSONALOS_GRAFANA_PORT:-3000}:3000"]
 
 
 def test_the_api_publishes_its_port_on_loopback():
@@ -75,6 +81,40 @@ def test_the_api_publishes_its_port_on_loopback():
 def test_the_collector_and_ollama_have_no_host_port():
     assert "ports" not in SERVICES["otel-collector"]
     assert "ports" not in SERVICES["ollama"]
+
+
+def test_prometheus_alertmanager_and_the_alert_receiver_are_internal_only():
+    for name in ("prometheus", "alertmanager", "alert-receiver"):
+        assert "ports" not in SERVICES[name], name
+        assert SERVICES[name]["networks"] == ["backend"], name
+
+
+def test_grafana_is_read_only_for_anonymous_viewers_and_does_not_call_home():
+    environment = SERVICES["grafana"]["environment"]
+
+    assert environment["GF_AUTH_ANONYMOUS_ORG_ROLE"] == "Viewer"
+    assert environment["GF_AUTH_DISABLE_LOGIN_FORM"] == "true"
+    assert environment["GF_AUTH_BASIC_ENABLED"] == "false"
+    for key in (
+        "GF_ANALYTICS_REPORTING_ENABLED",
+        "GF_ANALYTICS_CHECK_FOR_UPDATES",
+        "GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES",
+    ):
+        assert environment[key] == "false", key
+    assert environment["GF_PLUGINS_PREINSTALL_DISABLED"] == "true"
+
+
+def test_the_monitoring_services_have_health_checks_and_mount_their_config_read_only():
+    for name in MONITORING:
+        assert "healthcheck" in SERVICES[name], name
+    assert "./deploy/prometheus/rules:/etc/prometheus/rules:ro" in SERVICES["prometheus"]["volumes"]
+    assert (
+        "${PERSONALOS_ALERTMANAGER_CONFIG:-./deploy/alertmanager/alertmanager.yml}"
+        ":/etc/alertmanager/alertmanager.yml:ro"
+    ) in SERVICES["alertmanager"]["volumes"]
+    assert (
+        "./deploy/grafana/dashboards:/etc/grafana/dashboards:ro" in SERVICES["grafana"]["volumes"]
+    )
 
 
 def test_third_party_images_are_pinned_by_tag_and_digest():
@@ -107,7 +147,7 @@ def test_the_app_images_run_as_a_non_root_user():
 
 
 def test_the_app_containers_are_hardened():
-    for name in (*APP_SERVICES, "db-password", "ui", "otel-collector"):
+    for name in (*APP_SERVICES, "db-password", "ui", "otel-collector", *MONITORING):
         service = SERVICES[name]
         assert service.get("read_only") is True, name
         assert service.get("cap_drop") == ["ALL"], name
@@ -206,6 +246,7 @@ def test_state_lives_in_named_volumes():
     volumes = set(COMPOSE["volumes"])
 
     assert {"postgres-data", "ollama-models", "personalos-secrets", "db-password"} <= volumes
+    assert {"prometheus-data", "alertmanager-data", "grafana-data"} <= volumes
     assert "postgres-data:/var/lib/postgresql/data" in SERVICES["postgres"]["volumes"]
     assert "ollama-models:/root/.ollama" in SERVICES["ollama"]["volumes"]
 
@@ -227,3 +268,23 @@ def test_the_collector_config_is_mounted_and_receives_otlp():
     assert SERVICES["api"]["environment"]["OTEL_EXPORTER_OTLP_ENDPOINT"] == (
         "http://otel-collector:4318"
     )
+
+
+def test_the_collector_exposes_metrics_for_prometheus_under_the_catalog_names():
+    collector = yaml.safe_load((REPO / "deploy" / "otel" / "collector.yaml").read_text())
+    prometheus = yaml.safe_load((REPO / "deploy" / "prometheus" / "prometheus.yml").read_text())
+
+    exporter = collector["exporters"]["prometheus"]
+    assert exporter["endpoint"].endswith(":8889")
+    # The names every dashboard and rule queries depend on this.
+    assert exporter["translation_strategy"] == "UnderscoreEscapingWithSuffixes"
+    assert collector["service"]["pipelines"]["metrics"]["exporters"] == ["prometheus"]
+    targets = [
+        target
+        for job in prometheus["scrape_configs"]
+        for config in job["static_configs"]
+        for target in config["targets"]
+    ]
+    assert targets == ["otel-collector:8889"]
+    defaults = (REPO / "deploy" / "compose.defaults.env").read_text().splitlines()
+    assert "METRICS_ENABLED=true" in defaults

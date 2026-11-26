@@ -55,6 +55,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import func, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -97,6 +98,10 @@ PARKED_STATUSES = (
     OutboxEventStatus.QUARANTINED.value,
     OutboxEventStatus.FAILED.value,
 )
+
+#: The parked statuses `backlog` counts. Not `failed`, which is also where a
+#: workflow command that raised is settled, so it would count every failed run.
+_GAUGED_PARKED = (OutboxEventStatus.DEAD_LETTER.value, OutboxEventStatus.QUARANTINED.value)
 
 #: How many rows one `claim` call parks (quarantines, or dead-letters for
 #: lapsed leases) before it gives up for this poll.
@@ -254,6 +259,42 @@ class EventOutbox:
     def max_attempts(self) -> int:
         """Deliveries a row gets before it is dead-lettered."""
         return self.retry_policy.max_attempts
+
+    def backlog(self) -> "OutboxBacklog":
+        """What is waiting in this outbox, for the operational gauges.
+
+        Undelivered rows by status (`pending`, `in_progress`) and the oldest
+        one's `created_at`, leaving out `exclude_types` as `claim` does; and
+        parked rows by status (`dead_letter`, `quarantined`), of every type.
+        """
+        unfinished = (OutboxEventStatus.PENDING.value, OutboxEventStatus.IN_PROGRESS.value)
+        session = self.session_factory()
+        try:
+            mine = (
+                OutboxEventModel.type.notin_(self.exclude_types) if self.exclude_types else true()
+            )
+            waiting = dict.fromkeys(unfinished, 0)
+            for status, count in (
+                session.query(OutboxEventModel.status, func.count(OutboxEventModel.id))
+                .filter(mine, OutboxEventModel.status.in_(unfinished))
+                .group_by(OutboxEventModel.status)
+            ):
+                waiting[status] = count
+            oldest = (
+                session.query(func.min(OutboxEventModel.created_at))
+                .filter(mine, OutboxEventModel.status.in_(unfinished))
+                .scalar()
+            )
+            parked = dict.fromkeys(_GAUGED_PARKED, 0)
+            for status, count in (
+                session.query(OutboxEventModel.status, func.count(OutboxEventModel.id))
+                .filter(OutboxEventModel.status.in_(_GAUGED_PARKED))
+                .group_by(OutboxEventModel.status)
+            ):
+                parked[status] = count
+        finally:
+            session.close()
+        return OutboxBacklog(waiting=waiting, oldest_created_at=oldest, parked=parked)
 
     def publish(self, envelope: EventEnvelope) -> Published:
         """Stage and commit an event on its own, for a producer with no mutation to pair it with.
@@ -527,6 +568,18 @@ class EventOutbox:
         return updated == 1
 
 
+@dataclass(frozen=True)
+class OutboxBacklog:
+    """Counts of an outbox's waiting and parked rows (`EventOutbox.backlog`)."""
+
+    #: Undelivered rows by status: `pending`, `in_progress`.
+    waiting: dict[str, int]
+    #: When the oldest undelivered row was written, if there is one.
+    oldest_created_at: datetime | None
+    #: Rows parked for an operator, by status: `dead_letter`, `quarantined`.
+    parked: dict[str, int]
+
+
 def _own(delivery: Delivery) -> ClaimedEvent:
     if not isinstance(delivery, ClaimedEvent):
         raise TypeError(f"the outbox cannot settle a {type(delivery).__name__} it did not hand out")
@@ -575,6 +628,7 @@ __all__ = [
     "DeliveryFailure",
     "EventOutbox",
     "FailureOutcome",
+    "OutboxBacklog",
     "envelope_from_row",
     "is_poison",
     "is_terminal",

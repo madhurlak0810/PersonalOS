@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -74,6 +75,17 @@ class ClaimedWorkflowCommand:
 
 def _key_prefix(workflow_id: UUID) -> str:
     return f"workflow:{workflow_id}:"
+
+
+def _workflow_of_key(dedupe_key: str | None) -> UUID | None:
+    """The workflow id a command's `workflow:<id>:...` dedupe key names."""
+    prefix = "workflow:"
+    if not dedupe_key or not dedupe_key.startswith(prefix):
+        return None
+    try:
+        return UUID(dedupe_key[len(prefix) :].split(":", 1)[0])
+    except ValueError:
+        return None
 
 
 class WorkflowCommandQueue:
@@ -149,6 +161,56 @@ class WorkflowCommandQueue:
             return [self._command(row) for row in rows]
         finally:
             session.close()
+
+    def depth(self) -> dict[str, int]:
+        """How many commands are queued (`pending`) and claimed (`in_progress`), all workflows."""
+        session = self.session_factory()
+        try:
+            counts = dict.fromkeys(_UNFINISHED, 0)
+            for status, count in (
+                session.query(OutboxEventModel.status, func.count(OutboxEventModel.id))
+                .filter(
+                    OutboxEventModel.type == WORKFLOW_COMMAND_EVENT,
+                    OutboxEventModel.status.in_(_UNFINISHED),
+                )
+                .group_by(OutboxEventModel.status)
+            ):
+                counts[status] = count
+            return counts
+        finally:
+            session.close()
+
+    def unfinished_activity(self, *, limit: int = 500) -> dict[UUID, datetime]:
+        """Each workflow with an unfinished command, and when one was last queued or claimed.
+
+        Read from the dedupe key's `workflow:<id>:` prefix, as `queued_for`
+        finds a workflow's commands, without decoding any payload.
+        """
+        session = self.session_factory()
+        try:
+            rows = (
+                session.query(
+                    OutboxEventModel.dedupe_key,
+                    OutboxEventModel.created_at,
+                    OutboxEventModel.claimed_at,
+                )
+                .filter(
+                    OutboxEventModel.type == WORKFLOW_COMMAND_EVENT,
+                    OutboxEventModel.status.in_(_UNFINISHED),
+                )
+                .limit(limit)
+                .all()
+            )
+        finally:
+            session.close()
+        activity: dict[UUID, datetime] = {}
+        for dedupe_key, created_at, claimed_at in rows:
+            workflow_id = _workflow_of_key(dedupe_key)
+            if workflow_id is None:
+                continue
+            at = max(t for t in (created_at, claimed_at) if t is not None)
+            activity[workflow_id] = max(activity.get(workflow_id, at), at)
+        return activity
 
     def count_keyed(self, workflow_id: UUID, kind: str, dedupe_prefix: str) -> tuple[int, int]:
         """How many of a workflow's commands were queued under a dedupe prefix.

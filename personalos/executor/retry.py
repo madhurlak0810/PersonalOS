@@ -29,7 +29,8 @@ from personalos.domain.retry_policy import (
     RetryPolicy,
     retry_after_seconds,
 )
-from personalos.observability import tracing
+from personalos.observability import metrics, tracing
+from personalos.observability.metrics import Metric, RetrySource
 from personalos.observability.structured_logging import LogEvent
 from personalos.observability.tracing import Attr
 from personalos.policy import ApprovalGrant, PolicyError, ToolIntent
@@ -163,6 +164,7 @@ async def dispatch_with_retry(
                     Attr.RETRY_DELAY: delay,
                 },
             )
+            metrics.add(Metric.WORKER_RETRIES, source=RetrySource.TOOL_DISPATCH)
             await sleep(delay)
             attempt += 1
 

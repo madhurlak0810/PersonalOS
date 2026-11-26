@@ -53,7 +53,7 @@ from apps.worker.outbox_dispatcher import OutboxDispatcher, build_outbox_dispatc
 from apps.worker.plan_steps import PlanStepResumer
 from apps.worker.scheduler import ScheduledSweep, Scheduler
 from apps.worker.stall_monitor import StalledApplicationMonitor
-from apps.worker.workflow_commands import AfterRun, process_next, run_commands
+from apps.worker.workflow_commands import COMMAND_OUTCOMES, AfterRun, process_next, run_commands
 from apps.worker.workflow_runner import DurableWorkflowRunner
 from personalos.bootstrap import (
     build_application_lifecycle_store,
@@ -76,8 +76,12 @@ from personalos.bootstrap import (
 )
 from personalos.config import settings
 from personalos.domain.errors import PortNotConfigured, ValidationFailed
+from personalos.domain.event_transport import FailureOutcome
 from personalos.domain.health import GMAIL, HealthCheck
-from personalos.domain.workflow import JOB_SEARCH_THREAD_NAMESPACE
+from personalos.domain.workflow import JOB_SEARCH_THREAD_NAMESPACE, WorkflowCommandKind
+from personalos.observability import metrics
+from personalos.observability.metrics import Metric, RetrySource, WorkflowOutcome
+from personalos.observability.metrics_setup import configure_metrics_from_settings
 from personalos.observability.structured_logging import configure_logging_from_settings
 from personalos.observability.tracing_setup import configure_tracing_from_settings
 from personalos.persistence.checkpointer import (
@@ -610,6 +614,37 @@ def log_wired_graphs(spec: str, graphs: WorkerGraphs) -> None:
         )
 
 
+def prime_worker_metrics(graphs: WorkerGraphs) -> None:
+    """Start the worker's rare-event counters at zero, so a rate over them is 0, not no data.
+
+    Dead letters, retries and failed runs are what the dashboards and alerts
+    watch for, and a counter that has never been incremented has no series
+    at all. Only label sets the worker can name up front are primed: each
+    wired graph's outcomes, each command kind's outcomes, each retry source.
+    """
+    metrics.prime(
+        Metric.WORKFLOW_RUNS,
+        (
+            {"graph": graph, "outcome": outcome}
+            for graph in graphs.runners
+            for outcome in WorkflowOutcome
+        ),
+    )
+    metrics.prime(
+        Metric.WORKER_COMMANDS,
+        (
+            {"kind": kind, "outcome": outcome}
+            for kind in WorkflowCommandKind
+            for outcome in COMMAND_OUTCOMES
+        ),
+    )
+    metrics.prime(Metric.WORKER_RETRIES, ({"source": source} for source in RetrySource))
+    metrics.prime(
+        Metric.OUTBOX_DELIVERIES,
+        ({"event_type": "any", "outcome": outcome} for outcome in (*FailureOutcome, "acked")),
+    )
+
+
 def main(graph_factory: str | None = None) -> None:
     """Run a worker until SIGINT or SIGTERM, finishing the step in hand first.
 
@@ -620,9 +655,11 @@ def main(graph_factory: str | None = None) -> None:
     """
     spec = graph_factory if graph_factory is not None else settings.worker_graphs
     configure_tracing_from_settings("personalos-worker")
+    configure_metrics_from_settings("personalos-worker")
     register_mcp_servers()
     graphs = load_graph_factory(spec)(SessionLocal) if spec else WorkerGraphs()
     log_wired_graphs(spec, graphs)
+    prime_worker_metrics(graphs)
     worker = build_worker(SessionLocal, graphs)
 
     async def run() -> None:
@@ -649,6 +686,7 @@ __all__ = [
     "load_graph_factory",
     "log_wired_graphs",
     "main",
+    "prime_worker_metrics",
 ]
 
 

@@ -114,6 +114,7 @@ from personalos.persistence.integration_health import IntegrationHealthStore
 from personalos.persistence.job_postings import SqlPostingCatalog
 from personalos.persistence.leases import DEFAULT_LEASE_TTL_SECONDS, WorkflowLeaseStore
 from personalos.persistence.mailbox_cursors import SqlMailboxCursorStore
+from personalos.persistence.operational_state import OperationalStateReader
 from personalos.persistence.outbox_emitter import OutboxEventEmitter
 from personalos.persistence.pending_checkpoints import (
     PendingCheckpointStore,
@@ -1475,6 +1476,22 @@ def build_integration_health_store(
     return IntegrationHealthStore(session_factory)
 
 
+def build_operational_state_reader(
+    session_factory: Callable[[], object] = SessionLocal,
+) -> OperationalStateReader:
+    """Build the reader the operational gauges and the stalled-workflow alert sample.
+
+    Thresholds are `WORKFLOW_STALL_SECONDS` and `APPROVAL_OVERDUE_GRACE_SECONDS`.
+    """
+    return OperationalStateReader(
+        session_factory,  # type: ignore[arg-type]
+        outbox=build_event_outbox(session_factory),
+        commands=build_workflow_command_queue(session_factory),
+        stall_after=timedelta(seconds=settings.workflow_stall_seconds),
+        approval_grace=timedelta(seconds=settings.approval_overdue_grace_seconds),
+    )
+
+
 def build_workflow_failure_store(
     session_factory: Callable[[], object] = SessionLocal,
     registry: WorkflowThreadRegistry | None = None,
@@ -1879,6 +1896,7 @@ def build_job_search_subgraph_runner(
 
 
 __all__ = [
+    "build_operational_state_reader",
     "build_local_api_token",
     "build_model_gateway",
     "JOB_SEARCH_WORKFLOW",

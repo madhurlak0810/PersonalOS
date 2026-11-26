@@ -55,9 +55,10 @@ from personalos.bootstrap import (
     register_inbound_email_thread,
 )
 from personalos.domain.errors import ProviderPermanentFailure
-from personalos.domain.event_transport import EventConsumer
+from personalos.domain.event_transport import EventConsumer, FailureOutcome
 from personalos.domain.events import EventEnvelope, EventType
-from personalos.observability import tracing
+from personalos.observability import metrics, tracing
+from personalos.observability.metrics import Metric, RetrySource
 from personalos.observability.tracing import Attr
 from personalos.persistence.database import SessionLocal
 
@@ -129,6 +130,7 @@ class OutboxDispatcher:
                         claimed.attempt,
                     )
                     failure = self.consumer.nack(claimed, error)
+                    _delivered(envelope, failure.outcome)
                     self._note_broken_integration(error, envelope)
                     tracing.mark_failed(span, error)
                     tracing.set_attributes(
@@ -136,6 +138,7 @@ class OutboxDispatcher:
                     )
                     return True
                 self.consumer.ack(claimed)
+                _delivered(envelope, "acked")
                 tracing.set_attributes(span, {Attr.EVENT_OUTCOME: "acked"})
         return True
 
@@ -177,6 +180,13 @@ class OutboxDispatcher:
                     await asyncio.wait_for(stop.wait(), timeout=idle_seconds)
                 except asyncio.TimeoutError:
                     pass
+
+
+def _delivered(envelope: EventEnvelope, outcome: Any) -> None:
+    """Count one delivery, and a retry when the failure put the event back in line."""
+    metrics.add(Metric.OUTBOX_DELIVERIES, event_type=envelope.type, outcome=outcome)
+    if outcome == FailureOutcome.RETRY_SCHEDULED:
+        metrics.add(Metric.WORKER_RETRIES, source=RetrySource.OUTBOX_DELIVERY)
 
 
 def build_outbox_dispatcher(
