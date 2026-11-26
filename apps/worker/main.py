@@ -48,6 +48,7 @@ from langgraph.config import get_config
 
 from apps.worker.checkpoint_monitor import CheckpointConditionEvaluator, PendingCheckpointMonitor
 from apps.worker.health_monitor import GatedSweep, HealthGate, IntegrationHealthMonitor
+from apps.worker.heartbeat import Heartbeat
 from apps.worker.outbox_dispatcher import OutboxDispatcher, build_outbox_dispatcher
 from apps.worker.plan_steps import PlanStepResumer
 from apps.worker.scheduler import ScheduledSweep, Scheduler
@@ -387,8 +388,12 @@ class Worker:
         idle_seconds: float = 1.0,
         gate: HealthGate | None = None,
         after_run: AfterRun | None = None,
+        heartbeat: Heartbeat | None = None,
     ):
         """Wire the queue and runners, and optionally the dispatcher, scheduler and gate.
+
+        `heartbeat`, when given, runs beside the other loops so a container
+        health check can tell the worker is alive (`apps.worker.heartbeat`).
 
         `gate` is the circuit breaker commands pass through before they run.
         `after_run` follows each command that ran; by default, the
@@ -401,6 +406,7 @@ class Worker:
         self.scheduler = scheduler
         self.idle_seconds = idle_seconds
         self.gate = gate
+        self.heartbeat = heartbeat
         self.after_run = (
             after_run if after_run is not None else PlanStepResumer(commands, self.runners)
         )
@@ -428,6 +434,8 @@ class Worker:
             loops.append(self.dispatcher.run(stop, idle_seconds=self.idle_seconds))
         if self.scheduler is not None:
             loops.append(self.scheduler.run(stop))
+        if self.heartbeat is not None:
+            loops.append(self.heartbeat.run(stop))
         logger.info("worker started with %s loop(s)", len(loops))
         await asyncio.gather(*loops)
         logger.info("worker stopped")
@@ -570,6 +578,11 @@ def build_worker(
         scheduler=build_scheduler(session_factory, graphs, clock=clock, gate=gate),
         idle_seconds=settings.worker_idle_seconds if idle_seconds is None else idle_seconds,
         gate=gate,
+        heartbeat=(
+            Heartbeat(settings.worker_heartbeat_file, settings.worker_heartbeat_seconds)
+            if settings.worker_heartbeat_file.strip()
+            else None
+        ),
     )
 
 

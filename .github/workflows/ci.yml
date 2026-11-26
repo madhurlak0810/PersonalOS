@@ -140,6 +140,63 @@ jobs:
         # the types generated from it).
         run: python scripts/export_openapi.py --check
 
+  containers:
+    # The images build, carry no secrets, fakes or dev dependencies, run as
+    # non-root, and the compose stack comes up healthy on its defaults and
+    # completes the quick start's workflow (docs/CONTAINERS.md).
+    name: Container images and compose smoke test
+    runs-on: ubuntu-latest
+    needs: boundaries
+    env:
+      COMPOSE: docker compose -f docker-compose.yml -f compose.quickstart.yml --profile ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the smoke test's client
+        run: pip install "httpx>=0.25"
+      - name: Build the images
+        run: $COMPOSE build
+      - name: Image checks (non-root, no fakes, no dev dependencies)
+        run: |
+          for image in personalos-api:local personalos-worker:local; do
+            echo "== $image"
+            test "$(docker image inspect -f '{{.Config.User}}' "$image")" = "10001:10001"
+            docker run --rm -i --network none --entrypoint python "$image" - < scripts/check_image.py
+          done
+          test "$(docker image inspect -f '{{.Config.User}}' personalos-ui:local)" = "101"
+      - name: Secret scan of the images
+        # What a secret could be baked into: the files the build copied in
+        # (/app, /var/lib/personalos) and the image config and layer history
+        # (ENV, ARG, LABEL, every RUN). Third-party packages under /opt/venv
+        # are not ours and are left to dependency scanning.
+        run: |
+          mkdir -p image-scan
+          for image in personalos-api:local personalos-worker:local personalos-worker-quickstart:local; do
+            dir="image-scan/${image%%:*}"
+            mkdir -p "$dir"
+            cid=$(docker create "$image")
+            docker export "$cid" | tar -x -C "$dir" app var/lib/personalos
+            docker rm "$cid" > /dev/null
+            docker image inspect "$image" > "$dir/image-config.json"
+            docker history --no-trunc "$image" > "$dir/image-history.txt"
+          done
+          cid=$(docker create personalos-ui:local)
+          mkdir -p image-scan/personalos-ui
+          docker export "$cid" | tar -x -C image-scan/personalos-ui usr/share/nginx/html etc/nginx
+          docker rm "$cid" > /dev/null
+          docker image inspect personalos-ui:local > image-scan/personalos-ui/image-config.json
+          docker history --no-trunc personalos-ui:local > image-scan/personalos-ui/image-history.txt
+          docker run --rm -v "$PWD/image-scan:/scan:ro" \
+            zricethezav/gitleaks:v8.28.0@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854 \
+            dir /scan --no-banner --redact --exit-code 1
+      - name: Compose smoke test
+        # Stack up, health checks pass, Postgres unreachable from the host,
+        # API on loopback only, the quick start's workflow queued and
+        # approved, stack torn down.
+        run: python scripts/smoke_compose.py --no-build
+
   ui:
     name: UI
     runs-on: ubuntu-latest

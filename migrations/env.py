@@ -23,7 +23,9 @@ if config.config_file_name is not None:
     # test suite).
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# `%` is ConfigParser interpolation syntax, and a URL-encoded password (one
+# from DATABASE_PASSWORD_FILE, say) can contain it.
+config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 

@@ -97,6 +97,8 @@ test = [
     "pytest-asyncio>=0.21",
     "pytest-cov>=4.1",
     "faker>=20.0",
+    # tests/unit/test_container_config.py reads the compose files.
+    "pyyaml>=6.0",
 ]
 
 [tool.setuptools]

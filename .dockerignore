@@ -1,0 +1,23 @@
+# The image build context is an allow-list: anything not named below is never
+# sent to the builder, so a local .env, an API token, a virtualenv or a test
+# fixture cannot end up in an image by accident.
+*
+
+!pyproject.toml
+!alembic.ini
+!LICENSE
+!NOTICE
+!migrations/
+!personalos/
+!apps/
+!mcp_servers/
+!docs/quickstart/
+
+# Even inside the allowed directories.
+**/__pycache__
+**/*.py[cod]
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/api-token

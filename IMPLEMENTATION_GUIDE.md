@@ -245,6 +245,40 @@ if anything differs from what this guide says. To run it without PostgreSQL,
 set `DATABASE_URL=sqlite:////tmp/smoke.db`. That skips Alembic and the
 pgvector index, so CI runs it on PostgreSQL.
 
+### Containerized quick start
+
+The same walkthrough with Docker only: no Python, no virtualenv, no `.env`.
+See [docs/CONTAINERS.md](docs/CONTAINERS.md) for what the stack runs and why.
+`compose.quickstart.yml` swaps in a worker image that has the fake job board,
+the extractive draft writer, and the sample resume and profile. The production
+`worker` image has none of them.
+
+```bash
+docker compose -f docker-compose.yml -f compose.quickstart.yml up -d --build
+docker compose ps        # wait until postgres, api and worker are (healthy)
+```
+
+This replaces steps 1–4 and 7: the stack generates a database password, runs
+the migrations, then starts the API on `127.0.0.1:8000` and the worker. Steps
+5 and 6 run inside the worker container. The resume path resolves against
+`/app/docs/quickstart`, as it does against `docs/quickstart` locally:
+
+```bash
+docker compose exec -T worker python -m personalos.cli ingest-resume resume.md
+docker compose exec -T worker python -m personalos.cli profile create /app/docs/quickstart/profile.json
+export TOKEN=$(docker compose exec -T api python -m personalos.cli auth token)
+export AUTH="Authorization: Bearer $TOKEN"
+```
+
+Steps 8–10 are then exactly as written above, against
+`http://127.0.0.1:8000`. To review the approval in the browser instead, add
+`--profile ui` to the `up` command and open http://localhost:5173. To start
+over, run `docker compose -f docker-compose.yml -f compose.quickstart.yml down -v`,
+which deletes the database and the token.
+
+`python scripts/smoke_compose.py` does all of this, checks the stack's
+security posture along the way, and tears the stack down. CI runs it.
+
 ### Optional: connect a Google account
 
 The walkthrough above needs no Google account. Gmail and Calendar adapters
@@ -424,7 +458,15 @@ kept outside the repository, in a `0600` file
   a token with `approve` can approve one, so treat it like the user's own password.
 - **Secrets stay out of `.env`.** Refresh tokens, API keys and the OAuth
   client secret live in the OS keychain (`SECRET_STORE_SERVICE`). The
-  configuration only holds `cred://` references to them.
+  configuration only holds `cred://` references to them. Containers have no
+  keychain, so they use files instead (`SECRET_STORE_BACKEND=file`), through the
+  same `SecretStore` interface: Docker secrets, plus a `0700` directory on a
+  volume. The database still holds only the references. See
+  [docs/CONTAINERS.md](docs/CONTAINERS.md#secrets-in-containers).
+- **The compose stack publishes only on `127.0.0.1`.** The API and UI are on
+  loopback ports. PostgreSQL has no host port and sits on an internal network,
+  with a password generated on first run. The API and worker run as non-root
+  on read-only root filesystems.
 
 ---
 
@@ -473,6 +515,9 @@ PersonalOS/
 ├── pyproject.toml                 # dependencies and tool config
 ├── alembic.ini                    # migrations read DATABASE_URL via migrations/env.py
 ├── .env.example                   # every setting, with defaults
+├── Dockerfile                     # api, worker and worker-quickstart images
+├── docker-compose.yml             # the stack: docker compose up (docs/CONTAINERS.md)
+├── compose.quickstart.yml         # override: the worker on the fake job board
 ├── README.md
 ├── IMPLEMENTATION_GUIDE.md        # this file
 │
@@ -491,7 +536,7 @@ PersonalOS/
 │   ├── providers/                 # job board adapters: Greenhouse, Lever, Ashby, Workday (opt-in), and a fake
 │   ├── retrieval/                 # resume ingestion, embedder, evidence selection, job matching
 │   ├── models/                    # model gateway: rules by default; Anthropic, Ollama, OpenAI-compatible
-│   ├── secrets/                   # OS keychain store and short-lived token exchange
+│   ├── secrets/                   # keychain and container file stores, short-lived token exchange
 │   └── observability/             # structured logging, tracing, redaction
 │
 ├── apps/                          # process entry points (composition layer)
@@ -502,9 +547,12 @@ PersonalOS/
 │       ├── graphs.py              # default graph factory (WORKER_GRAPHS)
 │       ├── fake_providers.py      # quick-start factory: fake board, extractive drafts
 │       ├── health_monitor.py      # scheduled integration health checks, circuit breakers
+│       ├── heartbeat.py           # liveness file for the container health check
 │       └── unconfigured.py        # stand-ins for ports with no adapter yet
 │
 ├── ui/                            # operator UI: Vite + React + TypeScript (npm run dev)
+│   ├── Dockerfile                 # the UI built and served by nginx (compose `ui` profile)
+│   ├── docker/                    # the nginx config, with the same headers as `npm run preview`
 │   ├── openapi.json               # the API schema, written by scripts/export_openapi.py
 │   ├── src/                       # approvals, board, workflow progress, failures, audit; src/api/schema.d.ts is generated
 │   └── tests/                     # Vitest + Testing Library component tests
@@ -520,8 +568,13 @@ PersonalOS/
 │   ├── golden/                    # golden dataset: per-domain routing, mail, postings, scenarios
 │   └── model_benchmarks/          # model configs, baselines, review ratings
 │
+├── deploy/                        # compose stack configuration
+│   ├── compose.defaults.env       # container settings; override in .env.compose
+│   └── otel/                      # the OpenTelemetry collector's config
+│
 ├── docs/
 │   ├── ARCHITECTURE_BOUNDARIES.md # layer ownership and enforced import rules
+│   ├── CONTAINERS.md              # images, compose, secrets in containers, volumes, reset
 │   ├── AUTHORIZATION.md           # scopes, system identities, actor-scoped stores
 │   ├── LIMITS.md                  # rate limits, concurrency caps, request limits
 │   ├── EVENT_TRANSPORT.md         # the outbox transport and how to swap it
@@ -531,6 +584,8 @@ PersonalOS/
 ├── scripts/
 │   ├── check_boundaries.py        # layer import check (CI)
 │   ├── check_guide_tree.py        # this tree against the repository (CI)
+│   ├── check_image.py             # run inside a built image: non-root, no fakes or dev deps (CI)
+│   ├── smoke_compose.py           # the containerized quick start, end to end (CI)
 │   ├── export_openapi.py          # ui/openapi.json from the FastAPI app (--check in CI)
 │   └── smoke_quickstart.py        # the quick start, end to end (CI)
 │
@@ -1794,7 +1849,7 @@ These fill in the ports the worker reports as unbound at startup.
 
 | # | Issue | Done when |
 | --- | --- | --- |
-| N1 | Container images and compose | `docker compose up` starts the API, the worker, Postgres with pgvector, and a collector |
+| N1 | Container images and compose (done) | `docker compose up` starts the API, the worker, Postgres with pgvector, and a collector; see [docs/CONTAINERS.md](docs/CONTAINERS.md) |
 | N2 | Dashboards and alerts | Dashboards for latency, error rate and dead letters, and alerts on stalled workflows |
 | N3 | Backup and data retention | A scheduled Postgres backup, and a retention policy for the event log, traces and drafts |
 | N4 | Second event transport (optional) | A NATS JetStream or Redis Streams adapter passes the transport contract tests |
@@ -1848,6 +1903,9 @@ Settings come from the environment, then `.env` in the working directory.
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | Use `text` in a terminal. |
 | `TRACING_ENABLED` / `OTEL_EXPORTER_OTLP_ENDPOINT` | `false` / empty | An OTLP/HTTP collector, for example Jaeger at `http://localhost:4318`. |
 | `SECRET_STORE_SERVICE` | `personalos` | The OS keychain service that holds secrets. Never put a secret in `.env`. |
+| `SECRET_STORE_BACKEND` | `keychain` | `file` for containers: secrets are `<provider>.<name>` files in `SECRET_STORE_DIR` (writable) and `SECRET_STORE_READ_ONLY_DIRS` (Docker secrets). See [docs/CONTAINERS.md](docs/CONTAINERS.md#secrets-in-containers). |
+| `DATABASE_PASSWORD_FILE` | empty | A file whose contents replace the password in `DATABASE_URL`. The compose stack uses it. |
+| `WORKER_HEARTBEAT_FILE` / `WORKER_HEARTBEAT_SECONDS` | empty / `10` | A file the worker touches while alive, which `personalos.cli worker-health` checks. The worker image sets it. |
 | `GOOGLE_OAUTH_CLIENT_ID` | empty | A Desktop-app OAuth client. Its secret goes in the keychain via `auth google-client`. |
 | `GOOGLE_OAUTH_PUBLISHING_STATUS` | `testing` | `testing` records Google connections as expiring after 7 days, as Google does for unverified apps. |
 | `MCP_GOOGLE_ENABLED` | `false` | Registers the Gmail and Calendar MCP server. Connect an account first. |

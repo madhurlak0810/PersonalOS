@@ -12,9 +12,21 @@ run on a backend that does not actually protect anything: `keyring` will
 happily fall back to a plaintext file or a null store if nothing better is
 installed, and a secret store that silently became a text file is worse than
 one that fails to start.
+
+`FileSecretStore` is the container store. A container has no OS keychain, so
+there the same references are files: Docker secrets (or any read-only mount)
+for what an operator provides, and a `0700` directory on a volume for what
+PersonalOS writes itself, such as a refresh token from an OAuth connect. The
+database still holds only `cred://` references; the file is named after the
+reference and holds the value. The local CLI keeps using the keychain.
 """
 
 import logging
+import os
+import stat
+import tempfile
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from personalos.domain.credentials import CredentialRef, SecretValue
@@ -110,6 +122,109 @@ class KeyringSecretStore:
         logger.info("deleted credential %s", ref)
 
 
+def secret_file_name(ref: CredentialRef) -> str:
+    """The file a reference is kept in: `<provider>.<name>`.
+
+    Unambiguous because a provider cannot contain a dot, and safe as a single
+    path component because neither part can contain a separator or start with
+    a dot (`CredentialRef` validates both). Checked again here anyway: this is
+    the one place a reference becomes a path.
+    """
+    name = f"{ref.provider}.{ref.name}"
+    if "/" in name or "\\" in name or name.startswith(".") or "\0" in name:
+        raise SecretStoreUnavailable(f"credential reference {ref} is not a safe file name")
+    return name
+
+
+class FileSecretStore:
+    """A `SecretStore` over files, for containers that have no OS keychain.
+
+    `directory` is where secrets are written: created `0700`, each file
+    `0600`, replaced atomically. A file there that group or others can read is
+    refused rather than used, as `FileApiTokenStore` does. `read_only_dirs`
+    are searched after it, for secrets an operator mounts -- Docker secrets in
+    `/run/secrets` -- whose permissions Docker, not this process, controls;
+    they are never written or deleted.
+
+    A secret in `directory` takes precedence, so a token PersonalOS rotated
+    wins over the one it was first given.
+    """
+
+    def __init__(self, directory: Path | str, *, read_only_dirs: Sequence[Path | str] = ()):
+        """Bind to a writable directory and any read-only ones; nothing is touched yet."""
+        self.directory = Path(directory).expanduser()
+        self.read_only_dirs = tuple(Path(d).expanduser() for d in read_only_dirs)
+
+    def _read(self, path: Path, *, check_mode: bool) -> SecretValue | None:
+        try:
+            info = path.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        if not stat.S_ISREG(info.st_mode):
+            raise SecretStoreUnavailable(f"secret {path} is not a regular file")
+        if check_mode and os.name == "posix" and info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise SecretStoreUnavailable(
+                f"secret file {path} is accessible to other users "
+                f"(mode {stat.S_IMODE(info.st_mode):o}); run `chmod 600 {path}`"
+            )
+        value = path.read_text(encoding="utf-8").strip()
+        return SecretValue(value) if value else None
+
+    def get(self, ref: CredentialRef) -> SecretValue | None:
+        """Read a secret: the writable directory first, then each read-only one."""
+        name = secret_file_name(ref)
+        secret = self._read(self.directory / name, check_mode=True)
+        if secret is not None:
+            return secret
+        for directory in self.read_only_dirs:
+            secret = self._read(directory / name, check_mode=False)
+            if secret is not None:
+                return secret
+        return None
+
+    def put(self, ref: CredentialRef, secret: SecretValue) -> None:
+        """Write a secret into the writable directory, `0600`, atomically."""
+        path = self.directory / secret_file_name(ref)
+        try:
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd, temp = tempfile.mkstemp(dir=self.directory, prefix=".secret.")
+        except OSError as error:
+            raise SecretStoreUnavailable(
+                f"secret directory {self.directory} is not writable ({type(error).__name__})"
+            ) from None
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(secret.reveal() + "\n")
+            os.chmod(temp, 0o600)
+            os.replace(temp, path)
+        except BaseException:
+            Path(temp).unlink(missing_ok=True)
+            raise
+        logger.info("stored credential %s", ref)
+
+    def delete(self, ref: CredentialRef) -> None:
+        """Remove a secret from the writable directory; a no-op if absent.
+
+        A secret only a read-only directory holds is left alone (the operator
+        mounted it, and only the operator can remove it), with a warning.
+        """
+        name = secret_file_name(ref)
+        try:
+            (self.directory / name).unlink()
+        except FileNotFoundError:
+            pass
+        else:
+            logger.info("deleted credential %s", ref)
+        for directory in self.read_only_dirs:
+            if (directory / name).exists():
+                logger.warning(
+                    "credential %s is still provided by a read-only mount in %s; "
+                    "remove the Docker secret to delete it",
+                    ref,
+                    directory,
+                )
+
+
 class InMemorySecretStore:
     """A `SecretStore` that forgets everything when the process ends.
 
@@ -139,5 +254,7 @@ __all__ = [
     "SecretStoreUnavailable",
     "SecretStore",
     "KeyringSecretStore",
+    "FileSecretStore",
     "InMemorySecretStore",
+    "secret_file_name",
 ]

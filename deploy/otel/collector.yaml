@@ -1,0 +1,43 @@
+# OpenTelemetry collector for the compose stack (docker-compose.yml).
+#
+# Receives OTLP from the API and the worker on the internal network only (no
+# host port), and prints a one-line summary per batch to the collector's log
+# (`docker compose logs otel-collector`). To ship traces somewhere, add an
+# exporter here -- an `otlphttp` to Jaeger, Tempo or a vendor -- and list it in
+# the pipeline. Spans are already redacted by the app before they leave it.
+
+extensions:
+  # GET :13133/ answers 200 once the pipelines are running. The collector
+  # image has no shell, so compose cannot probe this itself; the CI smoke test
+  # probes it from the API container.
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 200
+  batch: {}
+
+exporters:
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+  telemetry:
+    logs:
+      level: info

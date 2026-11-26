@@ -44,7 +44,7 @@ For the full architecture diagram and the allowed dependency direction between l
 
 - Default-deny policy engine; tools are classed by how recoverable their side effect is, from `read_local` to `destructive`
 - A single tool gateway: no code path reaches a tool without a policy decision
-- Credentials stay in the OS keychain. The rest of the system holds only a reference (`cred://...`), and short-lived tokens are issued at execution time
+- Credentials stay in the OS keychain, or in Docker secrets and a `0700` volume when running in containers. The rest of the system holds only a reference (`cred://...`), and short-lived tokens are issued at execution time
 - Credentials are redacted from logs, traces, checkpoints, and audit payloads
 - File tools are sandboxed to configured roots, with protection against `..` and symlink traversal
 - Every mutating action is idempotent and recorded with the policy decision and approval that authorized it
@@ -85,6 +85,8 @@ Layer boundaries are enforced in CI by `scripts/check_boundaries.py`. See `docs/
 ## Quick start
 
 [`IMPLEMENTATION_GUIDE.md#local-quick-start`](IMPLEMENTATION_GUIDE.md#local-quick-start) takes a fresh clone to a job search waiting on your approval, against a fake job board, with no API keys. `python scripts/smoke_quickstart.py` runs the same walkthrough in one command, and CI runs it on every pull request.
+
+With Docker only, `docker compose up` starts the API, the worker, PostgreSQL with pgvector and an OpenTelemetry collector. The API is on `127.0.0.1` only, and PostgreSQL has no host port. See [`docs/CONTAINERS.md`](docs/CONTAINERS.md), and the [containerized quick start](IMPLEMENTATION_GUIDE.md#containerized-quick-start) for the same walkthrough in containers.
 
 Every API route but `/health` needs the local bearer token (`python -m personalos.cli auth token`), and the API binds to `127.0.0.1` by default; see [Security posture](IMPLEMENTATION_GUIDE.md#security-posture).
 
