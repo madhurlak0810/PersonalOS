@@ -194,9 +194,20 @@ jobs:
           docker rm "$cid" > /dev/null
           docker image inspect personalos-ui:local > image-scan/personalos-ui/image-config.json
           docker history --no-trunc personalos-ui:local > image-scan/personalos-ui/image-history.txt
-          docker run --rm -v "$PWD/image-scan:/scan:ro" \
+          mkdir -p gitleaks-report && chmod 777 gitleaks-report
+          # --verbose prints each finding (file, line, rule); --redact keeps the
+          # matched value itself out of the log and the report.
+          docker run --rm -v "$PWD/image-scan:/scan:ro" -v "$PWD/gitleaks-report:/report" \
             zricethezav/gitleaks:v8.28.0@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854 \
-            dir /scan --no-banner --redact --exit-code 1
+            dir /scan --no-banner --redact --verbose --exit-code 1 \
+            --report-format json --report-path /report/gitleaks.json
+      - name: Upload the secret scan report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: gitleaks-report/gitleaks.json
+          if-no-files-found: ignore
       - name: Compose smoke test
         # Stack up, health checks pass, Postgres unreachable from the host,
         # API on loopback only, the quick start's workflow queued and
