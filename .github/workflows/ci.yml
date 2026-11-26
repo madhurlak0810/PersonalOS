@@ -197,9 +197,12 @@ jobs:
           mkdir -p gitleaks-report && chmod 777 gitleaks-report
           # --verbose prints each finding (file, line, rule); --redact keeps the
           # matched value itself out of the log and the report.
+          # .github/gitleaks-images.toml: the default rules plus narrow
+          # allowlists for checked false positives (base-image public keys).
           docker run --rm -v "$PWD/image-scan:/scan:ro" -v "$PWD/gitleaks-report:/report" \
+            -v "$PWD/.github/gitleaks-images.toml:/gitleaks.toml:ro" \
             zricethezav/gitleaks:v8.28.0@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854 \
-            dir /scan --no-banner --redact --verbose --exit-code 1 \
+            dir /scan --config /gitleaks.toml --no-banner --redact --verbose --exit-code 1 \
             --report-format json --report-path /report/gitleaks.json
       - name: Upload the secret scan report
         if: failure()
