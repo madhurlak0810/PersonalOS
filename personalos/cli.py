@@ -90,6 +90,29 @@ def worker(graphs: str | None):
     main(graphs)
 
 
+@cli.command("worker-health")
+@click.option(
+    "--max-age",
+    default=None,
+    type=click.FloatRange(min=1),
+    help="Seconds a heartbeat may be old (default: 3x WORKER_HEARTBEAT_SECONDS).",
+)
+def worker_health(max_age: float | None):
+    """Exit 0 if the worker's heartbeat file is fresh: its container health check."""
+    from apps.worker.heartbeat import heartbeat_age
+
+    path = settings.worker_heartbeat_file.strip()
+    if not path:
+        raise click.ClickException("WORKER_HEARTBEAT_FILE is not set; the worker writes none")
+    limit = max_age if max_age is not None else 3 * settings.worker_heartbeat_seconds
+    age = heartbeat_age(path)
+    if age is None:
+        raise click.ClickException(f"no worker heartbeat at {path}")
+    if age > limit:
+        raise click.ClickException(f"worker heartbeat is {age:.0f}s old (limit {limit:.0f}s)")
+    click.echo(f"worker alive (heartbeat {age:.1f}s ago)")
+
+
 @cli.command()
 @click.option("--once", is_flag=True, help="Run a single sweep and exit (for cron).")
 def stall_monitor(once: bool):

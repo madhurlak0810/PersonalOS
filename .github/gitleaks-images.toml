@@ -1,0 +1,29 @@
+# Gitleaks config for the container image secret scan (ci.yml, `containers`).
+#
+# The default rules, plus allowlists for findings that were checked and are
+# not secrets. Each entry is narrow: one value pattern, in one kind of file
+# (condition AND), so a real secret anywhere else still fails the scan.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+Public values the base images set: python's GPG_KEY is the fingerprint of the
+public key CPython releases are signed with; nginx's KEY_SHA512 is the checksum
+of nginx's public package signing key.
+"""
+condition = "AND"
+paths = ['''image-(config\.json|history\.txt)$''']
+regexTarget = "line"
+regexes = ['''\bGPG_KEY=[0-9A-F]{40}\b''', '''\bKEY_SHA512="?[0-9a-f]{128}''']
+
+[[allowlists]]
+description = """
+A keyword argument, not a value: `access=access, include_unowned=True` reads to
+generic-api-key as the keyword `access`, a `,` separator and a value.
+"""
+condition = "AND"
+paths = ['''app/apps/api/routes/integrations\.py$''']
+regexTarget = "line"
+regexes = ['''access=access, include_unowned=True''']

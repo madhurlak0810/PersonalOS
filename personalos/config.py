@@ -1,6 +1,9 @@
 """Application configuration."""
 
-from pydantic import field_validator
+from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit
+
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 #: The PostgreSQL DBAPI this project actually installs (`psycopg2-binary`, see
@@ -21,12 +24,34 @@ from pydantic_settings import BaseSettings
 POSTGRES_DRIVER = "psycopg2"
 
 
+def _with_password(url: str, password: str) -> str:
+    """`url` with its password replaced by `password` (percent-encoded).
+
+    Plain `urllib.parse` rather than SQLAlchemy's URL type, because this
+    module is imported by layers that may not reach the database package.
+    """
+    parts = urlsplit(url)
+    if not parts.username:
+        raise ValueError("DATABASE_PASSWORD_FILE is set but DATABASE_URL names no user")
+    host = parts.hostname or ""
+    if ":" in host:  # an IPv6 literal
+        host = f"[{host}]"
+    port = f":{parts.port}" if parts.port else ""
+    netloc = f"{parts.username}:{quote(password, safe='')}@{host}{port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment."""
 
     # Database
     database_url: str = f"postgresql+{POSTGRES_DRIVER}://user:password@localhost:5432/personalos"
     database_echo: bool = False
+    # A file holding the database password, which replaces any password in
+    # DATABASE_URL. For containers: the compose stack generates one on first
+    # run and mounts it, so no password is written in a compose file, an env
+    # file or an image (docs/CONTAINERS.md). Empty uses DATABASE_URL as is.
+    database_password_file: str = ""
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
@@ -232,11 +257,26 @@ class Settings(BaseSettings):
     # that is down or awaiting a reconnect -- waits before it is looked at again.
     integration_circuit_retry_seconds: float = 60.0
     worker_graphs: str = "apps.worker.graphs:build_worker_graphs"
+    # A file the worker touches every `worker_heartbeat_seconds` while its
+    # event loop is alive; `personalos.cli worker-health` checks how old it
+    # is. The container health check uses it. Empty (the default) writes none.
+    worker_heartbeat_file: str = ""
+    worker_heartbeat_seconds: float = 10.0
 
     # Credentials. These name *where* secrets are, never the secrets: refresh
     # tokens, API keys and the OAuth client secret live in the OS keychain
     # under `secret_store_service`, filed by credential reference.
     secret_store_service: str = "personalos"
+    # Which store holds them. `keychain` (the default, and what the local CLI
+    # uses) is the OS keychain. `file` is for containers, which have no
+    # keychain: secrets are files named `<provider>.<name>` after their
+    # `cred://` reference, written `0600` into SECRET_STORE_DIR and also looked
+    # up, read-only, in each of SECRET_STORE_READ_ONLY_DIRS (Docker secrets
+    # are mounted in /run/secrets). The database still holds only references.
+    # See docs/CONTAINERS.md.
+    secret_store_backend: str = "keychain"
+    secret_store_dir: str = ""
+    secret_store_read_only_dirs: list[str] = []
     google_oauth_client_id: str = ""
     google_oauth_client_secret_ref: str = "cred://google-oauth-client/default"
     # `testing` (the default) or `production`: the OAuth client's publishing
@@ -269,6 +309,23 @@ class Settings(BaseSettings):
         if value.startswith(prefix):
             return f"postgresql+{POSTGRES_DRIVER}://{value[len(prefix) :]}"
         return value
+
+    @model_validator(mode="after")
+    def _read_the_database_password_file(self) -> "Settings":
+        """Put the password from DATABASE_PASSWORD_FILE into the database URL."""
+        path = self.database_password_file.strip()
+        if not path:
+            return self
+        try:
+            password = Path(path).read_text(encoding="utf-8").strip()
+        except OSError as error:
+            raise ValueError(
+                f"DATABASE_PASSWORD_FILE {path} cannot be read ({type(error).__name__})"
+            ) from None
+        if not password:
+            raise ValueError(f"DATABASE_PASSWORD_FILE {path} is empty")
+        self.database_url = _with_password(self.database_url, password)
+        return self
 
     class Config:
         env_file = ".env"

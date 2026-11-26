@@ -168,7 +168,12 @@ from personalos.secrets.exchange import (
     TokenExchanger,
 )
 from personalos.secrets.google_oauth import GoogleOAuthClient
-from personalos.secrets.store import KeyringSecretStore, SecretStore
+from personalos.secrets.store import (
+    FileSecretStore,
+    KeyringSecretStore,
+    SecretStore,
+    SecretStoreUnavailable,
+)
 from personalos.tools.gateway import (
     PolicyEnforcingToolGateway,
     RoutingToolInvoker,
@@ -606,14 +611,30 @@ API_KEY_PROVIDERS: tuple[str, ...] = ("greenhouse", "lever", "jobs")
 
 
 def build_secret_store() -> SecretStore:
-    """Build the OS-keychain secret store.
+    """Build the secret store `SECRET_STORE_BACKEND` names.
 
-    Raises `SecretStoreUnavailable` when there is no protected backend. There
-    is no fallback to an in-memory or file store here, on purpose: a
-    deployment that cannot protect its refresh tokens should fail to start,
-    not start with them somewhere else.
+    `keychain` (the default) is the OS keychain, and raises
+    `SecretStoreUnavailable` when there is no protected backend. `file` is the
+    container store (`FileSecretStore`): it is chosen explicitly, never as a
+    fallback. A deployment that cannot protect its refresh tokens should fail
+    to start, not start with them somewhere else.
     """
-    return KeyringSecretStore(settings.secret_store_service)
+    kind = settings.secret_store_backend.strip().lower()
+    if kind == "keychain":
+        return KeyringSecretStore(settings.secret_store_service)
+    if kind == "file":
+        if not settings.secret_store_dir.strip():
+            raise SecretStoreUnavailable(
+                "SECRET_STORE_BACKEND=file needs SECRET_STORE_DIR, the directory secrets "
+                "are written to"
+            )
+        return FileSecretStore(
+            settings.secret_store_dir.strip(),
+            read_only_dirs=[d for d in settings.secret_store_read_only_dirs if d.strip()],
+        )
+    raise SecretStoreUnavailable(
+        f"SECRET_STORE_BACKEND must be 'keychain' or 'file', not {settings.secret_store_backend!r}"
+    )
 
 
 def build_local_api_token() -> LocalApiToken:

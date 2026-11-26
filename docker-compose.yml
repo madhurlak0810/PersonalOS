@@ -1,0 +1,220 @@
+# PersonalOS stack: `docker compose up` (see docs/CONTAINERS.md).
+#
+#   postgres        PostgreSQL 16 with pgvector; internal network only, no host port
+#   db-password     one-shot: generates the database password on first run
+#   migrate         one-shot: `alembic upgrade head`; the API and worker wait for it
+#   api             the API, published on 127.0.0.1 only
+#   worker          workflow runs, outbox delivery, scheduled sweeps
+#   otel-collector  receives the API's and worker's traces (internal only)
+#   ollama          optional, `--profile ollama`: local models and embeddings
+#   ui              optional, `--profile ui`: the operator UI, on 127.0.0.1 only
+#
+# Settings: deploy/compose.defaults.env, then your own `.env.compose` if it
+# exists (it is gitignored). Put job boards, the model config and so on
+# there; never a secret value. Secrets are Docker secrets or files on the
+# `personalos-secrets` volume, read through the same SecretStore and named by
+# the same cred:// references the database stores (docs/CONTAINERS.md).
+#
+# Host ports and image tags can be changed with environment variables named
+# PERSONALOS_* (prefixed so a quick-start `.env` cannot change them by
+# accident): PERSONALOS_API_PORT, PERSONALOS_UI_PORT, PERSONALOS_IMAGE_TAG.
+
+name: personalos
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+
+x-app: &app
+  <<: *hardening
+  restart: unless-stopped
+  env_file:
+    - path: deploy/compose.defaults.env
+    - path: .env.compose
+      required: false
+  # The stack's own wiring: set here, after the env files, so they cannot
+  # point the containers somewhere the stack does not provide.
+  environment:
+    DATABASE_URL: postgresql://personalos@postgres:5432/personalos
+    DATABASE_PASSWORD_FILE: /run/personalos-db/password
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+    SECRET_STORE_BACKEND: file
+    SECRET_STORE_DIR: /var/lib/personalos/secrets
+    SECRET_STORE_READ_ONLY_DIRS: '["/run/secrets"]'
+    API_TOKEN_STORE: file
+    API_TOKEN_FILE: /var/lib/personalos/secrets/api-token
+    API_HOST: 0.0.0.0
+    API_PORT: "8000"
+  volumes:
+    - personalos-secrets:/var/lib/personalos/secrets
+    - db-password:/run/personalos-db:ro
+  networks: [backend, egress]
+
+services:
+  db-password:
+    # Writes a random password into the `db-password` volume unless one is
+    # already there. Postgres initializes its data directory with it, and the
+    # app reads it through DATABASE_PASSWORD_FILE. No network at all.
+    <<: *hardening
+    # The `api` target again. No `image:` here or on `migrate`: each one-shot
+    # gets its own compose-named image from the same (cached) build, so no
+    # two services tag one image.
+    build:
+      context: .
+      target: api
+    network_mode: none
+    restart: "no"
+    healthcheck:
+      disable: true
+    volumes:
+      - db-password:/var/lib/personalos/db
+    command:
+      - python
+      - -c
+      - |
+        import os, secrets
+        path = "/var/lib/personalos/db/password"
+        if not os.path.exists(path):
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+            os.write(fd, (secrets.token_hex(32) + "\n").encode())
+            os.close(fd)
+            print("generated the database password")
+        else:
+            print("database password already present")
+
+  postgres:
+    image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
+    restart: unless-stopped
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    environment:
+      POSTGRES_USER: personalos
+      POSTGRES_DB: personalos
+      POSTGRES_PASSWORD_FILE: /run/personalos-db/password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - db-password:/run/personalos-db:ro
+    # Internal network only and no `ports:`: nothing on the host can reach it.
+    # To inspect it: `docker compose exec postgres psql -U personalos`.
+    networks: [backend]
+    depends_on:
+      db-password:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U personalos -d personalos -h 127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  migrate:
+    <<: *app
+    build:
+      context: .
+      target: api
+    restart: "no"
+    healthcheck:
+      disable: true
+    command: ["alembic", "upgrade", "head"]
+    networks: [backend]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    image: personalos-api:${PERSONALOS_IMAGE_TAG:-local}
+    build:
+      context: .
+      target: api
+    # Loopback only. The API listens on 0.0.0.0 *inside* its container so
+    # this mapping can reach it; it refuses that bind unless auth is on.
+    ports:
+      - "127.0.0.1:${PERSONALOS_API_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      # The collector image has no shell for a health check, and an absent
+      # collector only means spans are dropped, so started is enough.
+      otel-collector:
+        condition: service_started
+
+  worker:
+    <<: *app
+    image: personalos-worker:${PERSONALOS_IMAGE_TAG:-local}
+    build:
+      context: .
+      target: worker
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.139.0@sha256:faf125d656fa47cea568b2f3b4494efd2525083bc75c1e96038bc23f05cd68fd
+    restart: unless-stopped
+    <<: *hardening
+    command: ["--config=/etc/otelcol/collector.yaml"]
+    volumes:
+      - ./deploy/otel/collector.yaml:/etc/otelcol/collector.yaml:ro
+    # Internal only. To export to a backend outside the stack, add `egress`.
+    networks: [backend]
+
+  ollama:
+    profiles: [ollama]
+    image: ollama/ollama:0.12.10@sha256:e8c3d1f6ad16323bc40dc63eff0701d4fc32113f75a86b54b3e836eef8290de6
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ollama-models:/root/.ollama
+    # No host port: the API and worker reach it as http://ollama:11434. It
+    # needs `egress` to pull models.
+    networks: [backend, egress]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  ui:
+    profiles: [ui]
+    image: personalos-ui:${PERSONALOS_IMAGE_TAG:-local}
+    build:
+      context: ui
+      args:
+        VITE_API_BASE_URL: http://127.0.0.1:${PERSONALOS_API_PORT:-8000}
+    <<: *hardening
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PERSONALOS_UI_PORT:-5173}:8080"
+    networks: [egress]
+    depends_on:
+      api:
+        condition: service_healthy
+
+networks:
+  # Postgres, the collector and the app talk here. `internal`: no route out.
+  backend:
+    internal: true
+  # For what must reach the internet (job boards, Google, model downloads)
+  # and for published ports, which an internal network cannot have.
+  egress: {}
+
+volumes:
+  # Reset everything: `docker compose down -v` (docs/CONTAINERS.md).
+  postgres-data:
+  db-password:
+  personalos-secrets:
+  ollama-models:

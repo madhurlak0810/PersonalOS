@@ -7,6 +7,7 @@ composition root may import this package.
 from .exchange import ApiKeyExchanger, GoogleOAuthTokenExchanger, TokenExchanger
 from .store import (
     DEFAULT_SERVICE_NAME,
+    FileSecretStore,
     InMemorySecretStore,
     KeyringSecretStore,
     SecretStore,
@@ -18,6 +19,7 @@ __all__ = [
     "SecretStore",
     "SecretStoreUnavailable",
     "KeyringSecretStore",
+    "FileSecretStore",
     "InMemorySecretStore",
     "TokenExchanger",
     "GoogleOAuthTokenExchanger",

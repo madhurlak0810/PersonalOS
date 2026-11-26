@@ -1,0 +1,20 @@
+# The containerized quick start: the stack with the worker on the fake job
+# board and the extractive draft writer, and the sample resume and profile
+# baked into that worker's image. Not for real use. See
+# IMPLEMENTATION_GUIDE.md#containerized-quick-start; CI's compose smoke test
+# runs the same thing.
+#
+#   docker compose -f docker-compose.yml -f compose.quickstart.yml up -d --wait
+
+services:
+  worker:
+    image: personalos-worker-quickstart:${PERSONALOS_IMAGE_TAG:-local}
+    build:
+      context: .
+      target: worker-quickstart
+    environment:
+      WORKER_GRAPHS: apps.worker.fake_providers:build_worker_graphs
+      FILES_ALLOWED_ROOTS: '["/app/docs/quickstart"]'
+      EMBEDDING_PROVIDER: hashing
+      LLM_GATEWAY_CONFIG: ""
+      WORKER_IDLE_SECONDS: "0.2"
