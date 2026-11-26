@@ -157,7 +157,13 @@ jobs:
       - name: Install the smoke test's client
         run: pip install "httpx>=0.25"
       - name: Build the images
-        run: $COMPOSE build
+        # Twice: the quick start override replaces the worker's image with
+        # `worker-quickstart`, so the production `worker` image only comes
+        # from the base file. The shared stages are cached, so the second
+        # build is quick.
+        run: |
+          docker compose --profile ui build
+          $COMPOSE build
       - name: Image checks (non-root, no fakes, no dev dependencies)
         run: |
           for image in personalos-api:local personalos-worker:local; do
